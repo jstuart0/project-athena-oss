@@ -84,13 +84,12 @@ class DeviceSessionManager:
                 del self.device_sessions[device_id]
                 logger.info(
                     "device_session_forced_new",
-                    device_id=device_id,
                     old_session_id=old_session_id
                 )
             return None
 
         if device_id not in self.device_sessions:
-            logger.debug("device_session_not_found", device_id=device_id)
+            logger.debug("device_session_not_found")
             return None
 
         session_info = self.device_sessions[device_id]
@@ -104,7 +103,6 @@ class DeviceSessionManager:
             del self.device_sessions[device_id]
             logger.info(
                 "device_session_expired_timeout",
-                device_id=device_id,
                 session_id=session_id,
                 seconds_inactive=time_since_activity
             )
@@ -117,7 +115,6 @@ class DeviceSessionManager:
             del self.device_sessions[device_id]
             logger.info(
                 "device_session_expired_age",
-                device_id=device_id,
                 session_id=session_id,
                 age_seconds=session_age
             )
@@ -126,7 +123,6 @@ class DeviceSessionManager:
         session_id = session_info["session_id"]
         logger.debug(
             "device_session_found",
-            device_id=device_id,
             session_id=session_id,
             age_seconds=session_age,
             inactive_seconds=time_since_activity
@@ -158,7 +154,6 @@ class DeviceSessionManager:
             }
             logger.info(
                 "device_session_created",
-                device_id=device_id,
                 session_id=session_id
             )
         else:
@@ -169,7 +164,6 @@ class DeviceSessionManager:
 
             logger.debug(
                 "device_session_updated",
-                device_id=device_id,
                 session_id=session_id,
                 interaction_count=self.device_sessions[device_id]["interaction_count"]
             )
@@ -198,7 +192,6 @@ class DeviceSessionManager:
             del self.device_sessions[device_id]
             logger.info(
                 "device_session_cleared",
-                device_id=device_id,
                 session_id=session_id
             )
             return True
@@ -246,7 +239,6 @@ class DeviceSessionManager:
                     del self.device_sessions[device_id]
                     logger.info(
                         "device_session_cleaned_up",
-                        device_id=device_id,
                         session_id=session_id,
                         reason=reason,
                         duration_seconds=duration

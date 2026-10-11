@@ -19,7 +19,9 @@ _debug_log_path = None
 # Loggers whose INFO lines are full request URLs, query string included
 # (uvicorn's access log; httpx/httpcore client request lines). A query
 # string can carry a location or an API key, so they log WARNING and up.
-REQUEST_URL_LOGGERS = ("uvicorn.access", "httpx", "httpcore")
+# The websockets loggers are here for the same reason: at DEBUG they log
+# every frame, and Home Assistant's auth frame carries the access token.
+REQUEST_URL_LOGGERS = ("uvicorn.access", "httpx", "httpcore", "websockets", "websockets.client")
 _REQUEST_URL_LOGGERS = REQUEST_URL_LOGGERS
 
 _QUERY_STRING = re.compile(r"\?[^\s\"']*")

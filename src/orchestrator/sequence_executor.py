@@ -326,7 +326,7 @@ class SequenceExecutor:
         room = target.get('room')
         entity_id = target.get('entity_id')
 
-        logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} in {room or entity_id}")
+        logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} (has_room={bool(room)})")
 
         if entity_id:
             # Direct entity control: gated on its own target like every
@@ -344,6 +344,11 @@ class SequenceExecutor:
                 'parameters': parameters,
                 'color_description': parameters.get('color_description')
             }
+            # The room was decided when the sequence was planned; the executor
+            # never decides (and never asks).
+            for key in ('decided_room', 'decided_rooms', 'decided_excluded', 'room_label', 'rooms', 'excluded_rooms'):
+                if key in target:
+                    intent[key] = target[key]
             return await self.smart_controller.execute_intent(intent, self.ha_client)
 
     async def _execute_direct_action(self, entity_id: str, action: str, parameters: Dict):

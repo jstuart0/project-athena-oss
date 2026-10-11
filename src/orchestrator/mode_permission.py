@@ -735,6 +735,13 @@ class PermissionScope:
     fanout_block: Any = None
     can_carry_pending: bool = False
     confirmed_entity_ids: Optional[frozenset] = None
+    # Set by room_choice only: the "which one?" a write turn asked, and the
+    # same question asked by a read-only (state question) turn.
+    room_choice: Any = None
+    room_clarification: Any = None
+    # Server-set: the gateway judged this a trusted voice caller. Only then
+    # does an owner's "all the lights" reach every area's lamps.
+    trusted_voice: bool = False
 
 
 def degraded_permissions() -> Dict[str, Any]:
@@ -921,6 +928,7 @@ def ha_permission_scope(
     session_id: Optional[str] = None,
     read_only: bool = False,
     utterance: Any = None,
+    trusted_voice: bool = False,
 ):
     """Open a new PermissionScope for the duration of the with-block.
 
@@ -945,6 +953,7 @@ def ha_permission_scope(
         session_id=session_id,
         read_only=read_only,
         utterance=utterance,
+        trusted_voice=trusted_voice,
     )
     token = _ha_permission_scope_var.set(scope)
     try:

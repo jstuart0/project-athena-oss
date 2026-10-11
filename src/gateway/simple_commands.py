@@ -2,29 +2,24 @@
 Simple command detection and execution for HA voice fast-path.
 
 Detects patterns like:
-- "Turn on/off [device]"
-- "Set [device] to [value]"
-- "What time is it?"
-- "Good morning/night"
+- "What time is it?" / "What's the date?"
+- "Good morning/night", "hello", "thanks"
 
-Executes directly against HA API without orchestrator.
+These are replies only: nothing here talks to Home Assistant. Device control
+(turn on/off, set) always goes to the orchestrator, which decides the room,
+authorizes every write and applies the fan-out gate.
 """
 
 import re
-import os
 from typing import Optional, Tuple
-import httpx
 import structlog
 
-from gateway.mode_gate import fast_path_allowed
 from shared.local_time import local_now
 
 logger = structlog.get_logger("gateway.simple_commands")
 
 # Simple command patterns
 PATTERNS = {
-    "turn_on": re.compile(r"(?:turn|switch)\s+on\s+(?:the\s+)?(.+)", re.IGNORECASE),
-    "turn_off": re.compile(r"(?:turn|switch)\s+off\s+(?:the\s+)?(.+)", re.IGNORECASE),
     "time": re.compile(r"what(?:'s|\s+is)\s+the\s+time|what\s+time\s+is\s+it", re.IGNORECASE),
     "date": re.compile(r"what(?:'s|\s+is)\s+(?:the\s+)?(?:today'?s?\s+)?date|what\s+day\s+is\s+(?:it|today)", re.IGNORECASE),
     "greeting_morning": re.compile(r"good\s+morning", re.IGNORECASE),
@@ -32,37 +27,6 @@ PATTERNS = {
     "greeting_hello": re.compile(r"^(?:hello|hi|hey)(?:\s+(?:there|jarvis|athena))?[.!?]?$", re.IGNORECASE),
     "thank_you": re.compile(r"^(?:thanks?(?:\s+you)?|thank\s+you(?:\s+(?:very\s+much|so\s+much))?)[.!?]?$", re.IGNORECASE),
 }
-
-# Device name to entity_id mapping (common patterns)
-DEVICE_MAPPINGS = {
-    "kitchen lights": "light.kitchen",
-    "kitchen light": "light.kitchen",
-    "kitchen": "light.kitchen",
-    "living room lights": "light.living_room",
-    "living room light": "light.living_room",
-    "living room": "light.living_room",
-    "bedroom lights": "light.bedroom",
-    "bedroom light": "light.bedroom",
-    "bedroom": "light.bedroom",
-    "office lights": "light.office",
-    "office light": "light.office",
-    "office": "light.office",
-    "master bedroom lights": "light.master_bedroom",
-    "master bedroom light": "light.master_bedroom",
-    "master bedroom": "light.master_bedroom",
-    "dining room lights": "light.dining_room",
-    "dining room light": "light.dining_room",
-    "dining room": "light.dining_room",
-    "bathroom lights": "light.bathroom",
-    "bathroom light": "light.bathroom",
-    "bathroom": "light.bathroom",
-    "hallway lights": "light.hallway",
-    "hallway light": "light.hallway",
-    "hallway": "light.hallway",
-    "all lights": "light.all",
-    "lights": "light.all",
-}
-
 
 async def detect_simple_command(query: str) -> Optional[Tuple[str, dict]]:
     """
@@ -76,13 +40,9 @@ async def detect_simple_command(query: str) -> Optional[Tuple[str, dict]]:
 
     # Check each pattern
     for pattern_name, pattern in PATTERNS.items():
-        match = pattern.match(query) if pattern_name not in ["turn_on", "turn_off"] else pattern.match(query)
+        match = pattern.match(query)
         if match:
-            if pattern_name == "turn_on":
-                return ("turn_on", {"device": match.group(1).strip()})
-            elif pattern_name == "turn_off":
-                return ("turn_off", {"device": match.group(1).strip()})
-            elif pattern_name in ["time", "date"]:
+            if pattern_name in ["time", "date"]:
                 return (pattern_name, {})
             elif pattern_name.startswith("greeting"):
                 return ("greeting", {"type": pattern_name})
@@ -92,131 +52,12 @@ async def detect_simple_command(query: str) -> Optional[Tuple[str, dict]]:
     return None
 
 
-async def execute_simple_command(
-    command_type: str,
-    params: dict,
-    ha_client: Optional[httpx.AsyncClient],
-    ha_url: str,
-    ha_token: str
-) -> Optional[str]:
+async def execute_simple_command(command_type: str, params: dict) -> Optional[str]:
     """
-    Execute simple command directly against HA API.
-
-    ATHENA-69 D17: for turn_on/turn_off, this bypasses the orchestrator (and
-    therefore every server-derived permission check) to call HA directly.
-    Two independent gates apply before any HA call: the resolved entity must
-    be a light (CONTROL_DEVICE_DOMAINS parity with the orchestrator's
-    whole-house scope), and the mode service must confirm the house is
-    currently in owner mode (fast_path_allowed(), fail-closed). Either gate
-    failing returns None -- the caller already falls through to the
-    orchestrator, which re-derives mode/permissions itself.
-
-    Returns:
-        Response text if successful, None if failed
+    Answer a simple command locally. Returns the reply text, or None for a
+    command type this module doesn't answer.
     """
-    headers = {"Authorization": f"Bearer {ha_token}"}
-
-    if command_type == "turn_on":
-        device = params["device"]
-        entity_id = _resolve_device_to_entity(device)
-        if entity_id and not entity_id.startswith("light."):
-            logger.info(
-                "simple_command_fast_path_refused",
-                command="turn_on", device=device, entity_id=entity_id,
-                reason="not_light_domain",
-            )
-            return None
-        if entity_id and not await fast_path_allowed():
-            logger.info(
-                "simple_command_fast_path_refused",
-                command="turn_on", device=device, entity_id=entity_id,
-                reason="mode_service_not_owner",
-            )
-            return None
-        if entity_id:
-            try:
-                if ha_client:
-                    resp = await ha_client.post(
-                        f"{ha_url}/api/services/homeassistant/turn_on",
-                        headers=headers,
-                        json={"entity_id": entity_id}
-                    )
-                else:
-                    async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                        resp = await client.post(
-                            f"{ha_url}/api/services/homeassistant/turn_on",
-                            headers=headers,
-                            json={"entity_id": entity_id}
-                        )
-                if resp.status_code >= 400:
-                    logger.warning(
-                        "simple_command_ha_call_failed",
-                        command="turn_on", device=device, entity_id=entity_id,
-                        status_code=resp.status_code,
-                    )
-                    return None
-                logger.info("simple_command_executed", command="turn_on", device=device, entity_id=entity_id)
-                return f"I've turned on the {device}."
-            except Exception as e:
-                logger.warning(
-                    "simple_command_ha_call_error",
-                    command="turn_on", device=device, entity_id=entity_id,
-                    error_type=type(e).__name__,
-                )
-                return None
-        return None
-
-    elif command_type == "turn_off":
-        device = params["device"]
-        entity_id = _resolve_device_to_entity(device)
-        if entity_id and not entity_id.startswith("light."):
-            logger.info(
-                "simple_command_fast_path_refused",
-                command="turn_off", device=device, entity_id=entity_id,
-                reason="not_light_domain",
-            )
-            return None
-        if entity_id and not await fast_path_allowed():
-            logger.info(
-                "simple_command_fast_path_refused",
-                command="turn_off", device=device, entity_id=entity_id,
-                reason="mode_service_not_owner",
-            )
-            return None
-        if entity_id:
-            try:
-                if ha_client:
-                    resp = await ha_client.post(
-                        f"{ha_url}/api/services/homeassistant/turn_off",
-                        headers=headers,
-                        json={"entity_id": entity_id}
-                    )
-                else:
-                    async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                        resp = await client.post(
-                            f"{ha_url}/api/services/homeassistant/turn_off",
-                            headers=headers,
-                            json={"entity_id": entity_id}
-                        )
-                if resp.status_code >= 400:
-                    logger.warning(
-                        "simple_command_ha_call_failed",
-                        command="turn_off", device=device, entity_id=entity_id,
-                        status_code=resp.status_code,
-                    )
-                    return None
-                logger.info("simple_command_executed", command="turn_off", device=device, entity_id=entity_id)
-                return f"I've turned off the {device}."
-            except Exception as e:
-                logger.warning(
-                    "simple_command_ha_call_error",
-                    command="turn_off", device=device, entity_id=entity_id,
-                    error_type=type(e).__name__,
-                )
-                return None
-        return None
-
-    elif command_type == "time":
+    if command_type == "time":
         now = local_now()
         hour = now.strftime('%I').lstrip('0')  # Remove leading zero from hour
         minute = now.minute
@@ -244,22 +85,5 @@ async def execute_simple_command(
 
     elif command_type == "thank_you":
         return "You're welcome! Is there anything else I can help with?"
-
-    return None
-
-
-def _resolve_device_to_entity(device_name: str) -> Optional[str]:
-    """Resolve friendly device name to HA entity_id."""
-    device_lower = device_name.lower().strip()
-
-    # Check direct mapping first
-    if device_lower in DEVICE_MAPPINGS:
-        return DEVICE_MAPPINGS[device_lower]
-
-    # Try to construct entity_id from device name
-    # e.g., "kitchen lights" -> "light.kitchen"
-    normalized = device_lower.replace(" ", "_").replace("lights", "").replace("light", "").strip("_")
-    if normalized:
-        return f"light.{normalized}"
 
     return None

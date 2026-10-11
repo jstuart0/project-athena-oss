@@ -1,0 +1,414 @@
+{
+ "_comment": "Fictional house. Shapes follow Home Assistant's config/*_registry/list results; not captured from a live instance.",
+ "devices_by_name": {
+  "galley_hub": "00000000000000000000000000000001",
+  "study_sat": "00000000000000000000000000000002",
+  "study_sat_child": "00000000000000000000000000000003",
+  "other_area_dev": "00000000000000000000000000000004",
+  "chain_a": "00000000000000000000000000000005",
+  "chain_b": "00000000000000000000000000000006",
+  "chain_c": "00000000000000000000000000000007",
+  "cycle_x": "00000000000000000000000000000008",
+  "cycle_y": "00000000000000000000000000000009",
+  "child_own": "0000000000000000000000000000000a",
+  "reduced_child": "0000000000000000000000000000000b",
+  "new_style": "0000000000000000000000000000000c",
+  "cafe_dev": "0000000000000000000000000000000d",
+  "digits_dev": "0000000000000000000000000000000e",
+  "orphan": "0000000000000000000000000000000f"
+ },
+ "areas": [
+  {
+   "area_id": "area_galley",
+   "name": "Galley",
+   "aliases": [
+    "Kitchenette"
+   ],
+   "floor_id": null,
+   "icon": null,
+   "labels": [],
+   "picture": null
+  },
+  {
+   "area_id": "area_study",
+   "name": "Study",
+   "aliases": [
+    "Den"
+   ]
+  },
+  {
+   "area_id": "area_north_bath",
+   "name": "North Bathroom",
+   "aliases": []
+  },
+  {
+   "area_id": "area_south_bath",
+   "name": "South Bathroom",
+   "aliases": []
+  },
+  {
+   "area_id": "area_lower_bath",
+   "name": "Lower Bathroom",
+   "aliases": []
+  },
+  {
+   "area_id": "area_living_dash",
+   "name": "Living-Room",
+   "aliases": []
+  },
+  {
+   "area_id": "area_living_space",
+   "name": "Living Room",
+   "aliases": []
+  },
+  {
+   "area_id": "area_digits",
+   "name": "2",
+   "aliases": []
+  },
+  {
+   "area_id": "area_cafe",
+   "name": "Café",
+   "aliases": [
+    "Cafe Nook"
+   ]
+  }
+ ],
+ "devices": [
+  {
+   "id": "00000000000000000000000000000001",
+   "area_id": "area_galley",
+   "name": "Galley Hub",
+   "manufacturer": "Acme",
+   "model": "Hub",
+   "via_device_id": null,
+   "config_entries": [
+    "c1"
+   ],
+   "parent_device_id": null
+  },
+  {
+   "id": "00000000000000000000000000000002",
+   "area_id": "area_study",
+   "name": "Study Voice",
+   "manufacturer": "Acme",
+   "model": "Voice",
+   "config_entries": [
+    "c2"
+   ],
+   "parent_device_id": null
+  },
+  {
+   "id": "00000000000000000000000000000003",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000002"
+  },
+  {
+   "id": "00000000000000000000000000000004",
+   "area_id": "area_lower_bath",
+   "name": "Lower Strip",
+   "config_entries": [
+    "c3"
+   ],
+   "parent_device_id": null
+  },
+  {
+   "id": "00000000000000000000000000000005",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000006"
+  },
+  {
+   "id": "00000000000000000000000000000006",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000007"
+  },
+  {
+   "id": "00000000000000000000000000000007",
+   "area_id": "area_north_bath",
+   "parent_device_id": null
+  },
+  {
+   "id": "00000000000000000000000000000008",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000009"
+  },
+  {
+   "id": "00000000000000000000000000000009",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000008"
+  },
+  {
+   "id": "0000000000000000000000000000000a",
+   "area_id": "area_south_bath",
+   "parent_device_id": "00000000000000000000000000000001"
+  },
+  {
+   "id": "0000000000000000000000000000000b",
+   "area_id": null,
+   "parent_device_id": "00000000000000000000000000000001"
+  },
+  {
+   "id": "0000000000000000000000000000000c",
+   "area_id": "area_lower_bath",
+   "config_entry_id": "c9",
+   "config_subentry_id": null
+  },
+  {
+   "id": "0000000000000000000000000000000d",
+   "area_id": "area_cafe"
+  },
+  {
+   "id": "0000000000000000000000000000000e",
+   "area_id": "area_digits"
+  },
+  {
+   "id": "0000000000000000000000000000000f",
+   "area_id": null
+  }
+ ],
+ "entities": [
+  {
+   "entity_id": "light.galley_all",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.galley_pair",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.galley_bulb_1",
+   "device_id": "00000000000000000000000000000001",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.galley_bulb_2",
+   "device_id": "00000000000000000000000000000001",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.galley_relay_1",
+   "device_id": "00000000000000000000000000000001",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.disabled_lamp",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": "user",
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.hidden_lamp",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": null,
+   "hidden_by": "integration",
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.config_light",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": "config",
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "fan.galley_fan",
+   "device_id": null,
+   "area_id": "area_galley",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.light_1",
+   "device_id": "0000000000000000000000000000000d",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.lamp",
+   "device_id": "00000000000000000000000000000004",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.override_lamp",
+   "device_id": "00000000000000000000000000000004",
+   "area_id": "area_north_bath",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.study_lamp",
+   "device_id": null,
+   "area_id": "area_study",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.study_voice_led",
+   "device_id": "00000000000000000000000000000002",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "assist_satellite.study_voice",
+   "device_id": "00000000000000000000000000000002",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.study_ring_child",
+   "device_id": "00000000000000000000000000000003",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "assist_satellite.study_child_mic",
+   "device_id": "00000000000000000000000000000003",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "switch.study_plug",
+   "device_id": null,
+   "area_id": "area_study",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.chain_lamp",
+   "device_id": "00000000000000000000000000000005",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.cycle_lamp",
+   "device_id": "00000000000000000000000000000008",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.child_own_lamp",
+   "device_id": "0000000000000000000000000000000a",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.reduced_child_lamp",
+   "device_id": "0000000000000000000000000000000b",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.newstyle_lamp",
+   "device_id": "0000000000000000000000000000000c",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.digits_lamp",
+   "device_id": "0000000000000000000000000000000e",
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.no_device_no_area",
+   "device_id": null,
+   "area_id": null,
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.living_dash_lamp",
+   "device_id": null,
+   "area_id": "area_living_dash",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  },
+  {
+   "entity_id": "light.living_space_lamp",
+   "device_id": null,
+   "area_id": "area_living_space",
+   "entity_category": null,
+   "hidden_by": null,
+   "disabled_by": null,
+   "platform": "demo"
+  }
+ ]
+}

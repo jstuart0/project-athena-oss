@@ -37,6 +37,9 @@ from orchestrator.utterance_kind import (
 
 logger = structlog.get_logger(__name__)
 
+# A browser or an unresolved room has no speaker to play on.
+_NO_PLAYBACK_ROOM = ("jarvis_web", "unknown", "guest")
+
 
 _MUSIC_COMMANDS = {
     "pause": "pause the music",
@@ -179,19 +182,23 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                     media_type = intent_data.get("media_type", "artist")
 
                     # Play on the room speaker (fallback since browser streaming not supported)
-                    target_room = state.room if state.room and state.room != "jarvis_web" else "office"
-                    result = await music_handler.handle_play(
-                        media_type=media_type,
-                        media_id=media_id,
-                        room=target_room,
-                        radio_mode=intent_data.get("radio_mode", True)
-                    )
+                    target_room = state.room if state.room and state.room.lower() not in _NO_PLAYBACK_ROOM else None
+                    if target_room is None:
+                        state.answer = "Which room should I play it in?"
+                        state.retrieved_data = {"music_intent": intent_data}
+                    else:
+                        result = await music_handler.handle_play(
+                            media_type=media_type,
+                            media_id=media_id,
+                            room=target_room,
+                            radio_mode=intent_data.get("radio_mode", True)
+                        )
 
-                    state.answer = f"Playing {media_id} on {target_room}."
-                    state.retrieved_data = {
-                        "music_intent": intent_data,
-                        "playback_room": target_room
-                    }
+                        state.answer = f"Playing {media_id} on {target_room}."
+                        state.retrieved_data = {
+                            "music_intent": intent_data,
+                            "playback_room": target_room
+                        }
 
                 else:
                     # Check if this is a room group request

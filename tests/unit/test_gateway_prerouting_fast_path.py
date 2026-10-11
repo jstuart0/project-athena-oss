@@ -22,6 +22,8 @@ sys.modules.setdefault("prometheus_client", mock.MagicMock())
 os.environ.setdefault("SERVICE_API_KEY", "test-key-gateway-prerouting")
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
+from starlette.requests import Request  # noqa: E402
+
 import gateway.main as gw  # noqa: E402
 
 
@@ -47,12 +49,16 @@ def rig(monkeypatch):
     monkeypatch.setattr(gw, "route_to_orchestrator", orchestrate)
     monkeypatch.setattr(gw, "prerouting_skipped_total", skipped)
     monkeypatch.setattr(gw, "device_session_mgr", sessions)
-    monkeypatch.setattr(gw, "_detect_room_from_active_satellite", mock.AsyncMock(return_value="kitchen"))
+    monkeypatch.setattr(
+        gw.speaker_room, "resolve_speaker_room",
+        mock.AsyncMock(return_value=gw.speaker_room.SpeakerRoom("kitchen", "map")),
+    )
     return SimpleNamespace(flags=flags, classify=classify, simple=simple, orchestrate=orchestrate, skipped=skipped)
 
 
 def _ask(text):
-    return asyncio.run(gw.ha_conversation(gw.HAConversationRequest(text=text, device_id="kitchen")))
+    raw = Request({"type": "http", "headers": [], "client": ("127.0.0.1", 50000)})
+    return asyncio.run(gw.ha_conversation(gw.HAConversationRequest(text=text, device_id="kitchen"), raw))
 
 
 @pytest.mark.parametrize("text", [

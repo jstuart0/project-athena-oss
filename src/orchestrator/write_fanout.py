@@ -7,14 +7,14 @@ the bound, the caller gets back a confirmation prompt (when the surface
 and session can carry a follow-up, D14/D16) or an exact rewording
 (everyone else) instead of executing.
 
-R2-C3: imports `utterance_kind`, `metrics`, `shared.config`,
+R2-C3: imports `utterance_kind`, `metrics`, `room_context` (the one scope-cue
+regex), `shared.config`,
 `mode_permission` (`noun_for_domains`, `current_ha_scope`) and the shared
 yes/no vocabulary (`shared.fast_path_vocab`) -- never `orchestrator.main`.
 """
 from __future__ import annotations
 
 import contextlib
-import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Tuple
 
@@ -26,6 +26,8 @@ from shared.fast_path_vocab import (  # noqa: F401  (re-exported: the vocabulary
 )
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator.mode_permission import current_ha_scope, noun_for_domains
+from orchestrator.room_context import SCOPE_CUE_RE as _SCOPE_CUE_RE
+from shared.ha_registry import tokens
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 
 
@@ -41,9 +43,6 @@ class FanoutBlock:
     writes: Tuple[PlannedWrite, ...]
     unbounded: bool
     room: Optional[str] = None
-
-
-_SCOPE_CUE_RE = re.compile(r"\b(?:all|every|everything|whole|entire|house)\b", re.IGNORECASE)
 
 
 # 5.3 rules 4/5, matched against normalize_reply() output; the patterns and
@@ -167,11 +166,20 @@ def _has_explicit_scope_cue(original_query: Optional[str], scope_hint: Any) -> b
         return True
     if isinstance(scope_hint, tuple) and len(scope_hint) == 2:
         kind, value = scope_hint
-        if kind == "room_group" and value and str(value).lower() in q:
+        # "turn them off" after an explicit whole-house command is the same
+        # explicit scope (the follow-up carries the decision, not the words).
+        if kind == "whole_house_followup" and value is True:
+            return True
+        # Room keys carry underscores ("living_room"); the utterance says
+        # "living room". Whole words, so "den" is not found in "garden".
+        spoken = " " + " ".join(tokens(q)) + " "
+        def named(room) -> bool:
+            words = " ".join(tokens(str(room)))
+            return bool(words) and f" {words} " in spoken
+        if kind == "room_group" and value and named(value):
             return True
         if kind == "multi_room" and value:
-            matched = sum(1 for r in value if r and str(r).lower() in q)
-            if matched >= 2:
+            if sum(1 for r in value if r and named(r)) >= 2:
                 return True
     return False
 

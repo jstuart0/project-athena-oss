@@ -1512,8 +1512,13 @@ class _B4EntityManager:
             self._entities[f"fan.office_{i}"] = {"state": "on", "attributes": {"friendly_name": f"Office Fan {i}"}}
             self._entities[f"cover.office_{i}"] = {"state": "open", "attributes": {"friendly_name": f"Office Blind {i}"}}
             self._entities[f"media_player.office_tv_{i}"] = {"state": "on", "attributes": {"friendly_name": f"Office TV {i}"}}
+        for room in ("office", "kitchen"):
+            for i in range(B4_N // 2):
+                self._entities[f"light.{room}_{i}"] = {
+                    "state": "on", "attributes": {"friendly_name": f"{room.title()} Light {i}"},
+                }
 
-    async def get_entities(self):
+    async def get_entities(self, force_refresh=False):
         return dict(self._entities)
 
     async def find_lights_by_room(self, room):

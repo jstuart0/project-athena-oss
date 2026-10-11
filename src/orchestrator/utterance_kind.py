@@ -461,3 +461,18 @@ def _is_bare_command(q2: str) -> bool:
     if _BARE_COMMAND_EXCLUDED.search(q2):
         return False
     return bool(_BARE_COMMAND_RE.match(q2))
+
+
+_INDOOR_TEMP_WORD_RE = re.compile(r"\b(?:warm|hot|cold|chilly|temperature|temp)\b")
+_INDOOR_PLACE_RE = re.compile(r"\b(?:in here|inside|indoors)\b")
+_INDOOR_ADJUST_RE = re.compile(r"\b(?:warmer|cooler|colder|hotter|turn (?:up|down)|raise|lower|drop|set|make)\b")
+
+
+def is_indoor_temperature_question(query: Optional[str]) -> bool:
+    """A question about how warm it is in here, not outside: a temperature
+    word with "in here", "inside" or "indoors", and no wording that asks for
+    a change. Independent of any other classifier's verdict."""
+    q = (query or "").lower()
+    return bool(
+        _INDOOR_TEMP_WORD_RE.search(q) and _INDOOR_PLACE_RE.search(q) and not _INDOOR_ADJUST_RE.search(q)
+    )

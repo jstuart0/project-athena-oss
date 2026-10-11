@@ -107,6 +107,7 @@ class OrchestratorState(BaseModel):
     # context. caller_fingerprint binds a pending confirmation to the
     # caller that created it and is never used for authorization.
     supports_followup: bool = Field(False, description="Server-set: the calling surface carries a follow-up turn on the same session")
+    trusted_voice: bool = Field(False, description="Server-set: the gateway judged the caller a trusted voice caller (read only from a service-key caller)")
     caller_fingerprint: Optional[str] = Field(None, description="Server-computed caller fingerprint binding a pending confirmation")
 
     # SMS Integration: Additional context (phone_number, calendar_event_id, guest_name, etc.)

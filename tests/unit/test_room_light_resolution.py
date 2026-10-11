@@ -301,7 +301,7 @@ async def test_resolution_log_carries_counts_only(manager):
     with structlog.testing.capture_logs() as logs:
         await _ids(manager, "attic")
     (entry,) = [e for e in logs if e["event"] == "room_lights_resolved"]
-    assert set(entry) == {"event", "log_level", "source", "candidates", "excluded", "targets"}
+    assert set(entry) == {"event", "log_level", "source", "candidates", "excluded", "targets", "ambiguous"}
     assert entry["excluded"] == 1 and entry["source"] == "name_anchored"
 
 

@@ -78,8 +78,6 @@ async function loadHAOptimizations() {
 
         // Filter to only HA optimization flags
         const haOptNames = [
-            'ha_room_detection_cache',
-            'ha_simple_command_fastpath',
             'ha_parallel_init',
             'ha_precomputed_summaries',
             'ha_session_warmup',
@@ -338,14 +336,16 @@ function renderOptimizationRow(opt, index) {
 
     // Estimated savings based on flag
     const savingsMap = {
-        'ha_room_detection_cache': '100-200ms',
         'ha_parallel_init': '50-100ms',
-        'ha_simple_command_fastpath': '300-2000ms',
         'ha_precomputed_summaries': '200-500ms',
         'ha_session_warmup': '50-100ms',
         'ha_intent_prerouting': '200-1000ms'
     };
     const savings = savingsMap[opt.name] || 'Variable';
+    // Device commands always go to the orchestrator; pre-routing only answers greetings and simple questions.
+    const description = opt.name === 'ha_intent_prerouting'
+        ? 'Classifies greetings and simple questions; device commands always go to the orchestrator.'
+        : (opt.description || '');
 
     return `
         <div class="flex items-center justify-between p-4 ${bgClass} hover:bg-dark-bg/50 transition-colors">
@@ -358,7 +358,7 @@ function renderOptimizationRow(opt, index) {
                         ${opt.display_name}
                         ${statusBadge}
                     </div>
-                    <div class="text-sm text-gray-400 mt-0.5">${opt.description || ''}</div>
+                    <div class="text-sm text-gray-400 mt-0.5">${description}</div>
                 </div>
             </div>
             <div class="flex items-center gap-4">

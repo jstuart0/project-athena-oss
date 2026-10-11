@@ -15,6 +15,7 @@ execute_intent, surfaces any denial recorded on the scope as the answer
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -65,7 +66,8 @@ from orchestrator.utterance_kind import (
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 from orchestrator.context.detector import context_ref_view
 from orchestrator.metrics import ha_write_fanout_confirm_total
-from orchestrator import write_fanout
+from orchestrator import room_choice, room_context, write_fanout
+from orchestrator.room_choice import storable_intent as _storable_intent
 
 logger = structlog.get_logger(__name__)
 
@@ -78,23 +80,36 @@ DECLINED_TEXT = "Okay, I won't."
 ALREADY_DONE_TEXT = "Already done."
 UNIDENTIFIED_DEVICE_TEXT = "I couldn't tell which device you're asking about. Which one do you mean?"
 CLARIFICATION_TTL_SECONDS = 60
+REPLY_AGAIN_TEXT = "Please say it again."
+# What cancels a "which one?" without answering it. Wider than the yes/no
+# vocabulary the write confirmation uses (which the fast path shares).
+_DECLINE_RE = re.compile(r"^(?:no|nope|nah|never ?mind|forget it|cancel(?: that)?)(?: thanks| thank you)?$")
 
 
-async def _await_state_question_clarification(state: OrchestratorState, room: Optional[str], foreign_pending: bool) -> None:
-    """Answer an unidentified-device question: ask which device, and store a
-    read-only clarification context that also replaces any earlier write
-    context, so the reply ("the kitchen", "yes") can't continue that write.
-    Never stored over another caller's pending confirmation."""
-    state.answer = UNIDENTIFIED_DEVICE_TEXT
+async def _await_state_question_clarification(
+    state: OrchestratorState, room: Optional[str], foreign_pending: bool,
+    *, text: str = UNIDENTIFIED_DEVICE_TEXT, room_candidates=(),
+) -> None:
+    """Answer an unidentified-device (or ambiguous-room) question: ask which,
+    and store a read-only clarification context that also replaces any
+    earlier write context, so the reply ("the kitchen", "yes") can't
+    continue that write. Never stored over another caller's pending
+    (confirmation or room choice), and never alongside an
+    ``awaiting_room_choice``: this context holds only the state-question
+    key."""
+    state.answer = text
     if not state.session_id or foreign_pending:
         return
+    parameters = {"action": "get_status", "room": room, "awaiting_state_question": True}
+    if room_candidates:
+        parameters["room_candidates"] = [list(c) for c in room_candidates]
     await store_conversation_context(
         session_id=state.session_id,
         intent="control",
         query=state.query,
         entities={"room": room},
-        parameters={"action": "get_status", "room": room, "awaiting_state_question": True},
-        response=UNIDENTIFIED_DEVICE_TEXT,
+        parameters=parameters,
+        response=text,
         ttl=CLARIFICATION_TTL_SECONDS,
     )
 
@@ -108,10 +123,19 @@ def _clarification_reply(state: OrchestratorState, real_uk: UtteranceClassificat
     params = prev.get("parameters") or {}
     if not params.get("awaiting_state_question") or real_uk.kind == UtteranceKind.IMPERATIVE:
         return None
+    room = real_uk.room or params.get("room")
+    candidates = tuple(
+        room_context.RoomRef(str(c[0]), str(c[1])) for c in (params.get("room_candidates") or []) if len(c) >= 2
+    )
+    if candidates:
+        # "Which bathroom?": the reply must be exactly one candidate.
+        answer = room_context.match_reply(state.query, candidates)
+        if answer.kind == "one":
+            room = answer.room.key
     clarified = UtteranceClassification(
         kind=UtteranceKind.STATE_QUESTION,
         device_type=real_uk.device_type,
-        room=real_uk.room or params.get("room"),
+        room=room,
         rule="clarification_reply",
     )
     return clarified, f"{prev.get('query') or ''} ({state.query})".strip()
@@ -192,6 +216,19 @@ _BULK_REPORT_DEVICE = {
 }
 
 
+_NO_SPEAKER_ROOM = ("", "unknown", "guest")
+_ASKS_ABOUT_THE_HOUSE_RE = re.compile(r"\b(?:house|home|anywhere|everywhere|whole|entire)\b")
+
+
+def _bulk_report_is_for_the_house(query: str, speaker_room: Optional[str]) -> bool:
+    """A lights report is house-wide only when the speaker's room is unknown
+    or the wording asks about the house; otherwise a room-less question is
+    about the room the speaker is in (decided by the controller)."""
+    if (speaker_room or "").lower() in _NO_SPEAKER_ROOM:
+        return True
+    return bool(_ASKS_ABOUT_THE_HOUSE_RE.search((query or "").lower()))
+
+
 def _bulk_report_matches(query_type: Optional[str], device_type: Optional[str]) -> bool:
     report_device = _BULK_REPORT_DEVICE.get(query_type or "")
     if report_device is None:
@@ -216,7 +253,8 @@ def _pending_domain(pending: Dict[str, Any]) -> str:
 
 
 async def _store_pending_write_confirmation(
-    state: OrchestratorState, intent: Dict[str, Any], result: str, blk: "write_fanout.FanoutBlock"
+    state: OrchestratorState, intent: Dict[str, Any], result: str, blk: "write_fanout.FanoutBlock",
+    query: Optional[str] = None,
 ) -> None:
     """5.2: `result` is the gate's answer. A bounded prompt (it ends in
     '?', which the gate only returns inside pending_carrier(enabled=True))
@@ -229,14 +267,14 @@ async def _store_pending_write_confirmation(
     await store_conversation_context(
         session_id=state.session_id,
         intent="control",
-        query=state.query,
+        query=query or state.query,
         entities={"room": room, "device_type": device_type},
         parameters={
             "action": "get_status",
             "device_type": device_type,
             "room": room,
             "pending_write_confirmation": {
-                "intent": intent,
+                "intent": _storable_intent(intent),
                 "writes": [[w.domain, w.service, list(w.entity_ids)] for w in blk.writes],
                 "fingerprint": state.caller_fingerprint,
                 "nonce": uuid4().hex,
@@ -357,7 +395,7 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
             return True
 
         if blk is not None:
-            await _store_pending_write_confirmation(state, intent, result, blk)
+            await _store_pending_write_confirmation(state, intent, result, blk, query=prev.get("query"))
             return True
 
         state.answer = result
@@ -369,11 +407,275 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
                 intent="control",
                 query=prev.get("query") or state.query,
                 entities=prev.get("entities") or {},
-                parameters=intent,
+                parameters=_storable_intent(intent),
                 response=result,
                 ttl=CONTROL_CONTEXT_TTL_SECONDS,
             )
         return True
+
+
+def _room_choice_pending(state: OrchestratorState) -> Optional[Dict[str, Any]]:
+    pending = ((state.prev_context or {}).get("parameters") or {}).get(room_choice.PENDING_KEY)
+    return pending if isinstance(pending, dict) else None
+
+
+def _without_room_choice(prev: Dict[str, Any]) -> Dict[str, Any]:
+    params = dict(prev.get("parameters") or {})
+    params.pop(room_choice.PENDING_KEY, None)
+    params.setdefault("action", "get_status")
+    return {**prev, "parameters": params}
+
+
+async def _clear_room_choice(state: OrchestratorState, prev: Dict[str, Any], ttl: int) -> None:
+    """Overwrite the stored context with the same read-sentinel context minus
+    the room choice. Only ever called for the pending's own caller."""
+    if not state.session_id:
+        return
+    cleared = _without_room_choice(prev)
+    await store_conversation_context(
+        session_id=state.session_id,
+        intent=cleared.get("intent") or "control",
+        query=cleared.get("query") or "",
+        entities=cleared.get("entities") or {},
+        parameters=cleared["parameters"],
+        response=cleared.get("response") or "",
+        ttl=ttl,
+    )
+
+
+async def _store_room_choice(
+    state: OrchestratorState, choice: "room_choice.RoomChoice", question: str, query: str
+) -> None:
+    """Store the question this turn asked as the session's one live
+    ``awaiting_room_choice`` (a fresh nonce, this caller's fingerprint). The
+    context holds no ``awaiting_state_question``, so the two never coexist."""
+    if not state.session_id:
+        return
+    pending = room_choice.new_pending(
+        choice, fingerprint=state.caller_fingerprint, nonce=uuid4().hex, query=query
+    )
+    await store_conversation_context(
+        session_id=state.session_id,
+        intent="control",
+        query=query,
+        entities={"room": None, "device_type": choice.intent.get("device_type")},
+        parameters={
+            "action": "get_status",
+            "device_type": choice.intent.get("device_type"),
+            "room": None,
+            room_choice.PENDING_KEY: pending,
+        },
+        response=question,
+        ttl=room_choice.TTL,
+    )
+
+
+_DECISION_KEYS = ("decided_room", "decided_rooms", "decided_excluded", "room_label")
+
+
+def _drop_decision(intent: Dict[str, Any]) -> None:
+    for key in _DECISION_KEYS + ("referent_followup",):
+        intent.pop(key, None)
+
+
+def _carry_decision(intent: Dict[str, Any], earlier: Dict[str, Any]) -> None:
+    """A referent follow-up ("turn them off") acts where the earlier command
+    did. After a whole-house command it is the same explicit scope, so the
+    fan-out gate treats it as one (no confirmation)."""
+    if not earlier.get("decided_room"):
+        return
+    for key in _DECISION_KEYS:
+        if key in earlier:
+            intent[key] = earlier[key]
+    intent["referent_followup"] = earlier["decided_room"] == "whole_house"
+
+
+def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
+    return bool(
+        state.supports_followup and state.session_id and state.caller_fingerprint and not foreign_pending
+    )
+
+
+async def _execute_and_record(
+    state: OrchestratorState, scope, intent: Dict[str, Any], *, original_query: str,
+    uk: UtteranceClassification, foreign_pending: bool, store_query: str,
+) -> None:
+    """Run an extracted (or replayed) control intent under the open scope and
+    record what happened: a refusal, a "which room?" question, a fan-out
+    prompt, or the result. ``original_query`` is what the gate and the room
+    decision read; ``store_query`` is what a stored context remembers."""
+    device_type = intent.get('device_type', 'light')
+
+    # Coarse domain pre-check (D14): refuse before execute_intent when the
+    # intent's device_type would write a domain this scope isn't authorized
+    # for. Defense-in-depth; per-entity patterns are enforced by the guard.
+    expected_domains = intent_write_domains(intent)
+    precheck_denied_domains = [
+        d for d in expected_domains
+        if not authorize_ha_write(d, "_precheck", None, scope.permissions).allowed
+    ]
+    if precheck_denied_domains:
+        state.answer = permission_refusal_message(precheck_denied_domains, scope)
+        state.error = "permission_denied"
+        return
+
+    denials_before = len(scope.denials)
+    writes_before = scope.allowed_writes
+    # ATHENA-128 (D16): this call is the only non-replay window in which a
+    # fan-out block (or a room question) may become a stored pending.
+    carry_pending = _carry_pending(state, foreign_pending)
+    with write_fanout.pending_carrier(scope, enabled=carry_pending):
+        result = await smart_controller.execute_intent(
+            intent, ha_client, original_query=original_query, device_room=state.room
+        )
+    blk = write_fanout.take_block()
+    choice = room_choice.take()
+    clarification = room_choice.take_clarification()
+
+    if clarification is not None:
+        await _await_state_question_clarification(
+            state, None, foreign_pending, text=clarification.text, room_candidates=clarification.candidates,
+        )
+    elif len(scope.denials) > denials_before:
+        denied_domains = tuple(
+            d.domain for d in scope.denials[denials_before:]
+            if d.reason != "halted_after_denial"
+        )
+        state.answer = permission_refusal_message(
+            denied_domains, scope, partial=scope.allowed_writes > writes_before
+        )
+        # ATHENA-128 (3.2(g)): a referent question dispatched through this
+        # chain under the read-only scope that was denied for read_only_scope
+        # uses the write_blocked classification.
+        if any(d.reason == "read_only_scope" for d in scope.denials[denials_before:]):
+            state.error = "state_question_write_blocked"
+            state_question_routed_total.labels(
+                device_type=uk.device_type or "unknown", path="write_blocked"
+            ).inc()
+        else:
+            state.error = "permission_denied"
+    elif choice is not None:
+        # The answer is a question, not a completed action: nothing is stored
+        # as a normal context, and the question is carried only where the
+        # surface can carry it (else the user repeats the full room name).
+        state.answer = result
+        if carry_pending:
+            await _store_room_choice(state, choice, result, store_query)
+    elif blk is not None:
+        # 5.2: the answer is the gate's prompt or rewording, not a completed
+        # action -- no normal success store.
+        await _store_pending_write_confirmation(state, intent, result, blk, query=store_query)
+    else:
+        state.answer = result
+        state.retrieved_data = {"intent": intent}
+        room = intent.get('room')
+        logger.info("smart_control_executed", action=intent.get('action'), device_type=device_type)
+
+        # Store context for future reference using new context system
+        if state.session_id and not foreign_pending and "couldn't" not in result.lower():
+            await store_conversation_context(
+                session_id=state.session_id,
+                intent="control",
+                query=store_query,
+                entities={"room": room, "device_type": device_type},
+                parameters=_storable_intent(intent),
+                response=result,
+                ttl=300  # 5 minutes
+            )
+
+
+async def _resolve_pending_room_choice(
+    state: OrchestratorState, scope, real_uk: UtteranceClassification, foreign_pending: bool,
+) -> bool:
+    """A reply to "which one?". True when this turn was fully answered here;
+    False to continue with normal routing (``state.prev_context`` already
+    cleared or stripped of the pending).
+
+    Identity first: another caller never clears, overwrites, consumes or even
+    learns of this caller's pending; their turn is a context-free new
+    utterance. For the pending's own caller: a question or a command cancels
+    it and runs fresh; a bare no declines; an answer naming exactly one
+    candidate claims the one-use nonce (after the match, failing closed) and
+    replays the stored intent with the chosen room decided, under THIS turn's
+    scope and the stored first-turn query; an answer fitting several is asked
+    again once.
+    """
+    prev = state.prev_context or {}
+    pending = _room_choice_pending(state)
+    if not pending:
+        return False
+
+    same_caller = bool(pending.get("fingerprint")) and pending.get("fingerprint") == state.caller_fingerprint
+    if not same_caller:
+        state.prev_context = None
+        state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
+        return False
+
+    if not room_choice.is_live(pending):
+        state.prev_context = None
+        state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
+        await _clear_room_choice(state, prev, ttl=1)
+        return False
+
+    reply = write_fanout.normalize_reply(state.query)
+    if _DECLINE_RE.match(reply) or write_fanout.BARE_NEGATION_RE.match(reply):
+        await _clear_room_choice(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+        state.prev_context = None
+        state.answer = DECLINED_TEXT
+        return True
+
+    directory = room_directory_current()
+    is_question = real_uk.kind == UtteranceKind.STATE_QUESTION
+    outcome = (
+        room_context.MatchResult("none") if is_question
+        else room_choice.read_reply(pending, state.query, directory)
+    )
+    if outcome.kind == "none":
+        await _clear_room_choice(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+        state.prev_context = _without_room_choice(prev)
+        return False
+
+    if outcome.kind == "several":
+        if pending.get("reasked"):
+            await _clear_room_choice(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+            state.prev_context = _without_room_choice(prev)
+            return False
+        pending = {**pending, "reasked": True}
+        again = room_context.ask_text(
+            room_context.AskWhich(room_choice.candidate_refs(pending), pending.get("phrase") or "")
+            if pending.get("kind") == room_choice.KIND_WHICH else room_context.AskRoom()
+        )
+        state.answer = again
+        if state.session_id:
+            params = dict(prev.get("parameters") or {})
+            params[room_choice.PENDING_KEY] = pending
+            await store_conversation_context(
+                session_id=state.session_id, intent="control", query=prev.get("query") or "",
+                entities=prev.get("entities") or {}, parameters=params, response=again,
+                ttl=room_choice.TTL,
+            )
+        return True
+
+    # Exactly one room named: replay.
+    if not await _claim_nonce(pending.get("nonce")):
+        state.answer = REPLY_AGAIN_TEXT
+        return True
+    await _clear_room_choice(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+    state.prev_context = None
+    chosen = outcome.room
+    intent = dict(pending.get("intent") or {})
+    smart_controller._set_decided(intent, chosen.key, chosen.label)
+    first_turn_query = pending.get("query") or ""
+    await _execute_and_record(
+        state, scope, intent, original_query=first_turn_query, uk=real_uk,
+        foreign_pending=foreign_pending, store_query=first_turn_query,
+    )
+    return True
+
+
+def room_directory_current():
+    from orchestrator.room_directory import current_directory
+    return current_directory()
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +855,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 and not uk.needs_referent
                 and detect_status_query_type(state.query)
                 and _bulk_report_matches(detect_status_query_type(state.query), uk.device_type)
+                and (
+                    _BULK_REPORT_DEVICE.get(detect_status_query_type(state.query) or "") != "light"
+                    or _bulk_report_is_for_the_house(state.query, state.room)
+                )
             )
 
         if status_bulk_config.get("enabled", True) and bulk_eligible:
@@ -622,6 +928,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 session_id=state.session_id,
                 read_only=(uk.kind == UtteranceKind.STATE_QUESTION),
                 utterance=real_uk,
+                # "All the lights" reaching every area is for a caller the
+                # server vouches for: a trusted voice device, or a proven
+                # owner (signed in with a valid service key, owner mode).
+                trusted_voice=state.trusted_voice or state.knowledge_audience.owner_proven,
             ) as scope:
                 # The CONTROL intent was already checked at the node's top,
                 # against the same normalized permissions this scope holds.
@@ -633,6 +943,11 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # no context store and no new pending this turn.
                 foreign_pending = _holds_foreign_pending(state)
                 if await _resolve_pending_write_confirmation(state, scope):
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+                # A reply to "which one?" resolves right after, for the same
+                # reason: "north" must never be routed as a fresh utterance.
+                if await _resolve_pending_room_choice(state, scope, real_uk, foreign_pending):
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
@@ -670,6 +985,17 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     sq_result = await smart_controller.execute_intent(
                         state_question_intent, ha_client, original_query=state.query, device_room=state.room
                     )
+                    sq_clarification = room_choice.take_clarification()
+                    if sq_clarification is not None:
+                        # "Which bathroom?": asked through the state-question
+                        # seam (never a write pending), and never stored over
+                        # another caller's pending.
+                        await _await_state_question_clarification(
+                            state, sq_room, foreign_pending,
+                            text=sq_clarification.text, room_candidates=sq_clarification.candidates,
+                        )
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
                     if len(scope.denials) > sq_denials_before and any(
                         d.reason == "read_only_scope" for d in scope.denials[sq_denials_before:]
                     ):
@@ -679,7 +1005,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             "state_question_write_blocked",
                             query_len=len(state.query),
                             device_type=uk.device_type,
-                            room=uk.room,
+                            has_room=bool(uk.room),
                             request_id=state.request_id,
                             session_id=state.session_id,
                         )
@@ -771,6 +1097,18 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         steps = sequence_data["steps"]
                         acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
 
+                        # Each step's room is decided here, once, before anything
+                        # is scheduled. A step that needs a question gets the
+                        # question and nothing is scheduled or stored: a
+                        # sequence never carries a pending (ATHENA-128).
+                        step_question = await smart_controller.decide_sequence_rooms(
+                            steps, state.query, state.room
+                        )
+                        if step_question is not None:
+                            state.answer = step_question
+                            state.node_timings["route_control"] = time.time() - start
+                            return state
+
                         # Sequence pre-authorization (D21): deny the whole
                         # sequence synchronously, before scheduling, when
                         # any step isn't allowed under the CURRENT scope --
@@ -831,7 +1169,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     else:
                         state.answer = prev_response or "I performed the action you requested."
 
-                    logger.info(f"Inquiry follow-up answered from context: room={prev_room}, action={prev_action}")
+                    logger.info(f"Inquiry follow-up answered from context: action={prev_action}")
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
@@ -877,12 +1215,17 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         intent['parameters'] = merged_params
                         logger.info(f"LLM interpreted follow-up with context: {intent}")
 
-                    # If new room specified, use it; otherwise keep previous room
+                    # If a new room is named, the earlier decision is dropped and
+                    # the command decides afresh; otherwise ("turn them off") it
+                    # keeps the earlier decision unchanged.
                     if new_room:
                         intent['room'] = new_room
-                        logger.info(f"Context continuation - applying previous command to new room: {new_room}")
-                    elif prev.get("entities", {}).get("room"):
-                        intent['room'] = prev["entities"]["room"]
+                        _drop_decision(intent)
+                        logger.info("context_continuation_new_room")
+                    else:
+                        if prev.get("entities", {}).get("room"):
+                            intent['room'] = prev["entities"]["room"]
+                        _carry_decision(intent, prev_params)
 
                     # Handle reversal patterns - "turn them back on", "turn it back off"
                     # ATHENA-128 (3.2(e)): skipped for STATE_QUESTION -- a
@@ -921,8 +1264,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                                 prev_intent_entities=prev_intent_for_llm,
                                 utterance=uk,
                             )
-                            if prev.get("entities", {}).get("room"):
-                                intent['room'] = prev["entities"]["room"]
+                            if not new_room:
+                                if prev.get("entities", {}).get("room"):
+                                    intent['room'] = prev["entities"]["room"]
+                                _carry_decision(intent, prev_params)
                         logger.info(f"Modifier adjustment applied: {ref_info.get('ref_types')}")
 
                     # Ensure we have required fields
@@ -957,82 +1302,13 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
 
                 logger.info(f"Extracted intent: {intent}")
 
-                # Execute the intent with permission checking
-                device_type = intent.get('device_type', 'light')
-                room = intent.get('room')
-
-                # Coarse domain pre-check (D14): refuse before execute_intent
-                # when the intent's device_type would write a domain this
-                # scope isn't authorized for. This is defense-in-depth --
-                # per-entity patterns still pass this coarse check and are
-                # enforced by the guard's authorize_ha_write once it's wired
-                # into lifespan (Pass B).
-                expected_domains = intent_write_domains(intent)
-                precheck_denied_domains = [
-                    d for d in expected_domains
-                    if not authorize_ha_write(d, "_precheck", None, scope.permissions).allowed
-                ]
-                if precheck_denied_domains:
-                    state.answer = permission_refusal_message(precheck_denied_domains, scope)
-                    state.error = "permission_denied"
-                    state.node_timings["route_control"] = time.time() - start
-                    return state
-
-                # Execute the command (pass original query for fallback room extraction, and device_room for context)
-                denials_before = len(scope.denials)
-                writes_before = scope.allowed_writes
-                # ATHENA-128 (D16): this call is the only non-replay window
-                # in which a fan-out block may become a pending confirmation.
-                carry_pending = bool(
-                    state.supports_followup and state.session_id and state.caller_fingerprint
-                    and not foreign_pending
+                # Execute the command (the original query feeds the room decision and
+                # the fan-out gate; the speaker's room is the default only where the
+                # command names none and the directory knows it)
+                await _execute_and_record(
+                    state, scope, intent, original_query=state.query, uk=uk,
+                    foreign_pending=foreign_pending, store_query=state.query,
                 )
-                with write_fanout.pending_carrier(scope, enabled=carry_pending):
-                    result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
-                blk = write_fanout.take_block()
-
-                if len(scope.denials) > denials_before:
-                    denied_domains = tuple(
-                        d.domain for d in scope.denials[denials_before:]
-                        if d.reason != "halted_after_denial"
-                    )
-                    state.answer = permission_refusal_message(
-                        denied_domains, scope, partial=scope.allowed_writes > writes_before
-                    )
-                    # ATHENA-128 (3.2(g)): a referent question (e.g. "did
-                    # those come back on?") is dispatched through this same
-                    # extraction chain under the read-only scope opened
-                    # above -- if it was denied for read_only_scope, use
-                    # the write_blocked classification/metric instead of
-                    # the generic permission_denied one.
-                    if any(d.reason == "read_only_scope" for d in scope.denials[denials_before:]):
-                        state.error = "state_question_write_blocked"
-                        state_question_routed_total.labels(
-                            device_type=uk.device_type or "unknown", path="write_blocked"
-                        ).inc()
-                    else:
-                        state.error = "permission_denied"
-                elif blk is not None:
-                    # 5.2: the answer is the gate's prompt or rewording, not a
-                    # completed action -- no normal success store.
-                    await _store_pending_write_confirmation(state, intent, result, blk)
-                else:
-                    state.answer = result
-                    state.retrieved_data = {"intent": intent}
-
-                    logger.info(f"Smart control executed: {intent.get('action')} on {device_type} in {room}")
-
-                    # Store context for future reference using new context system
-                    if state.session_id and not foreign_pending and "couldn't" not in result.lower():
-                        await store_conversation_context(
-                            session_id=state.session_id,
-                            intent="control",
-                            query=state.query,
-                            entities={"room": room, "device_type": device_type},
-                            parameters=intent,
-                            response=result,
-                            ttl=300  # 5 minutes
-                        )
 
         else:
             # D12: the old "no smart controller" fallback pattern-matched

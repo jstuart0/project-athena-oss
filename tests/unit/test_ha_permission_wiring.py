@@ -478,18 +478,71 @@ class _RawHAServiceCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _call_service_sites(text: str, filename: str = "<planted>") -> set:
+    """Function names holding a ``.call_service(`` attribute call or a
+    ``"call_service"`` string constant (a WebSocket frame type)."""
+    found = set()
+    stack: list = []
+
+    def visit(node):
+        pushed = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if pushed:
+            stack.append(node.name)
+        hit = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "call_service"
+        ) or (isinstance(node, ast.Constant) and node.value == "call_service")
+        if hit:
+            found.add(stack[-1] if stack else "<module>")
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(ast.parse(text, filename=filename))
+    return found
+
+
+def _ha_client_non_read_calls(text: str, filename: str = "<planted>") -> set:
+    """``func:method`` for every ``ha_client.<method>(...)`` call that is not
+    a read (``get``) or the shutdown (``aclose``): the gateway's shared Home
+    Assistant client must stay read-only."""
+    found = set()
+    stack: list = []
+
+    def visit(node):
+        pushed = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if pushed:
+            stack.append(node.name)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ha_client"
+            and node.func.attr not in ("get", "aclose")
+        ):
+            found.add(f"{stack[-1] if stack else '<module>'}:{node.func.attr}")
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(ast.parse(text, filename=filename))
+    return found
+
+
 class TestGatewaySimpleCommandCallSitesUnchanged:
-    """Pattern H drift guard, gateway's share: the set of functions in
-    src/gateway/ that call HA's raw /api/services/ endpoint must stay
-    exactly the two already accounted for -- execute_simple_command
-    (turn_on/turn_off, now gated by fast_path_allowed() + the lights-only
-    check) and send_satellite_announcement (a Wyoming satellite TTS
-    announcement, not a device write -- explicitly out of scope, D17/P5).
-    A new raw HA writer appearing anywhere else in the gateway fails this
-    test instead of shipping unguarded."""
+    """Pattern H drift guard, gateway's share. The gateway writes nothing to
+    Home Assistant except one announcement: the only function under
+    src/gateway/ that reaches the raw /api/services/ endpoint is
+    send_satellite_announcement (a satellite TTS announcement, not a device
+    write), and no ``.call_service(`` call or ``"call_service"`` frame type
+    appears anywhere in the gateway. Device control goes to the orchestrator,
+    which decides the room, authorizes every write and applies the fan-out
+    gate (D19)."""
 
     EXPECTED_CALL_SITES = {
-        ("src/gateway/simple_commands.py", "execute_simple_command"),
         ("src/gateway/main.py", "send_satellite_announcement"),
     }
 
@@ -509,6 +562,39 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
             for func_name in visitor.found_funcs:
                 found.add((relpath, func_name))
         assert found == self.EXPECTED_CALL_SITES
+
+    def test_gateway_has_no_call_service(self):
+        found = {}
+        for path in sorted((SRC / "gateway").rglob("*.py")):
+            sites = _call_service_sites(path.read_text(encoding="utf-8", errors="ignore"), str(path))
+            if sites:
+                found[str(path.relative_to(REPO_ROOT))] = sorted(sites)
+        assert found == {}
+
+    def test_gateway_has_no_call_service_detects_planted_writers(self):
+        assert _call_service_sites("async def f(client):\n    await client.call_service('light', 'turn_on', {})\n") == {"f"}
+        assert _call_service_sites("def g():\n    return {'type': 'call_service'}\n") == {"g"}
+        assert _call_service_sites("def h(client):\n    return client.get('/x')\n") == set()
+
+    def test_the_gateway_ha_client_only_reads(self):
+        found = {}
+        for path in sorted((SRC / "gateway").rglob("*.py")):
+            sites = _ha_client_non_read_calls(path.read_text(encoding="utf-8", errors="ignore"), str(path))
+            if sites:
+                found[str(path.relative_to(REPO_ROOT))] = sorted(sites)
+        assert found == {}
+
+    def test_the_ha_client_check_detects_planted_writers(self):
+        assert _ha_client_non_read_calls("async def f():\n    await ha_client.post(url, json={})\n") == {"f:post"}
+        assert _ha_client_non_read_calls("async def g():\n    await ha_client.request('PUT', url)\n") == {"g:request"}
+        assert _ha_client_non_read_calls("async def h():\n    await ha_client.delete(url)\n") == {"h:delete"}
+        assert _ha_client_non_read_calls("async def k():\n    await ha_client.get(url)\n    await ha_client.aclose()\n") == set()
+
+    def test_the_simple_command_module_cannot_write(self):
+        text = (SRC / "gateway" / "simple_commands.py").read_text(encoding="utf-8")
+        for needle in ("api/services", "DEVICE_MAPPINGS", "light.all", "call_service", "httpx"):
+            assert needle not in text, needle
+        assert not (SRC / "gateway" / "mode_gate.py").exists()
 
 
 _QUERY_URL_SUFFIXES = ("/query", "/query/stream")
@@ -796,7 +882,9 @@ class TestOrchestratorQueryCallersTagSupportsFollowup:
         value = followup_sites[0][1]["supports_followup"]
         assert isinstance(value, ast.Constant) and value.value is True
         voice = followup_sites[0][1].get("voice_device_id")
-        assert voice is not None and ast.unparse(voice) == "request.device_id"
+        assert voice is not None and ast.unparse(voice) == "believed_device_id", (
+            "the raw, unauthenticated device id is never forwarded; only the one a trusted caller sent"
+        )
 
     def test_gateway_sends_voice_device_id_never_device_id(self):
         """The HA device id is a fingerprint input only. Sent as the

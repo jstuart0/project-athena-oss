@@ -100,7 +100,10 @@ def orchestrator(monkeypatch):
     monkeypatch.setattr(gw, "gateway_config", None)
     monkeypatch.setattr(gw, "global_rate_limiter", None)
     monkeypatch.setattr(gw, "new_conversation_limiter", NewConversationLimiter(per_minute=100000))
-    monkeypatch.setattr(gw, "_detect_room_from_active_satellite", mock.AsyncMock(return_value="kitchen"))
+    monkeypatch.setattr(
+        gw.speaker_room, "resolve_speaker_room",
+        mock.AsyncMock(return_value=gw.speaker_room.SpeakerRoom("kitchen", "map")),
+    )
     monkeypatch.setattr(gw, "_SPEECH_CLIENT_NETWORKS", ())
     monkeypatch.setattr(gw, "_TRUSTED_PROXY_NETWORKS", ())
     return fake
@@ -504,7 +507,10 @@ def test_route_to_orchestrator_fallback_to_ollama_is_rendered_for_speech(monkeyp
 def ha(monkeypatch):
     flags = {}
     monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(side_effect=lambda name, default=False: flags.get(name, default)))
-    monkeypatch.setattr(gw, "_detect_room_from_active_satellite", mock.AsyncMock(return_value="kitchen"))
+    monkeypatch.setattr(
+        gw.speaker_room, "resolve_speaker_room",
+        mock.AsyncMock(return_value=gw.speaker_room.SpeakerRoom("kitchen", "map")),
+    )
     monkeypatch.setattr(gw, "device_session_mgr", SimpleNamespace(
         get_session_for_device=mock.AsyncMock(return_value=None),
         update_session_for_device=mock.AsyncMock(),
@@ -521,9 +527,6 @@ def _ha_speech(monkeypatch, ha, case):
         ha["ha_intent_prerouting"] = True
         monkeypatch.setattr(gw, "classify_intent", mock.AsyncMock(return_value="SIMPLE"))
         monkeypatch.setattr(gw, "handle_simple_intent", mock.AsyncMock(return_value=RAW))
-    elif case == "prerouted_home":
-        ha["ha_intent_prerouting"] = True
-        monkeypatch.setattr(gw, "classify_intent", mock.AsyncMock(return_value="HOME"))
     else:
         message = SimpleNamespace(content=SPOKEN)
         reply = SimpleNamespace(choices=[SimpleNamespace(message=message)])
@@ -533,7 +536,7 @@ def _ha_speech(monkeypatch, ha, case):
     return resp.json()["response"]["speech"]["plain"]["speech"]
 
 
-HA_RETURNS = ["fastpath", "prerouted_simple", "prerouted_home", "orchestrator"]
+HA_RETURNS = ["fastpath", "prerouted_simple", "orchestrator"]
 
 
 @pytest.mark.parametrize("case", HA_RETURNS)

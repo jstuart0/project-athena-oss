@@ -50,6 +50,23 @@ HOUSE_KEYS = (
     "guest_name", "owner_name", "home_address", "address", "phone", "phone_number", "from_number", "to_number",
     "guest_email", "guest_phone", "speaker_first_name", "location", "location_override",
 )
+# A room or area is where the house is laid out, and which one a caller asked
+# for or stands in is a location. Applied only to the files that resolve rooms
+# (elsewhere "room" is a LiveKit room, a music zone or an admin config name).
+ROOM_KEYS = ("room", "rooms", "room_label", "room_name", "area", "areas", "area_id", "area_ids", "area_name")
+ROOM_SCOPE = (
+    "src/orchestrator/smart_home_controller.py", "src/orchestrator/room_context.py",
+    "src/orchestrator/room_choice.py", "src/orchestrator/room_directory.py",
+    "src/orchestrator/ha_entity_manager.py", "src/orchestrator/sequence_executor.py",
+    "src/orchestrator/write_fanout.py", "src/orchestrator/nodes/route_control.py",
+    "src/gateway/main.py", "src/gateway/speaker_room.py", "src/shared/ha_registry.py",
+)
+_ROOM_TOKENS = tuple(tuple(k.split("_")) for k in ROOM_KEYS)
+# A Home Assistant device id names a physical speaker in a house. The gateway
+# handles them on every voice request, so none may reach one of its logs
+# (log ``has_device_id=`` instead).
+DEVICE_ID_SCOPE_PREFIX = "src/gateway/"
+_DEVICE_ID_TOKENS = (("device", "id"), ("device", "ids"))
 CALLER_KEYS = ("email", "identity", "username", "display_name")
 TEXT_KEYS = ("preview",)
 _KEY_TOKENS = tuple(tuple(k.split("_")) for k in HOUSE_KEYS + CALLER_KEYS + TEXT_KEYS)
@@ -382,7 +399,21 @@ def _is_phone_name(identifier: str) -> bool:
     return bool(tokens) and tokens[0] == "phone" and tokens[-1] != "last4"
 
 
-def _matches(identifier: str) -> bool:
+def _is_room_name(identifier: str) -> bool:
+    tokens = tuple(t for t in identifier.lower().split("_") if t)
+    return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _ROOM_TOKENS)
+
+
+def _is_device_id_name(identifier: str) -> bool:
+    tokens = tuple(t for t in identifier.lower().split("_") if t)
+    return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _DEVICE_ID_TOKENS)
+
+
+def _matches(identifier: str, filename: str = "") -> bool:
+    if filename in ROOM_SCOPE and _is_room_name(identifier):
+        return True
+    if filename.startswith(DEVICE_ID_SCOPE_PREFIX) and _is_device_id_name(identifier):
+        return True
     return (bool(_matched_keys(identifier)) or identifier in PAYLOAD_NAMES or _is_phone_name(identifier)
             or identifier.startswith(("person_name:", "payload:", "text_slice:", "full_text:")))
 
@@ -565,11 +596,11 @@ def _call_hits(call: ast.Call, *, filename: str = "", inspected: list | None = N
                 hits.append(f"person_name:{context}")
     values = [kw.value for kw in call.keywords] + list(call.args)
     for kw in call.keywords:
-        if kw.arg and _matches(kw.arg) and not _exempt(kw.value):
+        if kw.arg and _matches(kw.arg, filename) and not _exempt(kw.value):
             hits.append(kw.arg)
-        hits.extend(i for i in _identifiers(kw.value) if _matches(i))
+        hits.extend(i for i in _identifiers(kw.value) if _matches(i, filename))
     for arg in call.args:
-        hits.extend(i for i in _identifiers(arg) if _matches(i))
+        hits.extend(i for i in _identifiers(arg) if _matches(i, filename))
     for value in values:
         hits.extend(_text_slices(value, inspected))
     if filename.endswith(CACHE_KEY_FILE) and any(
@@ -907,3 +938,36 @@ def not_flagged(data, tool):
     assert sorted(by_line) == [3, 6, 9]
     assert by_line[3] == ["person_name:automation"]
     assert by_line[6] == ["person_name:guest"]
+
+
+def test_room_and_area_values_are_flagged_in_room_resolving_files():
+    scoped = "src/orchestrator/smart_home_controller.py"
+    for call in (
+        'logger.info(f"lights in {room}")',
+        'logger.info("x", rooms=rooms)',
+        'logger.info("x", area_ids=ids)',
+        'logger.info("x", target_room=r)',
+    ):
+        found, _ = find_pii_logs(call, scoped)
+        assert found, call
+    for call in ('logger.info("x", room_count=len(rooms))', 'logger.info("x", has_room=bool(room))'):
+        found, _ = find_pii_logs(call, scoped)
+        assert not found, call
+    found, _ = find_pii_logs('logger.info(f"lights in {room}")', "src/gateway/livekit_routes.py")
+    assert not found
+
+
+def test_a_device_id_in_a_gateway_log_is_flagged():
+    gateway = "src/gateway/main.py"
+    for call in (
+        'logger.info(f"session for device {device_id}")',
+        'logger.info("x", device_id=device_id)',
+        'logger.info("x", voice_device_id=believed_device_id)',
+    ):
+        found, _ = find_pii_logs(call, gateway)
+        assert found, call
+    for call in ('logger.info("x", has_device_id=bool(device_id))', 'logger.info("x", trusted_voice=trusted_voice)'):
+        found, _ = find_pii_logs(call, gateway)
+        assert not found, call
+    found, _ = find_pii_logs('logger.info("x", device_id=device_id)', "src/orchestrator/helpers.py")
+    assert not found, "scoped to the gateway"

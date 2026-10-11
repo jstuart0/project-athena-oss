@@ -794,7 +794,7 @@ EDGE_SENDER_FILES = {
 LOCAL_HELPERS = {"apps/jarvis-web/backend/main.py": "_service_key_headers"}
 # Still hand-built, and not changed by the route-auth review: each sends
 # get_config().service_api_key to the orchestrator or the mode service.
-KNOWN_RAW_SENDERS = {"src/gateway/livekit_integration.py": 1, "src/gateway/mode_gate.py": 1}
+KNOWN_RAW_SENDERS = {"src/gateway/livekit_integration.py": 1}
 
 
 def _key_header_sites(source):

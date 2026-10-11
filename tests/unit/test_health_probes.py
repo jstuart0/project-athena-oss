@@ -263,3 +263,57 @@ def test_health_probes_return_unchanged_shape():
     assert "components" in ready_data
     assert ready_data["ready"] is True
     assert ready_data["status"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Area registry state on /health
+# ---------------------------------------------------------------------------
+
+REGISTRY_STATES = {"disabled", "refused", "unavailable", "ok"}
+
+
+def _registry_in_state(state: str):
+    from shared import ha_registry
+
+    class _Fetcher:
+        async def __call__(self):
+            raise AssertionError("a health probe must not fetch")
+
+    registry = ha_registry.HARegistry(_Fetcher())
+    registry._state = state
+    return registry
+
+
+def test_orchestrator_health_reports_ha_registry_under_components_only():
+    _runtime.set_ha_registry(_registry_in_state("refused"))
+    body = asyncio.run(_get("/health")).json()
+    assert body["components"]["ha_registry"] == "refused"
+    assert "ha_registry" not in body
+
+
+def test_orchestrator_health_reports_disabled_when_no_registry_is_installed():
+    body = asyncio.run(_get("/health")).json()
+    assert body["components"]["ha_registry"] in REGISTRY_STATES
+
+
+def test_orchestrator_health_ha_registry_carries_only_a_state_word():
+    _runtime.set_ha_registry(_registry_in_state("ok"))
+    body = asyncio.run(_get("/health")).json()
+    assert isinstance(body["components"]["ha_registry"], str)
+    assert body["components"]["ha_registry"] in REGISTRY_STATES
+
+
+@pytest.mark.parametrize("state", ["ok", "unavailable", "refused", "disabled"])
+def test_gateway_health_reports_ha_registry_at_the_top_level(state, monkeypatch):
+    sys.modules.setdefault("prometheus_client", mock.MagicMock())
+    import gateway.main as gw
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(gw, "ha_registry", _registry_in_state(state))
+    monkeypatch.setattr(gw, "orchestrator_client", mock.MagicMock(get=mock.AsyncMock(side_effect=OSError)))
+    monkeypatch.setattr(gw, "ollama_client", None)
+    monkeypatch.setattr(gw, "orchestrator_circuit_breaker", None)
+    monkeypatch.setattr(gw, "global_rate_limiter", None)
+    body = TestClient(gw.app).get("/health").json()
+    assert body["ha_registry"] == state
+    assert "ha_registry" not in body.get("components", {})

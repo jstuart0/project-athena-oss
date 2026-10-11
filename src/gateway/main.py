@@ -31,6 +31,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
+from shared.ha_registry import HARegistry, create_registry
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
@@ -43,11 +44,13 @@ from shared.errors import (
     UpstreamError
 )
 from gateway.device_session_manager import get_device_session_manager, DeviceSessionManager
+from gateway import speaker_room
 from gateway.simple_commands import detect_simple_command, execute_simple_command
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
 from shared.client_throttle import invalid_network_entries, parse_networks, read_forwarded_for
+from shared.ha_registry import SatelliteRoomMap, parse_satellite_room_map
 from shared.assistant_profile import get_voice_response_limits
 from shared.output_channel import (
     OutputChannel,
@@ -147,6 +150,7 @@ device_session_mgr: Optional[DeviceSessionManager] = None
 admin_client = None  # Admin API client for configuration
 metric_client: Optional[httpx.AsyncClient] = None  # Shared client for metric logging
 ha_client: Optional[httpx.AsyncClient] = None  # Shared client for Home Assistant API
+ha_registry: Optional[HARegistry] = None  # Read-only Home Assistant area registry (shared.ha_registry)
 orchestrator_timeout: float = 120.0  # Resolved at startup from DB config; audit bob:5
 
 # Gateway configuration (loaded from database)
@@ -188,6 +192,25 @@ _SPEECH_CLIENT_NETWORKS, _SPEECH_NETWORKS_DROPPED = without_networks_overlapping
 )
 
 
+# Clients whose Home Assistant device id the gateway believes (see
+# gateway.speaker_room). An entry overlapping the trusted proxies is dropped
+# here for the same reason; the ERROR (a count) is logged from lifespan().
+HA_DEVICE_CLIENT_NETWORKS = _get_athena_config().ha_device_client_networks
+_DEVICE_CLIENT_NETWORKS, _DEVICE_NETWORKS_DROPPED = without_networks_overlapping(
+    parse_networks(HA_DEVICE_CLIENT_NETWORKS), _TRUSTED_PROXY_NETWORKS, log_error=False
+)
+
+
+_DEVICE_NETWORK_MIN_PREFIX = {4: 24, 6: 64}
+
+
+def _wide_device_networks(networks) -> int:
+    """How many HA_DEVICE_CLIENT_NETWORKS entries cover more than a /24 (IPv4)
+    or /64 (IPv6). Every address in such a network is believed to be a voice
+    device, so a broad one trusts far more than the HA hosts it is meant for."""
+    return sum(1 for net in networks if net.prefixlen < _DEVICE_NETWORK_MIN_PREFIX[net.version])
+
+
 def _log_speech_network_config() -> None:
     """Startup validation for OPENAI_SPEECH_CLIENT_NETWORKS. Counts only, never addresses."""
     invalid = invalid_network_entries(OPENAI_SPEECH_CLIENT_NETWORKS)
@@ -197,6 +220,14 @@ def _log_speech_network_config() -> None:
         logger.error("openai_speech_networks_overlap_trusted_proxies", count=_SPEECH_NETWORKS_DROPPED)
     if _SPEECH_CLIENT_NETWORKS and not _TRUSTED_PROXY_NETWORKS:
         logger.warning("openai_speech_networks_without_trusted_proxy")
+    invalid_device = invalid_network_entries(HA_DEVICE_CLIENT_NETWORKS)
+    if invalid_device:
+        logger.error("ha_device_client_networks_invalid", count=len(invalid_device))
+    if _DEVICE_NETWORKS_DROPPED:
+        logger.error("ha_device_networks_overlap_trusted_proxies", count=_DEVICE_NETWORKS_DROPPED)
+    wide = _wide_device_networks(_DEVICE_CLIENT_NETWORKS)
+    if wide:
+        logger.warning("ha_device_client_networks_wide", count=wide, widest_allowed="/24 (IPv4) or /64 (IPv6)")
 
 
 def _classify_openai_channel(raw_request: Request) -> OutputChannel:
@@ -263,27 +294,6 @@ _feature_flag_cache_ttl = 60.0  # seconds
 
 # General cache TTL (used by LLM backends cache)
 _cache_ttl = 60  # 60 seconds
-
-# Room detection cache with TTL (for ha_room_detection_cache feature)
-_room_cache: Dict[str, tuple] = {}
-_room_cache_ttl = 3.0  # seconds
-
-
-def _get_cached_room(device_id: str) -> Optional[str]:
-    """Get room from cache if valid."""
-    cache_key = f"room:{device_id}"
-    if cache_key in _room_cache:
-        cached_time, cached_room = _room_cache[cache_key]
-        if time.time() - cached_time < _room_cache_ttl:
-            return cached_room
-    return None
-
-
-def _set_cached_room(device_id: str, room: str):
-    """Store room in cache."""
-    cache_key = f"room:{device_id}"
-    _room_cache[cache_key] = (time.time(), room)
-
 
 # LLM backends cache (from database)
 _llm_backends_cache = []
@@ -407,7 +417,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     global orchestrator_client, ollama_client, device_session_mgr, admin_client, gateway_config
     global orchestrator_circuit_breaker, global_rate_limiter
-    global metric_client, ha_client
+    global metric_client, ha_client, ha_registry
     global orchestrator_timeout
     global new_conversation_limiter, new_conversation_limiter_redis_client
 
@@ -532,6 +542,19 @@ async def lifespan(app: FastAPI):
             backend="in-memory",
         )
 
+    # Home Assistant area registry: read-only, fetched in the background so a
+    # slow or unreachable HA never delays startup. Disabled without an HA token
+    # or with HA_AREAS=off. Built as a local, then assigned.
+    local_registry = create_registry(
+        ha_url=os.getenv("HA_URL"),
+        ha_token=os.getenv("HA_TOKEN"),
+        mode=_get_athena_config().ha_areas,
+        service_api_key=_get_athena_config().service_api_key,
+        redis=new_conversation_limiter_redis_client,
+    )
+    await local_registry.start()
+    ha_registry = local_registry
+
     # Check orchestrator health
     try:
         response = await orchestrator_client.get("/health")
@@ -571,6 +594,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"LiveKit shutdown error: {e}")
 
+    if ha_registry:
+        await ha_registry.close()
     if new_conversation_limiter_redis_client:
         await new_conversation_limiter_redis_client.aclose()
     if device_session_mgr:
@@ -587,47 +612,107 @@ async def lifespan(app: FastAPI):
         await ha_client.aclose()
 
 
-# Room <-> assist_satellite entity mapping, configured via
-# HA_SATELLITE_ROOM_MAP (JSON object {"<entity_id>": "<room>"}) rather than
-# hardcoded here (DC14 item 1a, OSS-First). Parsed lazily (not at import
-# time) so a malformed value degrades to "unconfigured" instead of crashing
-# gateway startup.
-_ha_satellite_room_map_cache: Optional[Dict[str, str]] = None
+# HA_SATELLITE_ROOM_MAP: {"<assist_satellite entity id or 32-hex device id>":
+# "<room>"}, configured rather than hardcoded (OSS-First). Parsed lazily (not
+# at import time) so a malformed value degrades to "unconfigured" instead of
+# crashing gateway startup. shared.ha_registry.parse_satellite_room_map splits
+# the two key kinds and reports bad keys as a count.
+_ha_satellite_room_map_cache: Optional[SatelliteRoomMap] = None
 _ha_satellite_room_map_warned = False
 
 
-def _get_ha_satellite_room_map() -> Dict[str, str]:
-    """entity_id -> room, from HA_SATELLITE_ROOM_MAP. Empty/unset/invalid
-    all resolve to {} (logged once, INFO for unset -- an expected default
-    state -- ERROR for invalid JSON -- a real misconfiguration)."""
+def _get_satellite_room_map() -> SatelliteRoomMap:
     global _ha_satellite_room_map_cache, _ha_satellite_room_map_warned
     if _ha_satellite_room_map_cache is not None:
         return _ha_satellite_room_map_cache
-
     raw = _get_athena_config().ha_satellite_room_map
-    if not raw:
-        if not _ha_satellite_room_map_warned:
-            logger.info("ha_satellite_room_map_unset_satellite_features_disabled")
-            _ha_satellite_room_map_warned = True
-        _ha_satellite_room_map_cache = {}
-        return _ha_satellite_room_map_cache
-
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("HA_SATELLITE_ROOM_MAP must be a JSON object")
-        _ha_satellite_room_map_cache = {str(k): str(v) for k, v in parsed.items()}
-    except Exception as e:
-        logger.error("ha_satellite_room_map_invalid_json", error=str(e))
-        _ha_satellite_room_map_cache = {}
+    if not raw and not _ha_satellite_room_map_warned:
+        logger.info("ha_satellite_room_map_unset_satellite_features_disabled")
+        _ha_satellite_room_map_warned = True
+    _ha_satellite_room_map_cache = parse_satellite_room_map(raw)
     return _ha_satellite_room_map_cache
 
 
 def _get_room_to_satellite_map() -> Dict[str, str]:
-    """room (lowercased) -> entity_id, the inverse of
-    _get_ha_satellite_room_map(), for send_satellite_announcement's
-    room-name lookup."""
-    return {room.lower(): entity_id for entity_id, room in _get_ha_satellite_room_map().items()}
+    """room (lowercased) -> assist_satellite entity id, the inverse of the
+    entity half of HA_SATELLITE_ROOM_MAP, for send_satellite_announcement.
+    Device-id keys are never inverted: a device id is not an announce target."""
+    return {room.lower(): entity_id for entity_id, room in _get_satellite_room_map().entity_rooms.items()}
+
+
+SATELLITE_STATES_TTL_SECONDS = 2.0
+_satellite_states_cache: tuple = (float("-inf"), [])
+
+
+async def _read_assist_satellite_states() -> List[Dict[str, Any]]:
+    """The assist_satellite entities' states, for the active-satellite guess.
+    Reused for SATELLITE_STATES_TTL_SECONDS so a burst of requests makes one
+    Home Assistant read, not one each."""
+    global _satellite_states_cache
+    fetched_at, cached = _satellite_states_cache
+    if time.monotonic() - fetched_at < SATELLITE_STATES_TTL_SECONDS:
+        return cached
+    states = await _fetch_assist_satellite_states()
+    _satellite_states_cache = (time.monotonic(), states)
+    return states
+
+
+async def _fetch_assist_satellite_states() -> List[Dict[str, Any]]:
+    ha_url = os.getenv("HA_URL", "http://localhost:8123")
+    ha_token = os.getenv("HA_TOKEN")
+    if not ha_token:
+        return []
+    headers = {"Authorization": f"Bearer {ha_token}"}
+    if ha_client:
+        resp = await ha_client.get(f"{ha_url}/api/states", headers=headers)
+    else:
+        async with httpx.AsyncClient(timeout=3.0, verify=False) as client:
+            resp = await client.get(f"{ha_url}/api/states", headers=headers)
+    if resp.status_code != 200:
+        return []
+    return [s for s in resp.json() if str(s.get("entity_id", "")).startswith("assist_satellite.")]
+
+
+def _is_trusted_voice(raw_request: Request) -> bool:
+    """Whether this request is a trusted voice caller (see gateway.speaker_room):
+    its device id may be believed, and an owner-mode "all the lights" from it
+    may reach every area's lamps."""
+    return speaker_room.trusted_voice_caller(
+        raw_request,
+        api_key=API_KEY,
+        device_networks=_DEVICE_CLIENT_NETWORKS,
+        trusted_proxies=_TRUSTED_PROXY_NETWORKS,
+    )
+
+
+def _believed_device_id(raw_request: Request, device_id: Optional[str]) -> Optional[str]:
+    """The device id only when a trusted voice caller sent a well-formed one.
+    Everything keyed on a device (its room, its follow-up fingerprint, its
+    session) uses this, never the raw id."""
+    if device_id and speaker_room.DEVICE_ID_RE.fullmatch(device_id) and _is_trusted_voice(raw_request):
+        return device_id
+    return None
+
+
+async def _speaker_room_for_request(
+    raw_request: Request, *, device_id: Optional[str], marker_rejected: bool = False,
+) -> tuple:
+    """(room key or "unknown", the device id when it was believed).
+
+    A device id counts only from a trusted voice caller (see
+    gateway.speaker_room); the second value is what may be forwarded to the
+    orchestrator as voice_device_id."""
+    trusted = _is_trusted_voice(raw_request)
+    resolved = await speaker_room.resolve_speaker_room(
+        device_id=device_id,
+        trusted=trusted,
+        registry=ha_registry,
+        satellite_map=_get_satellite_room_map(),
+        read_states=_read_assist_satellite_states,
+        marker_rejected=marker_rejected,
+    )
+    believed = device_id if trusted and device_id and speaker_room.DEVICE_ID_RE.fullmatch(device_id) else None
+    return resolved.key or "unknown", believed
 
 
 async def send_satellite_announcement(room: str, message: str) -> bool:
@@ -652,7 +737,7 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
     # Map room to satellite entity
     satellite_entity = _get_room_to_satellite_map().get(room.lower())
     if not satellite_entity:
-        logger.warning(f"No satellite mapping for room: {room}")
+        logger.warning("No satellite mapping for the requested room")
         return False
 
     try:
@@ -1235,6 +1320,7 @@ async def route_to_orchestrator(
     return_session_id: bool = False,
     voice_device_id: Optional[str] = None,
     supports_followup: bool = False,
+    trusted_voice: bool = False,
 ) -> Union[ChatCompletionResponse, tuple]:
     """
     Route request to Athena orchestrator.
@@ -1300,8 +1386,12 @@ async def route_to_orchestrator(
 
             # ATHENA-128 D14: a literal, set only for callers that opt in --
             # never derived from an inbound request field.
-            if supports_followup:
+            # ... and only for a device the gateway believed: a follow-up
+            # needs a fingerprint, which needs a trusted device id.
+            if supports_followup and voice_device_id:
                 payload["supports_followup"] = True
+            if trusted_voice:
+                payload["trusted_voice"] = True
             # A caller-fingerprint input only. Never sent as device_id: that
             # field is the orchestrator's guest-session lookup key.
             if voice_device_id:
@@ -1519,7 +1609,13 @@ def _stream_error_line() -> str:
 
 
 def _orchestrator_openai_payload(
-    request: ChatCompletionRequest, device_id: Optional[str] = None, *, stream: bool, channel: OutputChannel
+    request: ChatCompletionRequest,
+    room: Optional[str] = None,
+    *,
+    stream: bool,
+    channel: OutputChannel,
+    voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> dict:
     """Build the OpenAI-shaped payload the orchestrator's
     /v1/chat/completions expects. Shared by the streaming
@@ -1539,10 +1635,19 @@ def _orchestrator_openai_payload(
         "temperature": request.temperature,
         "stream": stream,
         "extra_body": {
-            "room": device_id or "unknown",  # Pass room context
+            "room": room or "unknown",  # Pass room context
             "interface_type": interface_type_for_channel(channel),
         },
     }
+    # A believed device id (see gateway.speaker_room) makes this a follow-up
+    # surface: the orchestrator reads both keys only from a service-key caller.
+    if voice_device_id:
+        payload["extra_body"]["voice_device_id"] = voice_device_id
+        payload["extra_body"]["supports_followup"] = True
+    # Server-derived: set only for a trusted voice caller. The orchestrator
+    # reads it only from a service-key caller.
+    if trusted_voice:
+        payload["extra_body"]["trusted_voice"] = True
     # ATHENA-88 / F88: forward identity top-level too, omitting unset
     # values (never send them as None or "").
     if stream and (request.stream_options or {}).get("include_usage") is True:
@@ -1551,8 +1656,8 @@ def _orchestrator_openai_payload(
         payload["user"] = request.user
     if request.session_id is not None:
         payload["session_id"] = request.session_id
-    if device_id is not None:
-        payload["room"] = device_id
+    if room is not None:
+        payload["room"] = room
     return payload
 
 
@@ -1568,7 +1673,12 @@ def _orchestrator_usage(usage: Any) -> Optional[Dict[str, int]]:
 
 
 async def route_chat_completion_to_orchestrator(
-    request: ChatCompletionRequest, device_id: Optional[str] = None, *, channel: OutputChannel
+    request: ChatCompletionRequest,
+    room: Optional[str] = None,
+    *,
+    channel: OutputChannel,
+    voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> ChatCompletionResponse:
     """F97 non-streaming path (D1-B): forwards the full OpenAI payload (not
     just the last user message) to the orchestrator's /v1/chat/completions,
@@ -1595,7 +1705,10 @@ async def route_chat_completion_to_orchestrator(
         if msg.role == "user":
             user_message = msg.content
 
-    payload = _orchestrator_openai_payload(request, device_id, stream=False, channel=channel)
+    payload = _orchestrator_openai_payload(
+        request, room, stream=False, channel=channel, voice_device_id=voice_device_id,
+        trusted_voice=trusted_voice,
+    )
 
     try:
         with request_duration.labels(endpoint="orchestrator").time():
@@ -1643,15 +1756,20 @@ async def route_chat_completion_to_orchestrator(
 
 async def stream_orchestrator_response(
     request: ChatCompletionRequest,
-    device_id: Optional[str] = None,
+    room: Optional[str] = None,
     *,
     channel: OutputChannel,
+    voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> AsyncIterator[str]:
     """Stream response from orchestrator's OpenAI-compatible endpoint."""
     try:
         # Forward streaming request to orchestrator's /v1/chat/completions endpoint
         # Note: room context passed via extra_body for orchestrator to use
-        payload = _orchestrator_openai_payload(request, device_id, stream=True, channel=channel)
+        payload = _orchestrator_openai_payload(
+            request, room, stream=True, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
+        )
 
         # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
@@ -1759,10 +1877,15 @@ async def chat_completions(
     )
 
     try:
-        # Detect room from active Voice PE satellite for context
-        # This allows commands like "turn off the lights" to know which room
-        room = await _detect_room_from_active_satellite("unknown")
-        logger.info(f"Detected room from satellite: {room}")
+        # The speaker's room: the device id the HA agent put in its prompt
+        # (trusted callers only), looked up in the area registry. The marker
+        # line is removed before the messages go any further.
+        marker_device_id, cleaned_messages, _, marker_rejected = speaker_room.extract_device_marker(request.messages)
+        request = request.model_copy(update={"messages": cleaned_messages})
+        room, voice_device_id = await _speaker_room_for_request(
+            raw_request, device_id=marker_device_id, marker_rejected=marker_rejected,
+        )
+        trusted_voice = _is_trusted_voice(raw_request)
 
         # Log-only routing hint: every request goes to the orchestrator, so the
         # keyword match is all this needs (no LLM call ahead of the orchestrator).
@@ -1778,7 +1901,10 @@ async def chat_completions(
 
             # Always stream from orchestrator to ensure tools are available
             return StreamingResponse(
-                stream_orchestrator_response(request, device_id=room, channel=channel),
+                stream_orchestrator_response(
+                    request, room=room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
+                ),
                 media_type="text/event-stream"
             )
 
@@ -1790,7 +1916,10 @@ async def chat_completions(
             logger.info("Routing to orchestrator (default - tools always available)")
 
         # Always use orchestrator so tools are available, pass room for context
-        response = await route_chat_completion_to_orchestrator(request, device_id=room, channel=channel)
+        response = await route_chat_completion_to_orchestrator(
+            request, room=room, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
+        )
 
         request_counter.labels(endpoint="chat_completions", status="success").inc()
         return response
@@ -1914,21 +2043,31 @@ async def responses_api(
             forwarded_for=read_forwarded_for(raw_request.headers),
         )
 
-        # Detect room
-        room = await _detect_room_from_active_satellite("unknown")
-        logger.info(f"Responses API - detected room: {room}")
+        # The speaker's room (instructions are the first system message here)
+        marker_device_id, cleaned_messages, _, marker_rejected = speaker_room.extract_device_marker(chat_request.messages)
+        chat_request = chat_request.model_copy(update={"messages": cleaned_messages})
+        room, voice_device_id = await _speaker_room_for_request(
+            raw_request, device_id=marker_device_id, marker_rejected=marker_rejected,
+        )
+        trusted_voice = _is_trusted_voice(raw_request)
 
         # Handle streaming
         if request.stream:
             request_counter.labels(endpoint="responses_api", status="streaming").inc()
             # For streaming, we need to convert the SSE format
             return StreamingResponse(
-                stream_responses_api(chat_request, room, channel=channel),
+                stream_responses_api(
+                    chat_request, room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
+                ),
                 media_type="text/event-stream"
             )
 
         # Non-streaming: route to orchestrator
-        response = await route_chat_completion_to_orchestrator(chat_request, device_id=room, channel=channel)
+        response = await route_chat_completion_to_orchestrator(
+            chat_request, room=room, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
+        )
 
         # Convert ChatCompletionResponse to ResponsesAPIResponse
         response_text = ""
@@ -1967,7 +2106,8 @@ async def responses_api(
 
 
 async def stream_responses_api(
-    request: ChatCompletionRequest, device_id: str, *, channel: OutputChannel
+    request: ChatCompletionRequest, room: str, *, channel: OutputChannel, voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> AsyncIterator[str]:
     """Stream responses in Responses API format.
 
@@ -2052,7 +2192,10 @@ async def stream_responses_api(
             try:
                 logger.info(f"ACK_TIMING: Orchestrator task STARTED at {time_module.time() - ack_start_time:.3f}s")
                 first_chunk = True
-                async for chunk in stream_orchestrator_response(request, device_id=device_id, channel=channel):
+                async for chunk in stream_orchestrator_response(
+                    request, room=room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
+                ):
                     if first_chunk:
                         logger.info(f"ACK_TIMING: First orchestrator chunk at {time_module.time() - ack_start_time:.3f}s")
                         first_chunk = False
@@ -2186,7 +2329,8 @@ async def health_check():
     health = {
         "status": "healthy",
         "service": "gateway",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "ha_registry": ha_registry.state if ha_registry else "disabled",
     }
 
     # Check orchestrator
@@ -2522,154 +2666,6 @@ async def list_models():
             ]
         }
 
-_SATELLITE_FRIENDLY_NAME_ROOM = re.compile(r"Voice\s*-\s*(.+?)\s*(Assist|$)", re.IGNORECASE)
-
-
-def _room_from_satellite(sat: dict, entity_to_room: Dict[str, str]) -> Optional[str]:
-    """Resolve a room for one active satellite: HA_SATELLITE_ROOM_MAP entry
-    first (DC14 item 1a), then a generic "Voice - <Room> Assist"
-    friendly_name parse as the fallback (DC17 item 2 -- restored: a
-    satellite not present in the map shouldn't silently give up when its
-    friendly_name still names the room in the common Voice PE convention),
-    else None."""
-    room_name = entity_to_room.get(sat["entity_id"])
-    if room_name:
-        return room_name
-    match = _SATELLITE_FRIENDLY_NAME_ROOM.search(sat.get("friendly_name", ""))
-    if match:
-        return match.group(1).strip().lower().replace(" ", "_")
-    return None
-
-
-async def _detect_room_from_active_satellite(device_id: str) -> str:
-    """
-    Detect which room the conversation is coming from by checking active Voice PE satellites.
-
-    Since HA doesn't pass device_id in conversation requests, we query HA's
-    assist_satellite entities to find which one is currently active (not
-    idle) and resolve a room for it via _room_from_satellite: the
-    HA_SATELLITE_ROOM_MAP entity->room map first, then a generic
-    friendly_name parse, then "unknown".
-
-    Args:
-        device_id: The device_id from the request (usually "unknown")
-
-    Returns:
-        Room name (e.g., "office", "master_bedroom") or "unknown" when it
-        can't be determined -- never a hardcoded house room (D11).
-
-    Performance:
-        - Uses shared ha_client instead of creating new httpx.AsyncClient for every call.
-        - When ha_room_detection_cache is enabled, caches room for 3 seconds.
-        - Saves ~100-200ms per request during continued conversations.
-    """
-    # If device_id is already a valid room, use it
-    known_rooms = ["office", "kitchen", "living_room", "master_bedroom", "bedroom", "dining_room"]
-    if device_id.lower() in known_rooms:
-        return device_id.lower()
-
-    entity_to_room = _get_ha_satellite_room_map()
-
-    # Check if caching is enabled via feature flag
-    cache_enabled = await get_feature_flag("ha_room_detection_cache", default=False)
-
-    if cache_enabled:
-        # Try cache first
-        cached_room = _get_cached_room(device_id)
-        if cached_room:
-            logger.debug(f"Room cache hit for {device_id}: {cached_room}")
-            return cached_room
-
-    # Query HA for active satellite
-    try:
-        ha_url = os.getenv("HA_URL", "http://localhost:8123")
-        ha_token = os.getenv("HA_TOKEN")
-
-        if not ha_token:
-            logger.warning("HA_TOKEN not set, cannot detect room from satellite")
-            return "unknown"
-
-        headers = {"Authorization": f"Bearer {ha_token}"}
-
-        # Use shared ha_client for connection reuse (performance optimization)
-        if ha_client:
-            resp = await ha_client.get(f"{ha_url}/api/states", headers=headers)
-        else:
-            # Fallback if client not initialized
-            async with httpx.AsyncClient(timeout=3.0, verify=False) as client:
-                resp = await client.get(f"{ha_url}/api/states", headers=headers)
-
-        if resp.status_code != 200:
-            logger.warning(f"Failed to query HA states: {resp.status_code}")
-            return "unknown"
-
-        states = resp.json()
-
-        # Collect all assist_satellite entities
-        satellites = []
-        for state in states:
-            entity_id = state.get("entity_id", "")
-            if "assist_satellite" in entity_id:
-                current_state = state.get("state", "idle")
-                friendly_name = state.get("attributes", {}).get("friendly_name", "")
-                last_changed = state.get("last_changed", "")
-                satellites.append({
-                    "entity_id": entity_id,
-                    "state": current_state,
-                    "friendly_name": friendly_name,
-                    "last_changed": last_changed
-                })
-
-        # First pass: Look for any currently active (not idle) satellite
-        for sat in satellites:
-            if sat["state"] != "idle":
-                room_name = _room_from_satellite(sat, entity_to_room)
-                if room_name:
-                    logger.info(f"Detected active satellite in room: {room_name} (state: {sat['state']})")
-                    if cache_enabled:
-                        _set_cached_room(device_id, room_name)
-                    return room_name
-
-        # Second pass: No active satellite - check for recently changed (within 10 seconds)
-        # This handles the race condition where satellite went back to idle
-        now = datetime.now(timezone.utc)
-        recent_threshold_seconds = 10
-
-        recently_changed = []
-        for sat in satellites:
-            try:
-                # Parse ISO timestamp
-                last_changed_str = sat["last_changed"]
-                if last_changed_str:
-                    last_changed_dt = datetime.fromisoformat(last_changed_str.replace("Z", "+00:00"))
-                    age_seconds = (now - last_changed_dt).total_seconds()
-                    if age_seconds < recent_threshold_seconds:
-                        recently_changed.append((sat, age_seconds))
-            except Exception as e:
-                logger.debug(f"Error parsing last_changed for {sat['entity_id']}: {e}")
-
-        # If we found recently changed satellites, use the most recent one
-        if recently_changed:
-            # Sort by age (most recent first)
-            recently_changed.sort(key=lambda x: x[1])
-            sat, age = recently_changed[0]
-            room_name = _room_from_satellite(sat, entity_to_room)
-            if room_name:
-                logger.info(f"Detected recently active satellite in room: {room_name} (changed {age:.1f}s ago)")
-                if cache_enabled:
-                    _set_cached_room(device_id, room_name)
-                return room_name
-
-        # No active satellite found - might be a race condition or satellite already went idle
-        # Fall back to most recently used or default
-        logger.info("No active or recently changed satellite found, defaulting to unknown")
-        return "unknown"
-
-    except Exception as e:
-        logger.warning(f"Error detecting room from satellite: {e}")
-        return "unknown"
-
-
 # =============================================================================
 # Session Warmup for Wake Word Detection
 # =============================================================================
@@ -2693,12 +2689,12 @@ async def _warmup_session(device_id: str):
                     f"{ORCHESTRATOR_URL}/session/{session_id}/warmup",
                     headers=service_key_headers(),
                 )
-                logger.debug(f"Session warmed for device {device_id}")
+                logger.debug("device_session_warmed")
         else:
             # No existing session - nothing to warm
-            logger.debug(f"No session to warm for device {device_id}")
+            logger.debug("device_session_nothing_to_warm")
     except Exception as e:
-        logger.warning(f"Session warmup failed for {device_id}: {e}")
+        logger.warning("device_session_warmup_failed", error_class=type(e).__name__)
 
 
 @app.post("/ha/wake-word-detected")
@@ -2730,7 +2726,7 @@ async def ha_wake_word_detected(request: dict) -> dict:
     # Pre-fetch session in background (non-blocking)
     asyncio.create_task(_warmup_session(device_id))
 
-    logger.info("wake_word_detected_warmup_started", device_id=device_id)
+    logger.info("wake_word_detected_warmup_started", has_device_id=bool(device_id))
     return {"status": "warming", "device_id": device_id}
 
 
@@ -2766,8 +2762,15 @@ def _ha_response_payload(speech_text: str, language: str) -> Dict[str, Any]:
     }
 
 
+async def _session_for_device(believed_device_id: Optional[str]) -> Optional[str]:
+    """The conversation session of a believed device; none for anyone else."""
+    if not believed_device_id:
+        return None
+    return await device_session_mgr.get_session_for_device(believed_device_id)
+
+
 @app.post("/ha/conversation", response_model=HAConversationResponse)
-async def ha_conversation(request: HAConversationRequest):
+async def ha_conversation(request: HAConversationRequest, raw_request: Request):
     """
     Home Assistant conversation endpoint for Voice PE devices.
 
@@ -2796,30 +2799,32 @@ async def ha_conversation(request: HAConversationRequest):
     try:
         device_id = request.device_id or "unknown"
 
+        # Everything keyed on the device (room, fingerprint, session) uses
+        # the id only when a trusted voice caller sent it.
+        believed_device_id = _believed_device_id(raw_request, request.device_id)
+        trusted_voice = _is_trusted_voice(raw_request)
+
         # Check if parallel initialization is enabled
         parallel_enabled = await get_feature_flag("ha_parallel_init", default=False)
 
         if parallel_enabled:
             # Run room detection and session lookup in parallel
-            room_task = _detect_room_from_active_satellite(device_id)
-            session_task = device_session_mgr.get_session_for_device(device_id)
+            room_task = _speaker_room_for_request(raw_request, device_id=request.device_id)
+            session_task = _session_for_device(believed_device_id)
 
-            room, existing_session_id = await asyncio.gather(room_task, session_task)
-            logger.debug(f"Parallel init completed: room={room}, session={existing_session_id}")
+            (room, _), existing_session_id = await asyncio.gather(room_task, session_task)
+            logger.debug(f"Parallel init completed: room_known={room != 'unknown'}")
         else:
             # Original sequential logic
-            room = await _detect_room_from_active_satellite(device_id)
-            existing_session_id = await device_session_mgr.get_session_for_device(device_id)
+            room, _ = await _speaker_room_for_request(raw_request, device_id=request.device_id)
+            existing_session_id = await _session_for_device(believed_device_id)
 
-        logger.info(
-            f"HA conversation request from device: {device_id}, "
-            f"detected room: {room}, query: text_len={len(request.text)}"
-        )
+        logger.info("ha_conversation_request", room_known=room != "unknown", query_len=len(request.text))
 
         if existing_session_id:
-            logger.info(f"Using existing session {existing_session_id} for device {device_id}")
+            logger.info("ha_conversation_session", reused=True, has_device_id=bool(believed_device_id), trusted_voice=trusted_voice)
         else:
-            logger.info(f"Creating new session for device {device_id}")
+            logger.info("ha_conversation_session", reused=False, has_device_id=bool(believed_device_id), trusted_voice=trusted_voice)
 
         # Check if simple command fast-path is enabled
         fastpath_enabled = await get_feature_flag("ha_simple_command_fastpath", default=False)
@@ -2832,12 +2837,7 @@ async def ha_conversation(request: HAConversationRequest):
                 command_type, params = simple_cmd
                 logger.info(f"Simple command detected: {command_type}, params: {params}")
 
-                ha_url = os.getenv("HA_URL", "http://localhost:8123")
-                ha_token = os.getenv("HA_TOKEN", "")
-
-                response_text = await execute_simple_command(
-                    command_type, params, ha_client, ha_url, ha_token
-                )
+                response_text = await execute_simple_command(command_type, params)
 
                 if response_text:
                     # Return fast-path response
@@ -2882,30 +2882,9 @@ async def ha_conversation(request: HAConversationRequest):
                         continue_conversation=False
                     )
 
-            elif intent == "HOME":
-                # Try simple command handler for device control
-                simple_cmd = await detect_simple_command(request.text)
-                if simple_cmd:
-                    command_type, params = simple_cmd
-                    ha_url = os.getenv("HA_URL", "http://localhost:8123")
-                    ha_token = os.getenv("HA_TOKEN", "")
+            # HOME (device control) and COMPLEX intents go to the orchestrator:
+            # the gateway writes nothing to Home Assistant.
 
-                    response_text = await execute_simple_command(
-                        command_type, params, ha_client, ha_url, ha_token
-                    )
-
-                    if response_text:
-                        request_counter.labels(endpoint="ha_conversation", status="prerouted_home").inc()
-                        logger.info(f"Pre-routed HOME response: {response_text}")
-
-                        return HAConversationResponse(
-                            response=_ha_response_payload(response_text, request.language),
-                            conversation_id=request.conversation_id or "prerouted",
-                            continue_conversation=False
-                        )
-                # Fall through to orchestrator if HOME command not handled
-
-            # COMPLEX intent falls through to full orchestrator
 
         # Create OpenAI-compatible request for routing
         chat_request = ChatCompletionRequest(
@@ -2923,16 +2902,18 @@ async def ha_conversation(request: HAConversationRequest):
                 device_id=room,  # Use mapped room name for audio routing
                 session_id=existing_session_id,
                 return_session_id=True,
-                voice_device_id=request.device_id,
+                voice_device_id=believed_device_id,
                 supports_followup=True,
+                trusted_voice=trusted_voice,
             )
 
         # Extract answer from chat response
         answer = chat_response.choices[0].message.content if chat_response.choices else "I couldn't process that request."
 
         # Update device session mapping with the orchestrator's session_id
-        await device_session_mgr.update_session_for_device(device_id, orchestrator_session_id)
-        logger.info(f"Updated session mapping: device {device_id} → session {orchestrator_session_id}")
+        if believed_device_id:
+            await device_session_mgr.update_session_for_device(believed_device_id, orchestrator_session_id)
+            logger.info("ha_conversation_session_mapped")
 
         # Rule: If the response contains a question mark OR a follow-up phrase, continue listening
         # This ensures the system waits for a response when it asks a question
@@ -2958,10 +2939,10 @@ async def ha_conversation(request: HAConversationRequest):
         )
 
         if should_continue:
-            logger.info(f"Continued conversation enabled for device {device_id} (response contains question)")
+            logger.info("ha_conversation_continue_enabled")
 
         request_counter.labels(endpoint="ha_conversation", status="success").inc()
-        logger.info(f"HA conversation completed: device {device_id}, session {orchestrator_session_id}")
+        logger.info("ha_conversation_completed", has_session=bool(orchestrator_session_id))
 
         return ha_response
 

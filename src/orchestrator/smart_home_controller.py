@@ -6,16 +6,20 @@ import asyncio
 import contextlib
 import json
 import random
+import re
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
-from .ha_entity_manager import HAEntityManager, _tokens, cover_light_targets, expand_light_leaves
+from . import room_choice, room_context
+from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
-from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
+from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
+from shared.ha_registry import room_key
 
 
 _jarvis_key_warned = False
@@ -111,23 +115,6 @@ THERMOSTAT_DOWN_RESPONSES = [
     "Got it, dropped it to {low}-{high}°F.",
 ]
 
-LIGHT_ON_RESPONSES = [
-    "Done! {lights} on.",
-    "{lights} turned on.",
-    "Got it, {lights} on.",
-    "Done!",
-    "Turned on {lights}.",
-]
-
-LIGHT_OFF_RESPONSES = [
-    "Done! {lights} off.",
-    "{lights} turned off.",
-    "Got it, {lights} off.",
-    "Done!",
-    "Turned off {lights}.",
-]
-
-
 def vary_response(templates: list, **kwargs) -> str:
     """Pick a random response template and format it with provided kwargs."""
     template = random.choice(templates)
@@ -135,6 +122,89 @@ def vary_response(templates: list, **kwargs) -> str:
         return template.format(**kwargs)
     except KeyError:
         return templates[0].format(**kwargs)
+
+
+# A room whose lights all fail the availability check is re-fetched from Home
+# Assistant at most this often (a room that is permanently down, such as one
+# being set up, must not force a fetch on every command).
+UNAVAILABLE_REFRESH_SECONDS = 60.0
+_monotonic = time.monotonic
+_UNAVAILABLE_STATES = ("unavailable", "unknown")
+
+
+def _join_spoken(items: Sequence[str]) -> str:
+    items = [i for i in items if i]
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def light_reply(
+    action: str,
+    *,
+    rooms: Sequence[str] = (),
+    whole_house: bool = False,
+    excluded: Sequence[str] = (),
+    single_name: Optional[str] = None,
+    colour: Optional[str] = None,
+    percent: Optional[int] = None,
+    unavailable: int = 0,
+) -> str:
+    """The one wording of a light command's reply, built from the room's
+    spoken label and never from entity ids. A single physical light is named
+    (``single_name``); otherwise the reply names the room(s), the whole
+    house, or the whole house except some rooms. ``unavailable`` appends how
+    many lights didn't respond."""
+    if single_name:
+        target = f"the {single_name}"
+    elif whole_house:
+        target = "all the lights"
+    else:
+        target = f"the {_join_spoken(rooms)} lights"
+    except_text = f" except the {_join_spoken(excluded)}" if whole_house and excluded else ""
+    if action == "turn_on":
+        text = f"Turned on {target}{except_text}."
+    elif action == "turn_off":
+        text = f"Turned off {target}{except_text}."
+    elif action == "set_color":
+        text = f"Set {target}{except_text} to {colour or 'the colours'}."
+    elif action == "set_brightness":
+        text = f"Set {target}{except_text} to {percent}% brightness."
+    elif action == "increase":
+        text = f"Brightened {target}{except_text}."
+    elif action == "decrease":
+        text = f"Dimmed {target}{except_text}."
+    else:
+        text = f"Updated {target}{except_text}."
+    if unavailable == 1:
+        text += " 1 isn't responding."
+    elif unavailable > 1:
+        text += f" {unavailable} aren't responding."
+    return text
+
+
+# What the writers that cover several rooms can do. Anything else would write
+# nothing, so they say so instead of claiming it was done.
+MULTI_ROOM_ACTIONS = frozenset({"turn_on", "turn_off"})
+ROOM_GROUP_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
+WHOLE_HOUSE_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
+SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name one room."
+
+
+# The device types whose room is decided by room_context.decide_room, and the
+# HA domain each writes.
+_DECIDED_DOMAINS = {
+    "light": "light", "fan": "fan", "switch": "switch",
+    "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
+}
+_NO_SPEAKER_ROOM = ("unknown", "guest")
+
+
+def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
+    """The speaker's room for the device types that don't decide one."""
+    if device_room and device_room.lower() not in _NO_SPEAKER_ROOM:
+        return device_room
+    return None
 
 
 _light_groups_cache: Optional[Dict[str, str]] = None
@@ -365,7 +435,7 @@ class SmartHomeController:
             else:
                 room = 'front_door'  # Default to front door
 
-            logger.info(f"Fast path lock command: action={action}, room={room}")
+            logger.info(f"Fast path lock command: action={action}, has_room={bool(room)}")
             return {
                 "device_type": "lock",
                 "room": room,
@@ -447,7 +517,7 @@ class SmartHomeController:
                 room = 'master_bedroom'
             elif 'office' in query_lower:
                 room = 'office'
-            logger.info(f"Fast path fan command: action={action}, room={room}")
+            logger.info(f"Fast path fan command: action={action}, has_room={bool(room)}")
             return {
                 "device_type": "fan",
                 "room": room,
@@ -571,8 +641,11 @@ class SmartHomeController:
             ('lights off everywhere', 'turn_off'),
             ('lights on everywhere', 'turn_on'),
         ]
-        # Only use whole_house fast path if NO exclusion keywords present
-        if not has_exclusion_keywords:
+        # Only use whole_house fast path if NO exclusion keywords present, and
+        # only when the wording really asks for the whole house: "turn off all
+        # the lights in the galley" contains "turn off all the lights" and
+        # names a room, so it falls through to the room path.
+        if not has_exclusion_keywords and self._explicit_whole_house(query_lower) is not None:
             for pattern, action in whole_house_light_patterns:
                 if pattern in query_lower:
                     logger.info(f"Fast path whole house lights: pattern='{pattern}', action={action}")
@@ -796,14 +869,8 @@ class SmartHomeController:
         ]
         if any(p in query_lower for p in light_status_patterns):
             # This is a status query, route to get_status action
-            room = None
-            if 'upstairs' in query_lower:
-                room = 'upstairs'
-            elif 'downstairs' in query_lower:
-                room = 'downstairs'
-            elif 'basement' in query_lower:
-                room = 'basement'
-            logger.info(f"Fast path light STATUS query: room={room}")
+            room = self._single_room(query_lower)
+            logger.info(f"Fast path light STATUS query: has_room={bool(room)}")
             return {
                 "device_type": "light",
                 "room": room,
@@ -824,23 +891,11 @@ class SmartHomeController:
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
         has_exclusion_in_query = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding', ' but '])
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path 'lights out' or 'kill lights': room={final_room}")
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
+            logger.info(f"Fast path 'lights out' or 'kill lights': has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "turn_off",
                 "target_scope": "group",
                 "parameters": {},
@@ -857,27 +912,15 @@ class SmartHomeController:
                           'flip the light', 'flip the',  # Round 15: "flip the porch light"
                           'get it lit', 'get the', 'lemme get']  # Round 16: "yo lemme get the kitchen lit"
         if any(p in query_lower for p in turn_on_phrases):
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             # For "just a little light" or "on low" set low brightness
             params = {}
             if 'little light' in query_lower or 'a little light' in query_lower or 'on low' in query_lower:
                 params = {"brightness": 30}  # Low brightness for "just a little light" or "on low"
-            logger.info(f"Fast path turn ON phrase: room={final_room} params={params}")
+            logger.info(f"Fast path turn ON phrase: has_room={bool(room_fields.get('room'))} params={params}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "turn_on",
                 "target_scope": "group",
                 "parameters": params,
@@ -894,46 +937,22 @@ class SmartHomeController:
         is_thermostat_context = any(t in query_lower for t in thermostat_exclusions)
 
         if any(p in query_lower for p in implicit_brighter) and not is_thermostat_context:
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness INCREASE: room={final_room} for query_len={len(query)}")
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
+            logger.info(f"Fast path implicit brightness INCREASE: has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "increase",  # Use "increase" to match execute_intent handler
                 "target_scope": "group",
                 "parameters": {},
                 "color_description": None
             }
         elif any(p in query_lower for p in implicit_dimmer):
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness DECREASE: room={final_room} for query_len={len(query)}")
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
+            logger.info(f"Fast path implicit brightness DECREASE: has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "decrease",  # Use "decrease" to match execute_intent handler
                 "target_scope": "group",
                 "parameters": {},
@@ -941,136 +960,36 @@ class SmartHomeController:
             }
 
         if (is_turn_on or is_turn_off) and not has_color:
-            # Extract room from query using pattern matching
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-
-            # MULTI-ROOM DETECTION: Check for "room1 and room2" patterns
-            # e.g., "turn on kitchen and living room lights"
             import re
-            multi_room_matches = []
-            for room in room_names:
-                if room in query_lower:
-                    multi_room_matches.append(room)
-
-            # Check if multiple rooms are joined by "and"
-            if len(multi_room_matches) >= 2 and ' and ' in query_lower:
-                # Verify rooms are actually connected by "and" (not separate phrases)
-                # Build a pattern to check: room1...and...room2
-                connected = False
-                for i, room1 in enumerate(multi_room_matches):
-                    for room2 in multi_room_matches[i+1:]:
-                        # Check if "and" appears between the two rooms
-                        pattern1 = f"{re.escape(room1)}.*\\s+and\\s+.*{re.escape(room2)}"
-                        pattern2 = f"{re.escape(room2)}.*\\s+and\\s+.*{re.escape(room1)}"
-                        if re.search(pattern1, query_lower) or re.search(pattern2, query_lower):
-                            connected = True
-                            break
-                    if connected:
-                        break
-
-                if connected:
-                    action = "turn_on" if is_turn_on else "turn_off"
-                    # Return multi-room intent with list of rooms
-                    logger.info(f"Fast path MULTI-ROOM: action={action}, rooms={multi_room_matches}")
-                    return {
-                        "device_type": "light",
-                        "room": "multi_room",  # Special marker
-                        "rooms": multi_room_matches,  # List of rooms to control
-                        "action": action,
-                        "target_scope": "group",
-                        "parameters": {},
-                        "color_description": None
-                    }
+            action = "turn_on" if is_turn_on else "turn_off"
+            directory = self._directory()
 
             # SPECIAL CASE: "leave X on but turn off the rest" pattern
             # This is an inverted exclusion where the excluded room is mentioned FIRST
             leave_on_pattern = re.search(r'leave\s+(the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and)\s+turn\s+off', query_lower)
             if leave_on_pattern:
-                excluded_room_candidate = leave_on_pattern.group(2).strip()
-                logger.info(f"'Leave X on but turn off' pattern detected: candidate='{excluded_room_candidate}'")
-                # Find matching room
-                for room in room_names:
-                    if room in excluded_room_candidate or excluded_room_candidate in room:
-                        logger.info(f"Leave-on exclusion: turning off all EXCEPT '{room}'")
-                        return {
-                            "device_type": "light",
-                            "room": "whole_house",
-                            "excluded_rooms": [room],
-                            "action": "turn_off",
-                            "target_scope": "group",
-                            "parameters": {},
-                            "color_description": None
-                        }
-
-            # Check for exclusion patterns: "except X", "but not X", "not the X", "everything but X"
-            has_exclusion = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding'])
-            # Also check "everything but" or "all lights but" patterns
-            if not has_exclusion:
-                has_exclusion = bool(re.search(r'(everything|all\s+(the\s+)?lights?)\s+but\s+', query_lower))
-            # Round 17: Added "every" and "every light" patterns
-            has_all = 'all' in query_lower or 'everything' in query_lower or 'everywhere' in query_lower or 'every light' in query_lower or 'every room' in query_lower
-
-            if has_exclusion and has_all:
-                # Extract excluded rooms (rooms mentioned after "except", "but not", etc.)
-                excluded_rooms = []
-                # Find rooms after exclusion keywords
-                exclusion_patterns = [
-                    r'except\s+(the\s+)?(\w+\s*\w*)',
-                    r'but not\s+(the\s+)?(\w+\s*\w*)',
-                    r'not the\s+(\w+\s*\w*)',
-                    r'excluding\s+(the\s+)?(\w+\s*\w*)',
-                    r'(?:everything|all\s+(?:the\s+)?lights?)\s+but\s+(the\s+)?(\w+\s*\w*)'  # "everything but X" or "all lights but X"
-                ]
-                logger.info(f"Exclusion detection: query_lower_len={len(query_lower)}, has_exclusion={has_exclusion}, has_all={has_all}")
-                for pattern in exclusion_patterns:
-                    match = re.search(pattern, query_lower)
-                    if match:
-                        # Get the last group (the room name)
-                        potential_room = match.group(match.lastindex).strip()
-                        logger.info(f"Exclusion pattern match: pattern='{pattern}', potential_room='{potential_room}'")
-                        # Validate it's a known room
-                        for room in room_names:
-                            if room in potential_room or potential_room in room:
-                                excluded_rooms.append(room)
-                                logger.info(f"Exclusion room found: '{room}'")
-                                break
-
-                logger.info(f"Total excluded_rooms: {excluded_rooms}")
-                if excluded_rooms:
-                    action = "turn_on" if is_turn_on else "turn_off"
-                    logger.info(f"Fast path with exclusion: action={action}, room=whole_house, excluded={excluded_rooms}")
+                excluded = room_context.find_room_mention(leave_on_pattern.group(2).strip(), directory)
+                if excluded.kind != "none":
+                    kept = [c.key for c in excluded.candidates] if excluded.kind != "exact" else [excluded.candidates[0].key]
+                    logger.info(f"Leave-on exclusion: turning off all except {len(kept)} room(s)")
                     return {
                         "device_type": "light",
                         "room": "whole_house",
-                        "excluded_rooms": excluded_rooms,
-                        "action": action,
+                        "excluded_rooms": kept,
+                        "action": "turn_off",
                         "target_scope": "group",
                         "parameters": {},
                         "color_description": None
                     }
 
-            # Normal room extraction (no exclusion, single room)
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-
-            # Use device room as fallback if no room in query
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            action = "turn_on" if is_turn_on else "turn_off"
-            logger.info(f"Fast path extract_intent: action={action}, room={final_room} for query_len={len(query)}")
+            # Normal path: the wording and the rooms said decide (whole house,
+            # several rooms joined by "and", one room, or none).
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
+            logger.info(f"Fast path extract_intent: action={action}, has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
 
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": action,
                 "target_scope": "group",
                 "parameters": {},
@@ -1114,28 +1033,12 @@ class SmartHomeController:
         # Check for ambient color keywords - use these as fast path to avoid LLM misinterpretation
         for ambient_name, color_config in ambient_color_commands.items():
             if ambient_name in query_lower:
-                # Extract room if present
-                room_names = [
-                    'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                    'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                    'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                    'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                    'first floor', 'second floor', 'downstairs', 'upstairs', 'whole house'
-                ]
-                extracted_room = None
-                for room in room_names:
-                    if room in query_lower:
-                        extracted_room = room
-                        break
-
-                # If "all" or no room specified, use whole_house for ambient effects
-                if 'all' in query_lower or extracted_room is None:
-                    extracted_room = 'whole_house'
-
-                logger.info(f"Fast path ambient color: {ambient_name} -> room={extracted_room}")
+                # The room said, or the whole house only when the wording asks for it
+                room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
+                logger.info(f"Fast path ambient color: {ambient_name} -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
-                    "room": extracted_room,
+                    **room_fields,
                     "action": "set_color",
                     "target_scope": "all_individual",
                     "parameters": {"hs_colors": color_config['hs_colors']},
@@ -1186,25 +1089,12 @@ class SmartHomeController:
                 hue, sat = 200, 30  # Cool white
 
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            logger.info(f"Fast path light color temp: {target_color} -> room={final_room}")
+            logger.info(f"Fast path light color temp: {target_color} -> has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "set_color",
                 "target_scope": "all_individual",
                 "parameters": {"hs_colors": [[hue, sat], [hue, sat], [hue, sat]]},
@@ -1222,25 +1112,12 @@ class SmartHomeController:
         if color_match:
             color_name, (hue, sat) = color_match
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            logger.info(f"Fast path basic color: {color_name} -> room={final_room}")
+            logger.info(f"Fast path basic color: {color_name} -> has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "set_color",
                 "target_scope": "all_individual",
                 "parameters": {"hs_colors": [[hue, sat], [hue, sat], [hue, sat]]},
@@ -1337,26 +1214,13 @@ class SmartHomeController:
 
         if brightness_match:
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
 
             if isinstance(brightness_match, int):
-                logger.info(f"Fast path brightness: {brightness_match}/255 -> room={final_room}")
+                logger.info(f"Fast path brightness: {brightness_match}/255 -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
-                    "room": final_room,
+                    **room_fields,
                     "action": "set_brightness",
                     "target_scope": "group",
                     "parameters": {"brightness": brightness_match},
@@ -1364,10 +1228,10 @@ class SmartHomeController:
                 }
             else:
                 action = "increase" if brightness_match == "increase" else "decrease"
-                logger.info(f"Fast path brightness: {action} -> room={final_room}")
+                logger.info(f"Fast path brightness: {action} -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
-                    "room": final_room,
+                    **room_fields,
                     "action": action,
                     "target_scope": "group",
                     "parameters": {"brightness_step": 50},  # ~20% change
@@ -1400,7 +1264,7 @@ class SmartHomeController:
             'indoor temp', 'inside temp', 'temp in here', 'how hot is it in here',
             'how cold is it in here', 'what is the temp in here'
         ]
-        is_thermostat = any(p in query_lower for p in thermostat_patterns)
+        is_thermostat = any(p in query_lower for p in thermostat_patterns) or is_indoor_temperature_question(query_lower)
         # Also check for temperature setting pattern
         # Flexible regex: allow text between verb and number (e.g., "set the temperature to 72")
         temp_match = re.search(r'(?:set|heat|cool|thermostat).*?(?:to\s+)?(\d+)\s*(?:degrees)?', query_lower)
@@ -1440,11 +1304,8 @@ class SmartHomeController:
                 "color_description": None
             }
 
-        # Build room context hint if device room is provided
-        room_context = ""
-        if device_room and device_room not in ["unknown", "guest"]:
-            room_context = f"\nDevice location: The user is speaking from the {device_room}. If no room is specified in the query, use \"{device_room}\" as the room."
-
+        # The model is told nothing about where the speaker is: a room it
+        # returns must be one the utterance names (see ground_intent_rooms).
         # Build conversation context for follow-ups and corrections
         conversation_context = ""
         if prev_query and prev_response:
@@ -1475,7 +1336,7 @@ For example, if the previous action was on "bed_warmer" and user says "level 2",
         intent_prompt = f"""Extract the smart home control intent from this query. Return ONLY valid JSON.
 {conversation_context}
 Query: "{query}"
-Number of lights to control: {light_count}{room_context}
+Number of lights to control: {light_count}
 
 Return JSON with this structure:
 {{
@@ -1597,6 +1458,7 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = json.loads(text)
+            self._ground_intent_rooms(intent, query)
             # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
             # function with a write action, even if the LLM (or a hostile
             # one) returned one -- this is the coercion path referent
@@ -1785,14 +1647,12 @@ Return ONLY the JSON, no other text."""
         logger = logging.getLogger(__name__)
 
         current_time = local_now().strftime("%H:%M")
-        room = device_room or "unknown"
 
         sequence_prompt = f"""You are a smart home assistant that creates action sequences.
 
 Parse this request and generate a sequence of steps.
 
 User request: "{query}"
-Current room: {room}
 Current time: {current_time}
 
 Generate a JSON response:
@@ -1804,7 +1664,7 @@ Generate a JSON response:
             "action": "turn_on|turn_off|set_color|set_brightness",
             "target": {{
                 "device_type": "light|switch|climate|lock|media_player",
-                "room": "room name"
+                "room": "room name or null"
             }},
             "parameters": {{
                 "brightness": 0-255 or null,
@@ -1823,7 +1683,7 @@ Rules:
 3. For "different colors each time", use distinct colors: red(0), orange(30), yellow(60), green(120), cyan(180), blue(240), purple(280), pink(330)
 4. Use delay_after for relative waits (e.g., "wait 3 seconds" → delay_after: 3)
 5. Use at_time for scheduled actions (e.g., "at 6pm" → at_time: "18:00")
-6. If no room specified, use: {room}
+6. If the request names no room, set room to null (never guess one)
 7. Keep acknowledge brief - it will be spoken aloud
 8. For "keep the light on for X seconds", use turn_on + delay_after + turn_off
 
@@ -1871,49 +1731,88 @@ Return ONLY valid JSON."""
                 "acknowledge": "Let me try that.",
                 "steps": [{
                     "action": "turn_on" if "on" in query.lower() else "turn_off",
-                    "target": {"device_type": "light", "room": room},
+                    "target": {"device_type": "light", "room": None},
                     "parameters": {},
                     "delay_after": 0,
                     "at_time": None
                 }]
             }
 
+    def _directory(self):
+        """The deployment's room directory, or None (generic room words only)."""
+        from .room_directory import current_directory
+        return current_directory()
+
+    def _explicit_whole_house(self, query: str):
+        return room_context.explicit_whole_house(query, self._directory())
+
+    def _room_fields(self, query: str, *, whole_house: bool, multi: bool) -> Dict:
+        """The room part of an intent, from what the utterance says and
+        nothing else; the speaker's room is not applied here.
+
+        ``whole_house``: whole-house wording gives ``room: whole_house`` (with
+        ``excluded_rooms``). ``multi``: rooms joined by "and" and plural
+        phrases give ``room: multi_room``. Each is passed only by the commands
+        whose writer handles it (the multi-room writer turns lights on and
+        off; the whole-house writer also sets colours); otherwise the first
+        room named is used, as before.
+        """
+        directory = self._directory()
+        if whole_house:
+            whole = room_context.explicit_whole_house(query, directory)
+            if whole is not None:
+                fields: Dict = {"room": "whole_house"}
+                if whole.excluded:
+                    fields["excluded_rooms"] = [ref.key for ref in whole.excluded]
+                return fields
+        joined = room_context.joined_room_mentions(query, directory)
+        if joined:
+            rooms = list(dict.fromkeys(key for m in joined for key in room_context.room_values(m)))
+        else:
+            rooms = list(room_context.room_values(room_context.find_room_mention(query, directory)))
+        if multi and len(rooms) > 1:
+            return {"room": "multi_room", "rooms": rooms}
+        return {"room": rooms[0] if rooms else None}
+
+    def _single_room(self, query: str) -> Optional[str]:
+        """The one room an utterance names, for a status answer, or None."""
+        values = room_context.room_values(room_context.find_room_mention(query, self._directory()))
+        return values[0] if values else None
+
+    def _ground_intent_rooms(self, intent: Dict, query: str) -> None:
+        """Keep a model's room and exclusions only where the utterance names
+        them (whole tokens); ``whole_house`` only for whole-house wording."""
+        directory = self._directory()
+        room = intent.get("room")
+        if isinstance(room, str):
+            grounded = room_context.ground_llm_room(room, query, directory)
+            if grounded != room_key(room) and grounded != room:
+                import logging
+                logging.getLogger(__name__).info("llm_room_ungrounded")
+            intent["room"] = grounded
+        elif room is not None:
+            intent["room"] = None
+        excluded = intent.get("excluded_rooms")
+        if isinstance(excluded, list):
+            kept = [g for g in (room_context.ground_llm_room(r, query, directory) for r in excluded if isinstance(r, str)) if g]
+            intent["excluded_rooms"] = kept or None
+        if intent.get("room") != "whole_house":
+            intent.pop("excluded_rooms", None)
+
     def _extract_room_from_query(self, query: str) -> Optional[str]:
-        """Fallback room extraction from query using regex patterns"""
+        """Fallback room extraction when the intent named none: the whole
+        house for whole-house wording, else a room the directory (or the
+        generic room words) knows, else a room-shaped phrase."""
         import re
         query_lower = query.lower()
 
-        # Check for whole-house patterns FIRST
-        whole_house_patterns = [
-            'whole house', 'entire house', 'all the lights', 'all lights',
-            'every room', 'all rooms', 'everywhere', 'the house',
-            'throughout the house', 'in the house',
-            # Added patterns for "everything" and "all lights on/off"
-            'everything off', 'turn everything', 'everything on',
-            'all lights on', 'all lights off', 'lights on all', 'lights off all',
-            # Round 17: "every light" patterns
-            'every light', 'on every light'
-        ]
-        for pattern in whole_house_patterns:
-            if pattern in query_lower:
-                return 'whole_house'  # Special marker for whole-house control
+        whole = self._explicit_whole_house(query_lower)
+        if whole is not None:
+            return 'whole_house'
 
-        # Known room names to match against
-        known_rooms = [
-            'office', 'kitchen', 'bedroom', 'living room', 'livingroom', 'bathroom',
-            'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-            'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-            'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-            # Room group names and aliases
-            'first floor', '1st floor', 'main floor', 'ground floor', 'downstairs',
-            'second floor', '2nd floor', 'upstairs', 'upper floor',
-            'lower level', 'cellar'
-        ]
-
-        # First, try to find a known room name directly in the query
-        for room in known_rooms:
-            if room in query_lower:
-                return room
+        values = room_context.room_values(room_context.find_room_mention(query_lower, self._directory()))
+        if values:
+            return values[0]
 
         # Patterns to match room names in queries
         patterns = [
@@ -2050,14 +1949,25 @@ Return ONLY valid JSON."""
                        "For detailed IoT device status, network diagnostics, or protocol-specific queries, "
                        "please check your Home Assistant dashboard or network management tools.")
 
-            # Use device_room as fallback if room not specified in intent
-            if not room and device_room and device_room not in ["unknown", "guest"]:
-                room = device_room
-                intent['room'] = room  # Update intent so downstream handlers have it
+            # Where the command acts is decided once, here, and recorded on
+            # the intent (decided_room and friends): replays and follow-ups
+            # carry it instead of deciding again. Lights, fans, switches and
+            # media players go through decide_room; other devices keep the
+            # room they were given, else the speaker's.
+            decided_domain = _DECIDED_DOMAINS.get(device_type)
+            if decided_domain:
+                outcome = await self._decide_intent_room(intent, original_query, device_room, action, decided_domain)
+                if outcome is not None:
+                    return outcome
+                room = intent.get('room')
+            elif not room:
+                room = _plain_speaker_room(device_room)
+                if room:
+                    intent['room'] = room  # Update intent so downstream handlers have it
 
             # Handle climate/thermostat queries
             if device_type == 'climate':
-                return _finish(await self._handle_climate_intent(action, parameters, original_query, ha_client))
+                return _finish(await self._handle_climate_intent(action, parameters, original_query, ha_client, room=room))
 
             # Handle appliance queries (oven, fridge, freezer) -- read-only, no ha_client write
             if device_type in ['oven', 'fridge', 'freezer', 'appliance']:
@@ -2142,7 +2052,83 @@ Return ONLY valid JSON."""
                     'type': 'group' if members else 'individual',
                 }]
             logger.warning("ha_light_groups_entity_missing")
+        snapshot = self._registry_snapshot()
+        find_area_lights = getattr(self.entity_manager, "find_area_lights", None)
+        if snapshot is not None and key and find_area_lights is not None:
+            area = snapshot.area_by_key(key) or next(iter(snapshot.areas_by_alias(room)), None)
+            if area is not None:
+                in_area = await find_area_lights(snapshot, area.area_id)
+                if in_area:
+                    return in_area
         return await self.entity_manager.find_lights_by_room(room)
+
+    @staticmethod
+    def _registry_snapshot():
+        """The current area-registry snapshot, or None (no registry, off, or
+        not fetched yet)."""
+        from orchestrator.nodes import _runtime
+        registry = _runtime.get_ha_registry()
+        return registry.current() if registry is not None else None
+
+    def _area_entities(self, room: Optional[str], domain: str, all_entities: Dict) -> Optional[List[str]]:
+        """The ids of one domain in the room's registry area that Home
+        Assistant also reports; [] when the room is an area with none. None
+        when the room isn't an area (no registry, or a name no area has), so
+        the caller falls back to matching names."""
+        snapshot = self._registry_snapshot()
+        key = room_key(room or "")
+        if snapshot is None or not key:
+            return None
+        area = snapshot.area_by_key(key) or next(iter(snapshot.areas_by_alias(room)), None)
+        if area is None:
+            return None
+        return [eid for eid in snapshot.entities_in(area.area_id, domain) if eid in all_entities]
+
+    def _spoken_room(self, room: Optional[str]) -> str:
+        """How a room is said aloud: the directory's label (an area's name,
+        ``(2)`` read as ``2``), else its key with spaces."""
+        directory = self._directory()
+        ref = directory.ref(room_key(room or "")) if directory is not None else None
+        return ref.label if ref is not None else (room or "").replace("_", " ")
+
+    async def _light_availability(self, gate_ids: Sequence[str], refresh_key: str) -> Tuple[int, int]:
+        """(lights, lights that aren't responding) among the physical lights a
+        command would write. A light is down when its state is unavailable or
+        unknown or it is absent from Home Assistant's states. When every one is
+        down, states are re-fetched once (at most once a minute per
+        ``refresh_key``) before believing it; a failed re-fetch counts as
+        still down."""
+        entities = await self.entity_manager.get_entities()
+
+        def down(ids):
+            return [i for i in ids if (entities.get(i) or {}).get('state', 'unavailable') in _UNAVAILABLE_STATES]
+
+        dead = down(gate_ids)
+        if gate_ids and len(dead) == len(gate_ids):
+            refreshed = self.__dict__.setdefault("_forced_refresh_at", {})
+            now = _monotonic()
+            if now - refreshed.get(refresh_key, -UNAVAILABLE_REFRESH_SECONDS) >= UNAVAILABLE_REFRESH_SECONDS:
+                refreshed[refresh_key] = now
+                try:
+                    entities = await self.entity_manager.get_entities(force_refresh=True)
+                except Exception as exc:
+                    import structlog
+                    structlog.get_logger(__name__).warning(
+                        "light_state_refresh_failed", error_class=type(exc).__name__
+                    )
+                else:
+                    dead = down(gate_ids)
+        return len(gate_ids), len(dead)
+
+    async def _single_light_name(self, gate_ids: Sequence[str]) -> Optional[str]:
+        """The friendly name of the one physical light a command writes, or
+        None when it writes several."""
+        if len(gate_ids) != 1:
+            return None
+        entities = await self.entity_manager.get_entities()
+        attrs = (entities.get(gate_ids[0]) or {}).get('attributes') or {}
+        name = attrs.get('friendly_name')
+        return name if isinstance(name, str) and name else None
 
     async def _finalize_light_targets(
         self,
@@ -2215,6 +2201,238 @@ Return ONLY valid JSON."""
                 current_ha_scope(), "light", service, lt.denied_ids, "entity_or_domain_denied"
             )
 
+    @staticmethod
+    def _set_decided(
+        intent: Dict, room: str, label: Optional[str] = None,
+        rooms: Sequence[str] = (), excluded: Sequence[str] = (), labels: Sequence[str] = (),
+    ) -> None:
+        """Record where a command acts: the decision other code carries
+        forward unchanged (plain strings only, so it stores as JSON)."""
+        intent['room'] = room
+        intent['decided_room'] = room
+        intent['decided_rooms'] = list(rooms)
+        intent['decided_excluded'] = list(excluded)
+        intent['room_label'] = label or ", ".join(labels)
+        if rooms:
+            intent['rooms'] = list(rooms)
+        if excluded:
+            intent['excluded_rooms'] = list(excluded)
+
+    @staticmethod
+    def _apply_decided(intent: Dict) -> None:
+        """Make an already-decided intent's room fields agree with the
+        decision (a follow-up's merge may have overwritten ``room``)."""
+        intent['room'] = intent['decided_room']
+        if intent.get('decided_rooms'):
+            intent['rooms'] = list(intent['decided_rooms'])
+        if intent.get('decided_excluded'):
+            intent['excluded_rooms'] = list(intent['decided_excluded'])
+
+    @staticmethod
+    async def _is_room_group(name: str) -> bool:
+        """Whether the admin room groups have one by this name (the directory
+        refreshes its copy only every few minutes)."""
+        try:
+            return bool(await get_admin_client().resolve_room_group(name))
+        except Exception:
+            return False
+
+    async def _room_has_permitted_target(self, domain: str, key: str) -> Optional[bool]:
+        """Whether the request may write anything in a room: for lights, its
+        lamp leaves after the permission degrade; for other domains, its
+        entities of that domain. None when the room has no such targets."""
+        from orchestrator.mode_permission import check_entity_permission, current_ha_scope
+        if domain == 'light':
+            matches = await self._resolve_room_lights(key)
+            if not matches:
+                return None
+            lt = await self._finalize_light_targets(matches, per_light=True)
+            return bool(lt.write_ids)
+        scope = current_ha_scope()
+        spoken = key.replace('_', ' ')
+        entities = await self.entity_manager.get_entities()
+        ids = [
+            eid for eid, ent in entities.items()
+            if eid.startswith(f"{domain}.") and (
+                spoken in eid.replace('_', ' ')
+                or spoken in str(((ent or {}).get('attributes') or {}).get('friendly_name', '')).lower()
+            )
+        ]
+        if not ids:
+            return None
+        if scope is None:
+            return True
+        return any(check_entity_permission(eid, scope.permissions) for eid in ids)
+
+    async def _permitted_rooms(self, domain: str, refs: Sequence) -> Tuple[list, bool]:
+        """(rooms the request may use, whether any room was refused). Rooms
+        with nothing to write are left out of both."""
+        permitted, refused = [], False
+        for ref in refs:
+            verdict = await self._room_has_permitted_target(domain, ref.key)
+            if verdict is True:
+                permitted.append(ref)
+            elif verdict is False:
+                refused = True
+        return permitted, refused
+
+    async def decide_sequence_rooms(
+        self, steps: Sequence[Dict], query: str, device_room: Optional[str],
+    ) -> Optional[str]:
+        """Decide every sequence step's room before anything is scheduled.
+
+        A step's room is the one it names (the model's, which must be a room
+        of the directory or the speaker's), ``whole_house`` only when the
+        utterance says so, else the speaker's room if the directory knows it.
+        Each light/fan/switch/media step comes out carrying its decision
+        (decided_room and friends), so the executor never decides. Returns the
+        question or refusal to answer with (nothing scheduled, nothing
+        recorded), or None when every step is decided."""
+        for step in steps:
+            target = step.get('target') or {}
+            domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
+            if not domain or target.get('entity_id'):
+                continue
+            intent = {k: v for k, v in target.items() if k in ('device_type', 'room', 'rooms')}
+            if intent.get('room') == 'whole_house':
+                if domain == 'light' and room_context.is_explicit_whole_house(query):
+                    self._set_decided(intent, "whole_house", "all the lights")
+                    target.update(intent)
+                    continue
+                # The model chose the whole house for words that don't ask for
+                # it: no step acts on a house nobody named.
+                return room_context.ask_text(room_context.AskRoom())
+            outcome = await self._decide_intent_room(
+                intent, None, device_room, step.get('action', 'turn_on'), domain, record=False,
+            )
+            if outcome is not None:
+                return outcome
+            target.update({k: v for k, v in intent.items() if k in (
+                'room', 'rooms', 'excluded_rooms', 'decided_room', 'decided_rooms', 'decided_excluded', 'room_label')})
+        return None
+
+    async def _decide_intent_room(
+        self, intent: Dict, original_query: Optional[str], device_room: Optional[str],
+        action: str, domain: str, *, record: bool = True,
+    ) -> Optional[str]:
+        """Decide the room once (D18). Returns None when the command goes on
+        (the intent now carries decided_room), or the text to answer with
+        (a question, or a refusal).
+
+        Authorize first: a room is offered, or chosen from several, only when
+        the request's permissions allow at least one target in it, so a
+        denied caller never hears a room list."""
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
+        if intent.get('decided_room'):
+            self._apply_decided(intent)
+            return None
+        read = action == 'get_status'
+        lights = domain == 'light'
+        directory = self._directory()
+        given = intent.get('room')
+        if given == 'multi_room' and intent.get('rooms'):
+            keys = list(dict.fromkeys(room_key(r) for r in intent['rooms'] if r))
+            decision = room_context.Rooms(tuple(keys), tuple(self._spoken_room(k) for k in keys))
+        else:
+            mention = room_context.find_room_mention(original_query, directory)
+            if mention.kind == "none":
+                # A room the speaker named that the directory lacks is looked
+                # up by name (a house with no area for it may still have
+                # lights called that). If nothing answers to it, say so: it
+                # must not become the speaker's room, or the whole house.
+                unknown = room_context.unknown_room_phrase(original_query, directory)
+                if unknown:
+                    if (
+                        await self._room_has_permitted_target(domain, room_key(unknown)) is None
+                        and not await self._is_room_group(unknown)
+                    ):
+                        return f"I couldn't find a room called {unknown}."
+                    given = unknown
+            if mention.kind == "none" and isinstance(given, str) and given not in ("", "whole_house", "unknown"):
+                phrase = given.replace("_", " ")
+                mention = room_context.find_room_mention(phrase, directory)
+                if mention.kind == "none":
+                    ref = room_context.RoomRef(room_key(given), self._spoken_room(given))
+                    mention = room_context.RoomMention(phrase, "exact", (ref,))
+            decision = room_context.decide_room(
+                mention, query=original_query, speaker_room=device_room, directory=directory,
+                allow_whole_house=lights,
+            )
+        scope = current_ha_scope()
+
+        if isinstance(decision, room_context.Room):
+            self._set_decided(intent, decision.key, decision.label)
+            return None
+        if isinstance(decision, room_context.WholeHouse):
+            if read:
+                intent['room'] = None
+                return None
+            excluded = [ref.key for ref in decision.excluded]
+            self._set_decided(intent, "whole_house", "all the lights", excluded=excluded)
+            return None
+        if isinstance(decision, room_context.Rooms):
+            refs = [room_context.RoomRef(k, l) for k, l in zip(decision.keys, decision.labels)]
+            permitted, refused = await self._permitted_rooms(domain, refs)
+            if not permitted and not refused:
+                return f"I couldn't find any {'lights' if lights else domain.replace('_', ' ') + 's'} in those rooms."
+            if not permitted:
+                # Nothing is asked here, so nothing leaks: the writer
+                # refuses and records the denial like any other.
+                permitted = refs
+            keys = [r.key for r in permitted]
+            if len(keys) == 1:
+                self._set_decided(intent, keys[0], permitted[0].label)
+            else:
+                self._set_decided(intent, "multi_room", rooms=keys, labels=[r.label for r in permitted])
+            return None
+        if isinstance(decision, room_context.AskWhich):
+            permitted, refused = await self._permitted_rooms(domain, decision.candidates)
+            if not permitted:
+                if refused:
+                    return permission_refusal_message((domain,), scope)
+                return f"I couldn't find any {'lights' if lights else domain.replace('_', ' ') + 's'} in the {decision.phrase}."
+            if len(permitted) == 1:
+                self._set_decided(intent, permitted[0].key, permitted[0].label)
+                return None
+            decision = room_context.AskWhich(tuple(permitted), decision.phrase)
+        elif read:
+            # No room named and the speaker's is unknown: a question about
+            # the house is about the whole house.
+            intent['room'] = None
+            return None
+        return room_choice.ask(intent, decision, record=record and original_query is not None, read=read)
+
+    async def _resolve_ambiguous_room(
+        self, room: str, prefixes: Sequence[str], intent: Optional[Dict] = None, original_query: Optional[str] = None,
+    ):
+        """A name that is only part of several rooms' names ("bathroom" for
+        "north bathroom" and "south bathroom").
+
+        Authorize first: a candidate counts only when the request's
+        permissions allow at least one of its lights. None allowed gives the
+        refusal, one gives that room (no question), several give the question,
+        which names only rooms the caller may use. Returns ``(room, matches)``
+        or the reply text.
+        """
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
+        permitted = []
+        for prefix in prefixes:
+            matches = await self._resolve_room_lights(prefix)
+            if not matches:
+                continue
+            lt = await self._finalize_light_targets(matches, per_light=True)
+            if lt.write_ids:
+                permitted.append((prefix, matches))
+        if not permitted:
+            return permission_refusal_message(("light",), current_ha_scope())
+        if len(permitted) == 1:
+            return permitted[0]
+        refs = tuple(
+            room_context.RoomRef(prefix, self._spoken_room(prefix)) for prefix, _ in permitted
+        )
+        question = room_context.AskWhich(refs, room.replace("_", " "))
+        return room_choice.ask(intent or {}, question, record=original_query is not None)
+
     async def _dispatch_light_or_room_command(
         self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
         intent: Dict, ha_client, original_query: str = None,
@@ -2256,9 +2474,16 @@ Return ONLY valid JSON."""
 
         # Find lights for the room
         light_matches = await self._resolve_room_lights(room)
+        ambiguous = getattr(light_matches, 'ambiguous_rooms', ())
+        if ambiguous and not light_matches:
+            resolved = await self._resolve_ambiguous_room(room, ambiguous, intent, original_query)
+            if isinstance(resolved, str):
+                return resolved
+            room, light_matches = resolved
 
+        room_label = self._spoken_room(room)
         if not light_matches:
-            return f"I couldn't find any lights for {room}."
+            return f"I couldn't find any lights in the {room_label}."
 
         # Check if user wants ALL matching lights (multiple groups)
         # Detect "all" in room name or target_scope indicates multiple targets
@@ -2313,12 +2538,17 @@ Return ONLY valid JSON."""
             return permission_refusal_message(("light",), current_ha_scope())
         target_lights = list(lt.write_ids)
 
+        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key=room)
+        if light_total and light_down == light_total:
+            return f"The {room_label} lights aren't responding right now."
+        single_name = await self._single_light_name(lt.gate_ids)
+
         # ATHENA-128 4.3: gate before any task list is built. Every branch
         # below (turn_on/turn_off/set_color, all sub-branches) writes the
         # same finalized target_lights set; the gate counts the lights
         # beneath it.
         _fanout_prompt = write_fanout.gate(
-            "light", _fanout_service, lt.gate_ids, original_query, room=room,
+            "light", _fanout_service, lt.gate_ids, original_query, room=room_label,
         )
         if _fanout_prompt:
             return _fanout_prompt
@@ -2332,20 +2562,14 @@ Return ONLY valid JSON."""
                 ha_client.call_service("light", "turn_on", {"entity_id": light})
                 for light in target_lights
             ])
-            light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-            if len(target_lights) > 3:
-                light_names += f" and {len(target_lights) - 3} more"
-            return vary_response(LIGHT_ON_RESPONSES, lights=light_names)
+            return light_reply("turn_on", rooms=[room_label], single_name=single_name, unavailable=light_down)
 
         elif action == "turn_off":
             await asyncio.gather(*[
                 ha_client.call_service("light", "turn_off", {"entity_id": light})
                 for light in target_lights
             ])
-            light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-            if len(target_lights) > 3:
-                light_names += f" and {len(target_lights) - 3} more"
-            return vary_response(LIGHT_OFF_RESPONSES, lights=light_names)
+            return light_reply("turn_off", rooms=[room_label], single_name=single_name, unavailable=light_down)
 
         elif action == "set_color":
             # Check for LLM-generated hs_colors first (new flexible approach)
@@ -2397,10 +2621,8 @@ Return ONLY valid JSON."""
                         )
                         for light in target_lights
                     ])
-                    light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-                    if len(target_lights) > 3:
-                        light_names += f" and {len(target_lights) - 3} more"
-                    return f"Done! I've set {light_names} to {detected_color}."
+                    return light_reply("set_color", rooms=[room_label], single_name=single_name,
+                                       colour=detected_color, unavailable=light_down)
                 else:
                     # Use LLM-generated colors for varied/themed requests
                     # Build color assignments then execute in parallel
@@ -2421,10 +2643,8 @@ Return ONLY valid JSON."""
                         hue, sat = hs_colors[color_idx]
                         tasks.append(set_light_color(light, hue, sat))
                     await asyncio.gather(*tasks)
-                    light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-                    if len(target_lights) > 3:
-                        light_names += f" and {len(target_lights) - 3} more"
-                    return f"Done! I've set {light_names} to {color_description}."
+                    return light_reply("set_color", rooms=[room_label], single_name=single_name,
+                                       colour=color_description, unavailable=light_down)
 
             # Fallback to old color_mode logic for backwards compatibility
             color_mode = parameters.get('color_mode', 'same')
@@ -2451,10 +2671,8 @@ Return ONLY valid JSON."""
                     )
                     for i, light in enumerate(target_lights)
                 ])
-                light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-                if len(target_lights) > 3:
-                    light_names += f" and {len(target_lights) - 3} more"
-                return f"Done! I've set {light_names} to {color_desc}."
+                return light_reply("set_color", rooms=[room_label], single_name=single_name,
+                                   colour=color_desc, unavailable=light_down)
 
             elif color_mode == "specific":
                 color_value = parameters.get('color_value', 'white')
@@ -2472,10 +2690,8 @@ Return ONLY valid JSON."""
                     )
                     for light in target_lights
                 ])
-                light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-                if len(target_lights) > 3:
-                    light_names += f" and {len(target_lights) - 3} more"
-                return f"Done! I've set {light_names} to {color_value}."
+                return light_reply("set_color", rooms=[room_label], single_name=single_name,
+                                   colour=color_value, unavailable=light_down)
 
         elif action == "set_brightness":
             brightness = parameters.get('brightness', 128)  # Default to 50%
@@ -2494,10 +2710,8 @@ Return ONLY valid JSON."""
                 )
                 for light in target_lights
             ])
-            light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-            if len(target_lights) > 3:
-                light_names += f" and {len(target_lights) - 3} more"
-            return f"Done! I've set {light_names} to {percent}% brightness."
+            return light_reply("set_brightness", rooms=[room_label], single_name=single_name,
+                               percent=percent, unavailable=light_down)
 
         elif action == "increase":
             # Increase brightness by ~20%
@@ -2514,10 +2728,7 @@ Return ONLY valid JSON."""
                 )
                 for light in target_lights
             ])
-            light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-            if len(target_lights) > 3:
-                light_names += f" and {len(target_lights) - 3} more"
-            return f"Done! I've increased brightness for {light_names}."
+            return light_reply("increase", rooms=[room_label], single_name=single_name, unavailable=light_down)
 
         elif action == "decrease":
             # Decrease brightness by ~20%
@@ -2534,14 +2745,13 @@ Return ONLY valid JSON."""
                 )
                 for light in target_lights
             ])
-            light_names = ', '.join([l.split('.')[-1].replace('_', ' ') for l in target_lights[:3]])
-            if len(target_lights) > 3:
-                light_names += f" and {len(target_lights) - 3} more"
-            return f"Done! I've decreased brightness for {light_names}."
+            return light_reply("decrease", rooms=[room_label], single_name=single_name, unavailable=light_down)
 
         return "I understood your request but couldn't execute it."
 
-    async def _handle_climate_intent(self, action: str, parameters: Dict, original_query: str = None, ha_client = None) -> str:
+    async def _handle_climate_intent(
+        self, action: str, parameters: Dict, original_query: str = None, ha_client = None, room: Optional[str] = None,
+    ) -> str:
         """Handle climate/thermostat queries and control"""
         from orchestrator.mode_permission import ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
@@ -2550,9 +2760,6 @@ Return ONLY valid JSON."""
 
         # Get climate state from entity manager
         climate_state = await self.entity_manager.get_climate_state()
-
-        if not climate_state:
-            return "I couldn't find a thermostat to check."
 
         query_lower = (original_query or "").lower()
 
@@ -2568,6 +2775,14 @@ Return ONLY valid JSON."""
         if not is_status_query and not has_set_command:
             if "what is it set to" in query_lower or "what's it set to" in query_lower:
                 is_status_query = True
+
+        if (is_status_query or action in ['get_status', 'check', 'read']) and room and is_indoor_temperature_question(original_query):
+            reading = await self._room_temperature_reply(room)
+            if reading:
+                return reading
+
+        if not climate_state:
+            return "I couldn't find a thermostat to check."
 
         if is_status_query or action in ['get_status', 'check', 'read']:
             # Return current thermostat status
@@ -2696,6 +2911,21 @@ Return ONLY valid JSON."""
                     return f"I couldn't change the thermostat, but it's currently set to {current_target}°F."
 
         return f"The thermostat is currently set to {current_target}°F in {climate_state.get('state')} mode."
+
+    async def _room_temperature_reply(self, room: str) -> Optional[str]:
+        """The temperature in the room's area from its own sensor
+        (device_class temperature), or None when the area has none."""
+        entities = await self.entity_manager.get_entities()
+        for entity_id in self._area_entities(room, 'sensor', entities) or ():
+            attrs = (entities.get(entity_id) or {}).get('attributes') or {}
+            if attrs.get('device_class') != 'temperature':
+                continue
+            try:
+                value = float((entities.get(entity_id) or {}).get('state'))
+            except (TypeError, ValueError):
+                continue
+            return f"It's {value:g}{attrs.get('unit_of_measurement') or ''} in the {self._spoken_room(room)}."
+        return None
 
     async def _handle_appliance_intent(self, device_type: str, action: str, parameters: Dict, original_query: str = None) -> str:
         """Handle kitchen appliance queries (oven, fridge, freezer)"""
@@ -2900,8 +3130,7 @@ Return ONLY valid JSON."""
 
             # Log if we excluded any stuck sensors
             if stuck_sensors:
-                stuck_rooms = [s['room'] for s in stuck_sensors]
-                logger.warning(f"Excluded {len(stuck_sensors)} stuck sensors from occupancy: {stuck_rooms}")
+                logger.warning(f"Excluded {len(stuck_sensors)} stuck sensors from occupancy")
 
             # Step 2: Fetch house layout from admin API
             house_layout = await self._get_house_layout()
@@ -2939,16 +3168,16 @@ Return ONLY valid JSON."""
 
                         # Extract room from entity_id or friendly_name
                         room = None
-                        room_names = ['office', 'kitchen', 'bedroom', 'master', 'living', 'bath', 'basement', 'garage', 'porch', 'front', 'back']
+                        sensor_room_tokens = ['office', 'kitchen', 'bedroom', 'master', 'living', 'bath', 'basement', 'garage', 'porch', 'front', 'back']
                         # Try entity_id first
                         entity_lower = entity_id.lower()
-                        for room_name in room_names:
+                        for room_name in sensor_room_tokens:
                             if room_name in entity_lower:
                                 room = room_name
                                 break
                         if not room:
                             # Try friendly name
-                            for room_name in room_names:
+                            for room_name in sensor_room_tokens:
                                 if room_name in friendly_name.lower():
                                     room = room_name
                                     break
@@ -3013,9 +3242,9 @@ Return ONLY valid JSON."""
                             'last_changed': state.get('last_changed'),
                             'friendly_name': friendly_name
                         })
-                        logger.debug(f"Motion sensor: {entity_id} -> room: {room}, state: {state.get('state')}")
+                        logger.debug(f"Motion sensor: {entity_id} -> state: {state.get('state')}")
 
-            logger.info(f"Found {len(motion_sensors)} motion sensors: {[s['room'] for s in motion_sensors]}")
+            logger.info(f"Found {len(motion_sensors)} motion sensors")
             return motion_sensors
 
         except Exception as e:
@@ -3186,7 +3415,7 @@ Return ONLY valid JSON."""
                         occ['deprioritized'] = True
                         occupancy_deprioritized.append(occ)
                         logger.debug(
-                            f"Deprioritized occupancy sensor in {room}: {occ['entity_id']} "
+                            f"Deprioritized occupancy sensor: {occ['entity_id']} "
                             f"(mmWave presence sensor is authority)"
                         )
 
@@ -3199,7 +3428,7 @@ Return ONLY valid JSON."""
                             pir['likely_false_positive'] = True
                             pir_false_positives.append(pir)
                             logger.info(
-                                f"PIR false positive detected in {room}: {pir['entity_id']} triggered "
+                                f"PIR false positive detected: {pir['entity_id']} triggered "
                                 f"but presence sensor shows no one present"
                             )
                         else:
@@ -3498,7 +3727,7 @@ Return ONLY valid JSON."""
                         })
 
             except Exception as e:
-                logger.warning(f"Error parsing motion timestamp for {room}: {e}")
+                logger.warning(f"Error parsing motion timestamp: {type(e).__name__}")
 
         if is_last_motion_query:
             # Sort by most recent motion
@@ -3605,7 +3834,7 @@ Return ONLY valid JSON."""
                         room_states[room] = {'state': state, 'seconds_ago': seconds_ago}
 
             except Exception as e:
-                logger.warning(f"Error parsing timestamp for {room}: {e}")
+                logger.warning(f"Error parsing timestamp: {type(e).__name__}")
                 if room not in room_states:
                     room_states[room] = {'state': state, 'seconds_ago': float('inf')}
 
@@ -3991,7 +4220,6 @@ Do NOT mention rooms that have no current or recent motion."""
 
             # Filter by room if specified
             lights_on = []
-            room_lower = (room or '').lower()
 
             def _friendly(entity_id: str, state_data: Dict) -> str:
                 return state_data.get('attributes', {}).get(
@@ -4004,11 +4232,18 @@ Do NOT mention rooms that have no current or recent motion."""
                     if state_data.get('state') == 'on'
                 ]
             else:
+                # A floor or other group of rooms comes from the admin room
+                # groups, never from a list of this house's room names.
                 room_variations = [room]
-                if room_lower == 'upstairs':
-                    room_variations.extend(['second floor', '2nd floor', 'alpha', 'beta', 'master'])
-                elif room_lower == 'downstairs':
-                    room_variations.extend(['first floor', '1st floor', 'living', 'kitchen', 'dining'])
+                try:
+                    room_group = await get_admin_client().resolve_room_group(room)
+                except Exception:
+                    room_group = None
+                if room_group:
+                    room_variations = [
+                        member.get('room_name') for member in room_group.get('members') or []
+                        if member.get('room_name')
+                    ] or room_variations
 
                 # Same tiers as a write: the owner's configured group, else
                 # name matching. The answer lists the physical lights beneath
@@ -4029,21 +4264,21 @@ Do NOT mention rooms that have no current or recent motion."""
                     if state_data.get('state') == 'on':
                         lights_on.append(_friendly(leaf, state_data))
 
+            where = f"the {self._spoken_room(room)}" if room else "the house"
             if not lights_on:
-                if room:
-                    return f"No lights are currently on in the {room}."
-                else:
-                    return "No lights are currently on anywhere in the house."
+                return f"No lights are currently on in {where}."
 
-            # Format response
-            if len(lights_on) == 1:
-                return f"The {lights_on[0]} is on."
-            elif len(lights_on) <= 5:
-                light_list = ", ".join(lights_on[:-1]) + f" and {lights_on[-1]}"
-                return f"The following lights are on: {light_list}."
-            else:
-                # Too many to list, summarize
-                return f"{len(lights_on)} lights are currently on, including {', '.join(lights_on[:3])} and {len(lights_on) - 3} more."
+            # A count, with at most three names and only when asked "which".
+            asked_which = bool(re.search(r"\bwhich\b|\bwhat lights\b", (original_query or "").lower()))
+            count = len(lights_on)
+            if not asked_which:
+                if count == 1:
+                    return f"One light is on in {where}."
+                return f"{count} lights are on in {where}."
+            names = _join_spoken(lights_on[:3])
+            if count <= 3:
+                return f"These lights are on in {where}: {names}."
+            return f"{count} lights are on in {where}, including {names}."
 
         except Exception as e:
             logger.error(f"Light status query error: {e}")
@@ -4070,15 +4305,20 @@ Do NOT mention rooms that have no current or recent motion."""
                 return f"I couldn't find any {nouns} in the home automation system."
 
             room_lower = (room or "").lower()
+            room_spoken = room_lower.replace("_", " ")
             matched = []
+            in_area = self._area_entities(room, domain, entities) if room else None
             for entity_id, state_data in entities.items():
+                if in_area is not None and entity_id not in in_area:
+                    continue
                 friendly_name = state_data.get("attributes", {}).get(
                     "friendly_name", entity_id.split(".")[-1].replace("_", " ")
                 )
-                if room:
+                if room and in_area is None:
                     entity_lower = entity_id.lower()
                     friendly_lower = friendly_name.lower()
-                    if room_lower not in entity_lower and room_lower not in friendly_lower:
+                    if (room_lower not in entity_lower and room_lower not in friendly_lower
+                            and room_spoken not in friendly_lower):
                         continue
                 matched.append((friendly_name, state_data.get("state", "unknown")))
 
@@ -4221,11 +4461,15 @@ Do NOT mention rooms that have no current or recent motion."""
             if not fans:
                 return "I couldn't find any fans in the home automation system."
 
-            # Filter by room if specified
+            # Filter by room if specified: an area's own fans when the room is
+            # an area, else the name match below.
             target_fans = []
             query_lower = (original_query or "").lower()
+            in_area = self._area_entities(room, 'fan', fans) if room else None
+            if in_area is not None:
+                target_fans = [(eid, fans[eid]) for eid in in_area]
 
-            for entity_id, state_data in fans.items():
+            for entity_id, state_data in (fans.items() if in_area is None else ()):
                 friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id).lower()
                 entity_lower = entity_id.lower()
 
@@ -4553,83 +4797,172 @@ Do NOT mention rooms that have no current or recent motion."""
 
         return None
 
+    @staticmethod
+    def _trusted_voice_scope() -> bool:
+        """Whether the gateway judged this request a trusted voice caller
+        (a direct call outside a request counts as one)."""
+        from orchestrator.mode_permission import current_ha_scope
+        scope = current_ha_scope()
+        return scope is None or scope.trusted_voice is True
+
+    @staticmethod
+    def _audience_is_owner() -> bool:
+        """Whether the request is an owner-mode, non-public one. No scope at
+        all (a direct call outside a request) counts as owner; a system scope
+        (no request permissions) does not."""
+        from orchestrator.mode_permission import current_ha_scope, is_public_audience
+        scope = current_ha_scope()
+        if scope is None:
+            return True
+        return scope.permissions.get("mode") == "owner" and not is_public_audience(scope.permissions)
+
+    async def _whole_house_lamp_rooms(self, excluded_keys: Sequence[str]):
+        """The lamps "all the lights" reaches, as one list of lights per room,
+        or ``(None, reason)`` when there is nothing to write.
+
+        Owner mode reaches every registry area's lamps (or, with no registry,
+        the lights under every light group). Any other audience (guest,
+        degraded, public, off-stay) reaches only the lamps of the configured
+        ``HA_LIGHT_GROUPS`` groups and of admin room-group member rooms; with
+        neither configured the answer is to ask which room. Lights with no
+        area join only when ``HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS`` is true.
+        Indicators, hidden/disabled/categorised lights and anything matching
+        ``HA_ROOM_LIGHT_EXCLUDE_ENTITIES`` never join. Excluded rooms are
+        subtracted.
+        """
+        from .ha_entity_manager import _room_light_exclude_patterns, area_lamp_targets
+        entities = await self.entity_manager.get_entities()
+        snapshot = self._registry_snapshot()
+        patterns = _room_light_exclude_patterns()
+        excluded = {k for k in excluded_keys if k}
+        non_lamp = snapshot.non_lamp_lights if snapshot is not None else frozenset()
+
+        def is_lamp(entity_id: str) -> bool:
+            return entity_id not in non_lamp and not any(p.search(entity_id) for p in patterns)
+
+        def leaves_of(entity_ids) -> list:
+            leaves = expand_light_leaves(list(entity_ids), entities)
+            return sorted({leaf for ids in leaves.values() for leaf in ids if is_lamp(leaf)})
+
+        rooms: List[list] = []
+        owner = self._audience_is_owner()
+        # Every area's lamps only for an owner the gateway vouched for as a
+        # trusted voice caller; any other owner-mode caller (an unauthenticated
+        # request in a default install) gets the light groups, as with no
+        # registry.
+        area_wide = owner and snapshot is not None and self._trusted_voice_scope()
+        if area_wide:
+            for area in snapshot.areas:
+                if area.key in excluded:
+                    continue
+                ids = area_lamp_targets(snapshot, area.area_id, entities, patterns)
+                if ids:
+                    rooms.append(leaves_of(ids))
+        elif owner:
+            for group in await self.entity_manager.get_all_light_groups():
+                name = (group.get('friendly_name') or '').lower()
+                entity_id = (group.get('entity_id') or '').lower()
+                spoken_excluded = [k.replace('_', ' ') for k in excluded]
+                if any(k in name or k in entity_id for k in spoken_excluded):
+                    continue
+                members = group.get('members') or [group.get('entity_id')]
+                rooms.append(leaves_of(m for m in members if m))
+        else:
+            for key, group_id in _get_light_groups().items():
+                if key not in excluded and group_id:
+                    rooms.append(leaves_of([group_id]))
+            try:
+                room_groups = await get_admin_client().get_room_groups(enabled_only=True)
+            except Exception:
+                room_groups = []
+            for room_group in room_groups or []:
+                for member in room_group.get('members') or []:
+                    member_room = member.get('room_name')
+                    if not member_room or room_key(member_room) in excluded:
+                        continue
+                    matches = await self._resolve_room_lights(member_room)
+                    ids = [m['entity_id'] for m in matches]
+                    if ids:
+                        rooms.append(leaves_of(ids))
+            if not any(rooms):
+                return None, "ask"
+
+        if area_wide and get_config().ha_whole_house_unassigned_lights is True:
+            loose = sorted(
+                eid for eid, ent in entities.items()
+                if eid.startswith('light.') and not isinstance(((ent or {}).get('attributes') or {}).get('entity_id'), list)
+                and snapshot.area_for(eid) is None and is_lamp(eid)
+            )
+            if loose:
+                rooms.append(loose)
+        rooms = [r for r in rooms if r]
+        return (rooms or None), "none"
+
     async def _execute_whole_house_command(
         self, action: str, target_scope: str, parameters: Dict,
         intent: Dict, ha_client, original_query: str
     ) -> str:
         """
-        Execute a command across all rooms in the house.
-        Handles Christmas themes, whole-house color changes, etc.
-        Supports exclusions like "all lights except bedroom".
-        All HA API calls are parallelized for faster response.
+        Execute a command across the house's lamps (``_whole_house_lamp_rooms``
+        says which, by audience). Handles Christmas themes and whole-house
+        colour changes, with exclusions such as "all lights except the study".
+        The lights go through the same finalize, availability, gate and write
+        steps as a room's, so a light two groups share is written once.
         """
-        from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
+        from orchestrator.mode_permission import (
+            HAWritePermissionDenied, current_ha_scope, ensure_permission_enforcing, permission_refusal_message,
+        )
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
-        # Get all available light groups from Home Assistant
-        all_light_groups = await self.entity_manager.get_all_light_groups()
+        if action not in WHOLE_HOUSE_ACTIONS:
+            return SEVERAL_ROOMS_UNSUPPORTED
+        excluded_rooms = [r for r in (intent.get('excluded_rooms') or []) if isinstance(r, str)]
+        excluded_keys = [room_key(r) for r in excluded_rooms]
+        rooms, why = await self._whole_house_lamp_rooms(excluded_keys)
+        if rooms is None:
+            return "Which room?" if why == "ask" else "I couldn't find any lights in the house."
 
-        if not all_light_groups:
-            return "I couldn't find any light groups in the house."
+        flat = list(dict.fromkeys(light for room in rooms for light in room))
+        from . import write_fanout
+        _whole_house_service = "turn_off" if action == "turn_off" else "turn_on"
+        lt = await self._finalize_light_targets([], ids=flat, per_light=True)
+        if lt.denied_all:
+            self._record_light_denials(lt, _whole_house_service)
+            return permission_refusal_message(("light",), current_ha_scope())
+        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key="whole_house")
+        if light_total and light_down == light_total:
+            return "None of the lights are responding right now."
+        _whole_house_prompt = write_fanout.gate(
+            "light", _whole_house_service, lt.gate_ids, original_query,
+            scope_hint=("whole_house_followup", True) if intent.get('referent_followup') else "whole_house",
+        )
+        if _whole_house_prompt:
+            return _whole_house_prompt
+        self._record_light_denials(lt, _whole_house_service)
 
-        # Handle exclusions - filter out excluded rooms
-        excluded_rooms = intent.get('excluded_rooms', []) or []
-        if excluded_rooms:
-            excluded_lower = [r.lower().replace('_', ' ') for r in excluded_rooms]
-            filtered_groups = []
-            excluded_names = []
-            for group in all_light_groups:
-                group_name = group.get('friendly_name', '').lower()
-                entity_id = group.get('entity_id', '').lower()
-                # Check if this group should be excluded
-                should_exclude = any(
-                    exc in group_name or exc in entity_id
-                    for exc in excluded_lower
-                )
-                if should_exclude:
-                    excluded_names.append(group.get('friendly_name', 'Unknown'))
-                else:
-                    filtered_groups.append(group)
-            all_light_groups = filtered_groups
-            logger.info(f"Excluding rooms: {excluded_names}")
+        # Each light belongs to the first room that lists it, and only to the
+        # lights the finalizer kept.
+        allowed = set(lt.write_ids)
+        seen: set = set()
+        per_room: List[list] = []
+        for room in rooms:
+            mine = [light for light in room if light in allowed and light not in seen]
+            seen.update(mine)
+            if mine:
+                per_room.append(mine)
 
         # Parse the color scheme from the query/intent
         color_description = intent.get('color_description', '')
         hs_colors = parameters.get('hs_colors', [])
         query_lower = original_query.lower() if original_query else ''
-
-        # Detect Christmas theme
         is_christmas = 'christmas' in query_lower or ('red' in query_lower and 'green' in query_lower)
         wants_white_accent = 'white' in query_lower and ('visibility' in query_lower or 'couple' in query_lower or 'some' in query_lower)
 
-        # ATHENA-128 4.3: resolve the flat member list first, gate once,
-        # then build the task list.
-        _flat_members = []
-        for _group in all_light_groups:
-            _members = _group.get('members') or [_group.get('entity_id')]
-            _flat_members.extend(m for m in _members if m)
-        from . import write_fanout
-        _whole_house_service = "turn_off" if action == "turn_off" else "turn_on"
-        _whole_house_prompt = write_fanout.gate(
-            "light", _whole_house_service, tuple(_flat_members), original_query, scope_hint="whole_house",
-        )
-        if _whole_house_prompt:
-            return _whole_house_prompt
-
-        # Collect all tasks first, then execute in parallel
         tasks = []
         global_light_index = 0
-
-        for group in all_light_groups:
-            group_name = group.get('friendly_name', 'Unknown')
-            members = group.get('members', [])
-
-            if not members:
-                # If no members, use the group entity itself
-                members = [group.get('entity_id')]
-
+        for members in per_room:
             if action == "turn_on":
                 for light in members:
                     tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
@@ -4647,19 +4980,16 @@ Do NOT mention rooms that have no current or recent motion."""
 
                     for i, light in enumerate(members):
                         if wants_white_accent and len(members) > 2 and i == len(members) // 2:
-                            # Put a white light in the middle of each room for visibility
                             tasks.append(ha_client.call_service(
                                 "light", "turn_on",
                                 {"entity_id": light, "hs_color": [white_hue, white_sat], "brightness": 255}
                             ))
                         elif global_light_index % 2 == 0:
-                            # Red lights on even global indices
                             tasks.append(ha_client.call_service(
                                 "light", "turn_on",
                                 {"entity_id": light, "hs_color": [red_hue, red_sat], "brightness": 255}
                             ))
                         else:
-                            # Green lights on odd global indices
                             tasks.append(ha_client.call_service(
                                 "light", "turn_on",
                                 {"entity_id": light, "hs_color": [green_hue, green_sat], "brightness": 255}
@@ -4667,8 +4997,7 @@ Do NOT mention rooms that have no current or recent motion."""
                         global_light_index += 1
 
                 elif hs_colors:
-                    # Use provided colors from LLM
-                    for i, light in enumerate(members):
+                    for light in members:
                         color_idx = global_light_index % len(hs_colors)
                         hue, sat = hs_colors[color_idx]
                         tasks.append(ha_client.call_service(
@@ -4677,7 +5006,6 @@ Do NOT mention rooms that have no current or recent motion."""
                         ))
                         global_light_index += 1
                 else:
-                    # Default to white if no colors specified
                     for light in members:
                         tasks.append(ha_client.call_service(
                             "light", "turn_on",
@@ -4694,11 +5022,10 @@ Do NOT mention rooms that have no current or recent motion."""
             results = await asyncio.gather(*tasks, return_exceptions=True)
             # ATHENA-69 Pass H2 (xander delta review, Medium): return_exceptions
             # alone also swallows a GENUINE failure (e.g. httpx.ConnectError)
-            # into this function's normal "Done!" reply below --
+            # into this function's normal reply below --
             # HAWritePermissionDenied is safe to absorb (already recorded on
-            # scope.denials, above, and surfaced by _finish()); anything else
-            # means some of these HA calls silently never happened, and the
-            # caller must be told that instead of congratulated.
+            # scope.denials and surfaced by _finish()); anything else means
+            # some of these HA calls silently never happened.
             unexpected_errors = [
                 r for r in results
                 if isinstance(r, BaseException) and not isinstance(r, HAWritePermissionDenied)
@@ -4710,19 +5037,13 @@ Do NOT mention rooms that have no current or recent motion."""
                 )
                 return "I ran into a problem controlling the lights. Please try again."
 
-        # Return contextual response for voice output
-        room_count = len(all_light_groups)
-        excluded_info = f", except {', '.join(excluded_rooms)}" if excluded_rooms else ""
-
-        if action == "turn_on":
-            return f"Done! I've turned on lights in {room_count} rooms{excluded_info}."
-        elif action == "turn_off":
-            return f"Done! I've turned off lights in {room_count} rooms{excluded_info}."
-        elif action == "set_color":
-            color_desc = color_description or "the colors"
-            return f"Done! I've set {color_desc} across {room_count} rooms{excluded_info}."
-        else:
-            return f"Done! Updated lights in {room_count} rooms{excluded_info}."
+        return light_reply(
+            action,
+            whole_house=True,
+            excluded=[self._spoken_room(key) for key in excluded_keys],
+            colour=color_description or "the colours",
+            unavailable=light_down,
+        )
 
     async def _execute_multi_room_command(
         self, rooms: list, action: str, target_scope: str, parameters: Dict,
@@ -4738,7 +5059,9 @@ Do NOT mention rooms that have no current or recent motion."""
         import structlog
         logger = structlog.get_logger(__name__)
 
-        logger.info(f"Executing multi-room command: action={action}, rooms={rooms}")
+        if action not in MULTI_ROOM_ACTIONS:
+            return SEVERAL_ROOMS_UNSUPPORTED
+        logger.info(f"Executing multi-room command: action={action}, room_count={len(rooms)}")
 
         # ATHENA-128 4.3: resolve every room first (no task building yet),
         # finalize all rooms' lights together so a bulb two rooms share is
@@ -4746,17 +5069,21 @@ Do NOT mention rooms that have no current or recent motion."""
         from . import write_fanout
         from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
         resolved_rooms = []
+        resolved_rooms_keys = []
         for room_name in rooms:
             light_matches = await self._resolve_room_lights(room_name)
 
             if not light_matches:
-                logger.warning(f"No lights found for room {room_name} in multi-room command")
+                logger.warning("No lights found for one room in multi-room command")
                 continue
 
             primary = max(light_matches, key=lambda x: len(x.get('members', [])))
             resolved_rooms.append((primary.get('friendly_name', room_name), light_matches))
+            resolved_rooms_keys.append(room_name)
 
         _multi_room_service = "turn_off" if action == "turn_off" else "turn_on"
+        if not resolved_rooms:
+            return "I couldn't find any lights in those rooms."
         lt = await self._finalize_light_targets(
             [m for _, matches in resolved_rooms for m in matches],
             per_light=True,
@@ -4764,6 +5091,10 @@ Do NOT mention rooms that have no current or recent motion."""
         if lt.denied_all:
             self._record_light_denials(lt, _multi_room_service)
             return permission_refusal_message(("light",), current_ha_scope())
+        room_labels = [self._spoken_room(name) for name in resolved_rooms_keys]
+        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key="|".join(resolved_rooms_keys))
+        if light_total and light_down == light_total:
+            return f"The {_join_spoken(room_labels)} lights aren't responding right now."
         _multi_room_prompt = write_fanout.gate(
             "light", _multi_room_service, lt.gate_ids, original_query, scope_hint=("multi_room", rooms),
         )
@@ -4772,7 +5103,6 @@ Do NOT mention rooms that have no current or recent motion."""
         self._record_light_denials(lt, _multi_room_service)
 
         all_tasks = []
-        all_light_names = [group_name for group_name, _ in resolved_rooms]
         for light in lt.write_ids:
             if action == "turn_on":
                 all_tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
@@ -4798,20 +5128,13 @@ Do NOT mention rooms that have no current or recent motion."""
                 logger.error(
                     "multi_room_command_partial_failure",
                     action=action,
-                    rooms=rooms,
+                    room_count=len(rooms),
                     error_count=len(unexpected_errors),
                     sample_error=str(unexpected_errors[0]),
                 )
                 return "I ran into a problem controlling the lights. Please try again."
 
-        # Build response
-        room_list = ' and '.join(all_light_names)
-        if action == "turn_on":
-            return f"Done! I've turned on the {room_list} lights."
-        elif action == "turn_off":
-            return f"Done! I've turned off the {room_list} lights."
-        else:
-            return f"Done! I've updated the {room_list} lights."
+        return light_reply(action, rooms=room_labels, unavailable=light_down)
 
     async def _execute_room_group_command(
         self, room_group: Dict, action: str, target_scope: str, parameters: Dict,
@@ -4833,6 +5156,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
         if not members:
             return f"The room group '{group_name}' has no rooms configured."
+        if action not in ROOM_GROUP_ACTIONS:
+            return SEVERAL_ROOMS_UNSUPPORTED
 
         # Parse color parameters
         color_description = intent.get('color_description', '')
@@ -4849,7 +5174,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 return []
             light_matches = await self._resolve_room_lights(room_name)
             if not light_matches:
-                logger.warning(f"No lights found for room {room_name} in group {group_name}")
+                logger.warning(f"No lights found for one room in group (members={len(members)})")
             return light_matches
 
         room_matches = await asyncio.gather(*[get_room_matches(m) for m in members])
@@ -4867,6 +5192,10 @@ Do NOT mention rooms that have no current or recent motion."""
         if lt.denied_all:
             self._record_light_denials(lt, _room_group_service)
             return permission_refusal_message(("light",), current_ha_scope())
+        group_label = str(group_name).lower().replace("_", " ")
+        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key=f"group:{group_name}")
+        if light_total and light_down == light_total:
+            return f"The {group_label} lights aren't responding right now."
         _room_group_prompt = write_fanout.gate(
             "light", _room_group_service, lt.gate_ids, original_query,
             scope_hint=("room_group", group_name),
@@ -4955,17 +5284,9 @@ Do NOT mention rooms that have no current or recent motion."""
                 )
                 return "I ran into a problem controlling the lights. Please try again."
 
-        # Return contextual response for voice output
-        room_count = len(members)
-        if action == "turn_on":
-            return f"Done! I've turned on lights on the {group_name}."
-        elif action == "turn_off":
-            return f"Done! I've turned off lights on the {group_name}."
-        elif action == "set_color":
-            color_desc = color_description or "the colors"
-            return f"Done! I've set {color_desc} on the {group_name}."
-        else:
-            return f"Done! Updated {group_name} lights."
+        return light_reply(
+            action, rooms=[group_label], colour=color_description or "the colours", unavailable=light_down,
+        )
 
     async def _extract_motion_control_intent(self, query: str, device_room: str = None) -> Dict:
         """

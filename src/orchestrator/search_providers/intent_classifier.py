@@ -8,6 +8,9 @@ import re
 from typing import Dict, List, Tuple
 import logging
 
+from orchestrator import room_context
+from orchestrator.room_directory import current_directory
+
 logger = logging.getLogger(__name__)
 
 
@@ -268,35 +271,12 @@ class IntentClassifier:
 
         # MULTI-ROOM DETECTION: Do NOT split if "and" is joining room names
         # Pattern: "[action] [room] and [room] [device]" - single command for multiple rooms
-        import re
-
-        # Common room names that might be joined with "and"
-        room_names = [
-            'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-            'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-            'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-            'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-            'first floor', 'second floor', 'downstairs', 'upstairs'
-        ]
-
-        # Check if "and" is between two room names (multi-room command)
-        if " and " in query_lower:
-            # Pattern: room1 and room2 with lights/on/off nearby
-            # This indicates a multi-room light command, NOT multiple intents
-            for room1 in room_names:
-                if room1 in query_lower:
-                    for room2 in room_names:
-                        if room2 != room1 and room2 in query_lower:
-                            # Both rooms present - check if "and" connects them
-                            # Pattern like "kitchen and living room" or "living room and kitchen"
-                            pattern1 = f"{room1}\\s+and\\s+{room2}"
-                            pattern2 = f"{room2}\\s+and\\s+{room1}"
-                            if re.search(pattern1, query_lower) or re.search(pattern2, query_lower):
-                                # Also check if there's a light/on/off keyword indicating this is a light command
-                                light_keywords = ['light', 'lights', 'on', 'off', 'turn', 'switch', 'dim', 'bright']
-                                if any(kw in query_lower for kw in light_keywords):
-                                    logger.info(f"Multi-room command detected, NOT splitting: query_len={len(query)}")
-                                    return [query]  # Don't split - it's a multi-room command
+        if " and " in query_lower and room_context.joined_room_mentions(query, current_directory()):
+            # Also check if there's a light/on/off keyword indicating this is a light command
+            light_keywords = ['light', 'lights', 'on', 'off', 'turn', 'switch', 'dim', 'bright']
+            if any(kw in query_lower for kw in light_keywords):
+                logger.info(f"Multi-room command detected, NOT splitting: query_len={len(query)}")
+                return [query]  # Don't split - it's a multi-room command
 
         # Compound query indicators
         separators = [

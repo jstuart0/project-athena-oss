@@ -26,7 +26,6 @@ os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
 import gateway.main as gw  # noqa: E402
 from shared.output_channel import OutputChannel  # noqa: E402
-import gateway.simple_commands as sc  # noqa: E402
 from gateway.conversation_limiter import NewConversationLimiter  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -46,10 +45,12 @@ def _permissive_gateway(monkeypatch):
 
 @pytest.fixture
 def _fixed_room(monkeypatch):
-    """Opt-in: fix room detection to "kitchen" for tests about payload
-    forwarding, not room detection itself (that's G10, which needs the real
-    function)."""
-    monkeypatch.setattr(gw, "_detect_room_from_active_satellite", mock.AsyncMock(return_value="kitchen"))
+    """Opt-in: fix the speaker room to "kitchen" for tests about payload
+    forwarding, not room resolution (test_gateway_speaker_room.py)."""
+    monkeypatch.setattr(
+        gw.speaker_room, "resolve_speaker_room",
+        mock.AsyncMock(return_value=gw.speaker_room.SpeakerRoom("kitchen", "map")),
+    )
 
 
 def _fake_orchestrator_response(content: str = "hi"):
@@ -196,7 +197,7 @@ def test_G3_route_to_orchestrator_scoped_to_ha_conversation_only():
     )  # raises StopIteration (failing the test) if the function is missing
     assert "async def stream_orchestrator_response" in source
     assert source.index("async def stream_orchestrator_response") < source.index(
-        "_orchestrator_openai_payload(request, device_id, stream=True, channel=channel)"
+        "_orchestrator_openai_payload(\n            request, room, stream=True, channel=channel, voice_device_id=voice_device_id,\n            trusted_voice=trusted_voice,\n        )"
     )
 
 
@@ -221,7 +222,7 @@ def test_G4_breaker_open_falls_back_to_ollama_never_posts(monkeypatch):
     ollama_mock = mock.AsyncMock(return_value="ollama-response")
     monkeypatch.setattr(gw, "route_to_ollama", ollama_mock)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), room="kitchen", channel=OutputChannel.TEXT))
 
     assert result == "ollama-response"
     ollama_mock.assert_awaited_once_with(mock.ANY, channel=OutputChannel.TEXT)
@@ -233,7 +234,7 @@ def test_G5_G9_maps_content_and_word_count_usage(monkeypatch):
     fake_client = _CapturingClient(response=_fake_orchestrator_response("hi there friend"))
     monkeypatch.setattr(gw, "orchestrator_client", fake_client)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request("hello world"), device_id="kitchen", channel=OutputChannel.TEXT))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request("hello world"), room="kitchen", channel=OutputChannel.TEXT))
 
     assert result.object == "chat.completion"
     assert result.id.startswith("chatcmpl-")
@@ -255,7 +256,7 @@ def test_G7_http_status_error_502_records_failure(monkeypatch):
     monkeypatch.setattr(gw, "orchestrator_client", fake_client)
 
     with pytest.raises(gw.HTTPException) as exc_info:
-        asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
+        asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), room="kitchen", channel=OutputChannel.TEXT))
 
     assert exc_info.value.status_code == 502
     breaker.record_failure.assert_awaited_once()
@@ -273,7 +274,7 @@ def test_G8_generic_exception_falls_back_to_ollama_records_failure(monkeypatch):
     ollama_mock = mock.AsyncMock(return_value="ollama-response")
     monkeypatch.setattr(gw, "route_to_ollama", ollama_mock)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), room="kitchen", channel=OutputChannel.TEXT))
 
     assert result == "ollama-response"
     ollama_mock.assert_awaited_once_with(mock.ANY, channel=OutputChannel.TEXT)
@@ -302,179 +303,6 @@ def test_G6_no_warning_when_set(monkeypatch):
     monkeypatch.setattr(gw.logger, "warning", lambda event, **kw: calls.append({"event": event, **kw}))
     assert gw._warn_if_trusted_proxy_unset("10.244.0.0/16") is False
     assert not [c for c in calls if c["event"] == "trusted_proxy_cidrs_unset"]
-
-
-# ---------------------------------------------------------------------------
-# G10 (D11): room-detection fallback is "unknown", never "office"
-# ---------------------------------------------------------------------------
-
-
-_G10_SCENARIOS = ["no_token", "non_200", "no_satellite", "exception"]
-
-
-def test_G10_population_is_4():
-    assert len(_G10_SCENARIOS) == 4
-
-
-@pytest.mark.parametrize("scenario", _G10_SCENARIOS)
-def test_G10_room_fallback_is_unknown_not_office(monkeypatch, scenario):
-    # DC14 item 1a: _detect_room_from_active_satellite now short-circuits
-    # to "unknown" whenever HA_SATELLITE_ROOM_MAP is unconfigured, BEFORE
-    # ever reaching the HA_TOKEN/network paths these 4 scenarios exist to
-    # exercise. Configure a non-empty map here so each scenario still
-    # drives past that gate and into the specific failure mode it names.
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.test_office": "office"})
-    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
-
-    if scenario == "no_token":
-        monkeypatch.delenv("HA_TOKEN", raising=False)
-        result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-        assert result == "unknown"
-        return
-
-    monkeypatch.setenv("HA_TOKEN", "test-token")
-    fake_client = mock.MagicMock()
-
-    if scenario == "non_200":
-        resp = mock.MagicMock(status_code=404)
-        fake_client.get = mock.AsyncMock(return_value=resp)
-    elif scenario == "no_satellite":
-        resp = mock.MagicMock(status_code=200)
-        resp.json.return_value = []
-        fake_client.get = mock.AsyncMock(return_value=resp)
-    else:
-        fake_client.get = mock.AsyncMock(side_effect=RuntimeError("boom"))
-
-    monkeypatch.setattr(gw, "ha_client", fake_client)
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    assert result == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# DC14 item 1a / DC17 item 2: HA_SATELLITE_ROOM_MAP entity_id lookup first,
-# then the generic "Voice - <Room> Assist" friendly_name parse as a
-# fallback (restored per valerie r2 -- an unmapped satellite shouldn't give
-# up when its friendly_name still names the room), then "unknown".
-# ---------------------------------------------------------------------------
-
-
-def test_DC17_2_empty_map_still_queries_ha_and_uses_name_parsing(monkeypatch):
-    """An empty/unset map must NOT skip the HA query outright -- the
-    generic friendly_name fallback still works with zero configuration,
-    exactly like it did before HA_SATELLITE_ROOM_MAP existed."""
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {})
-    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
-    monkeypatch.setenv("HA_TOKEN", "test-token")
-
-    resp = mock.MagicMock(status_code=200)
-    resp.json.return_value = [
-        {
-            "entity_id": "assist_satellite.some_satellite",
-            "state": "responding",
-            "attributes": {"friendly_name": "Voice - Kitchen Assist"},
-            "last_changed": "2026-01-01T00:00:00+00:00",
-        }
-    ]
-    fake_client = mock.MagicMock()
-    fake_client.get = mock.AsyncMock(return_value=resp)
-    monkeypatch.setattr(gw, "ha_client", fake_client)
-
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-
-    fake_client.get.assert_awaited_once()
-    assert result == "kitchen"
-
-
-def test_DC14_1a_unset_config_logs_once_at_info(monkeypatch):
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", None)
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_warned", False)
-    monkeypatch.setattr(gw._get_athena_config(), "ha_satellite_room_map", "", raising=False)
-
-    calls = []
-    monkeypatch.setattr(gw.logger, "info", lambda event, **kw: calls.append({"event": event, **kw}))
-
-    first = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    second = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-
-    assert first == "unknown"
-    assert second == "unknown"
-    matching = [c for c in calls if c["event"] == "ha_satellite_room_map_unset_satellite_features_disabled"]
-    assert len(matching) == 1
-
-
-def test_DC17_2_configured_entity_id_takes_priority_over_name_parsing(monkeypatch):
-    """The map is checked BEFORE name-parsing: a satellite present in
-    HA_SATELLITE_ROOM_MAP resolves from the map even if its friendly_name
-    would parse to a different room."""
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
-    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
-    monkeypatch.setenv("HA_TOKEN", "test-token")
-
-    resp = mock.MagicMock(status_code=200)
-    resp.json.return_value = [
-        {
-            "entity_id": "assist_satellite.configured_one",
-            "state": "responding",
-            # Friendly name would parse to "kitchen" -- the map wins.
-            "attributes": {"friendly_name": "Voice - Kitchen Assist"},
-            "last_changed": "2026-01-01T00:00:00+00:00",
-        }
-    ]
-    fake_client = mock.MagicMock()
-    fake_client.get = mock.AsyncMock(return_value=resp)
-    monkeypatch.setattr(gw, "ha_client", fake_client)
-
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    assert result == "office"
-
-
-def test_DC17_2_unmapped_satellite_falls_back_to_name_parsing(monkeypatch):
-    """A satellite NOT present in HA_SATELLITE_ROOM_MAP falls back to the
-    generic friendly_name parse instead of giving up -- this is the
-    behavior valerie r2 restored (P7 had made an unmapped entity_id yield
-    'unknown' even when the name was parseable)."""
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
-    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
-    monkeypatch.setenv("HA_TOKEN", "test-token")
-
-    resp = mock.MagicMock(status_code=200)
-    resp.json.return_value = [
-        {
-            "entity_id": "assist_satellite.not_in_map",
-            "state": "responding",
-            "attributes": {"friendly_name": "Voice - Office Assist"},
-            "last_changed": "2026-01-01T00:00:00+00:00",
-        }
-    ]
-    fake_client = mock.MagicMock()
-    fake_client.get = mock.AsyncMock(return_value=resp)
-    monkeypatch.setattr(gw, "ha_client", fake_client)
-
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    assert result == "office"
-
-
-def test_DC17_2_unmapped_unparseable_satellite_yields_unknown(monkeypatch):
-    """Neither the map nor the name-parse resolves a room -> "unknown"."""
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
-    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
-    monkeypatch.setenv("HA_TOKEN", "test-token")
-
-    resp = mock.MagicMock(status_code=200)
-    resp.json.return_value = [
-        {
-            "entity_id": "assist_satellite.not_in_map",
-            "state": "responding",
-            "attributes": {"friendly_name": "Some Random Device"},
-            "last_changed": "2026-01-01T00:00:00+00:00",
-        }
-    ]
-    fake_client = mock.MagicMock()
-    fake_client.get = mock.AsyncMock(return_value=resp)
-    monkeypatch.setattr(gw, "ha_client", fake_client)
-
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    assert result == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -551,21 +379,20 @@ def _fake_session_mgr(session_id="sess-ha-1"):
 
 
 def test_ATHENA_115_fastpath_command_executes_and_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
-    """Reproduces hank's exact report: ha_simple_command_fastpath is on, the
-    device command executes successfully (the light turns on), and the
-    endpoint must return 200 with HA's expected response shape -- not a 500
-    from a NameError raised after the command already ran."""
+    """With ha_simple_command_fastpath on, a locally answered command (time,
+    greeting) returns 200 in HA's expected response shape -- not a 500 from a
+    NameError raised after the command already ran."""
     async def _flags(flag_name, default=False):
         return {"ha_simple_command_fastpath": True}.get(flag_name, False)
 
     monkeypatch.setattr(gw, "get_feature_flag", _flags)
     monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    monkeypatch.setattr(gw, "detect_simple_command", mock.AsyncMock(return_value=("light_on", {"room": "kitchen"})))
-    monkeypatch.setattr(gw, "execute_simple_command", mock.AsyncMock(return_value="Turning on the light in the kitchen."))
+    monkeypatch.setattr(gw, "detect_simple_command", mock.AsyncMock(return_value=("greeting", {"type": "greeting_hello"})))
+    monkeypatch.setattr(gw, "execute_simple_command", mock.AsyncMock(return_value="Hello! How can I help you?"))
 
     client = TestClient(gw.app)
     resp = client.post("/ha/conversation", json={
-        "text": "turn on the kitchen light",
+        "text": "hello",
         "device_id": "kitchen",
         "language": "en",
     })
@@ -573,35 +400,10 @@ def test_ATHENA_115_fastpath_command_executes_and_returns_200_with_ha_response_s
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["response"]["response_type"] == "action_done"
-    assert body["response"]["speech"]["plain"]["speech"] == "Turning on the light in the kitchen."
+    assert body["response"]["speech"]["plain"]["speech"] == "Hello! How can I help you?"
     assert body["response"]["data"] == {"success": True, "targets": []}
     assert body["response"]["language"] == "en"
     assert body["continue_conversation"] is False
-
-
-def test_ATHENA_115_prerouted_home_command_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
-    """Same NameError, reached via the ha_intent_prerouting HOME branch
-    instead of the fastpath branch."""
-    async def _flags(flag_name, default=False):
-        return {"ha_intent_prerouting": True}.get(flag_name, False)
-
-    monkeypatch.setattr(gw, "get_feature_flag", _flags)
-    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    monkeypatch.setattr(gw, "classify_intent", mock.AsyncMock(return_value="HOME"))
-    monkeypatch.setattr(gw, "detect_simple_command", mock.AsyncMock(return_value=("light_on", {"room": "office"})))
-    monkeypatch.setattr(gw, "execute_simple_command", mock.AsyncMock(return_value="Turning on the light in the office."))
-
-    client = TestClient(gw.app)
-    resp = client.post("/ha/conversation", json={
-        "text": "turn on the office light",
-        "device_id": "office",
-        "language": "en",
-    })
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["response"]["response_type"] == "action_done"
-    assert body["response"]["speech"]["plain"]["speech"] == "Turning on the light in the office."
 
 
 def test_ATHENA_115_orchestrator_routed_reply_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
@@ -636,150 +438,3 @@ def _fake_orchestrator_json_response(answer: str, session_id: str):
     resp.raise_for_status = mock.MagicMock()
     resp.json.return_value = {"answer": answer, "session_id": session_id}
     return resp
-
-
-# ---------------------------------------------------------------------------
-# ATHENA-121 -- /ha/conversation fast path must report the real HA outcome.
-#
-# Live bug: HA returned 403 to the turn_off service call. httpx does not
-# raise on a non-2xx response unless raise_for_status() is called, so the
-# old execute_simple_command() ignored the status code entirely and always
-# returned the canned "I've turned off the office light." with
-# data.success=True -- the service call never reached HA. These tests drive
-# the real (unmocked) detect_simple_command/execute_simple_command code
-# path against a fake ha_client, so they exercise the actual bug rather than
-# a re-statement of it.
-# ---------------------------------------------------------------------------
-
-
-class _StatusHAClient:
-    """Fake ha_client whose .post() returns a fixed status_code, like a real
-    httpx.AsyncClient would for a non-2xx HA response (no exception raised)."""
-
-    def __init__(self, status_code: int):
-        self.status_code = status_code
-        self.calls = []
-
-    async def post(self, url, **kwargs):
-        self.calls.append(url)
-        resp = mock.MagicMock()
-        resp.status_code = self.status_code
-        return resp
-
-
-class _RaisingHAClient:
-    """Fake ha_client whose .post() raises, like a real timeout/connect error."""
-
-    def __init__(self, exc: Exception):
-        self._exc = exc
-
-    async def post(self, url, **kwargs):
-        raise self._exc
-
-
-def _fastpath_flags():
-    async def _flags(flag_name, default=False):
-        return {"ha_simple_command_fastpath": True}.get(flag_name, False)
-    return _flags
-
-
-def test_ATHENA_121_fastpath_ha_403_falls_through_to_orchestrator(monkeypatch, _fixed_room):
-    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
-    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    monkeypatch.setattr(gw, "ha_client", _StatusHAClient(403))
-
-    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
-        "I couldn't reach Home Assistant to do that.", "sess-orch-403"
-    ))
-    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
-
-    client = TestClient(gw.app)
-    resp = client.post("/ha/conversation", json={
-        "text": "turn off the office light",
-        "device_id": "office",
-        "language": "en",
-    })
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    spoken = body["response"]["speech"]["plain"]["speech"]
-    assert spoken == "I couldn't reach Home Assistant to do that."
-    assert spoken != "I've turned off the office light."
-    assert body["conversation_id"] == "sess-orch-403"
-
-
-def test_ATHENA_121_fastpath_ha_500_falls_through_to_orchestrator(monkeypatch, _fixed_room):
-    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
-    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    monkeypatch.setattr(gw, "ha_client", _StatusHAClient(500))
-
-    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
-        "Something went wrong turning that off.", "sess-orch-500"
-    ))
-    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
-
-    client = TestClient(gw.app)
-    resp = client.post("/ha/conversation", json={
-        "text": "turn off the office light",
-        "device_id": "office",
-        "language": "en",
-    })
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    spoken = body["response"]["speech"]["plain"]["speech"]
-    assert spoken == "Something went wrong turning that off."
-    assert spoken != "I've turned off the office light."
-
-
-def test_ATHENA_121_fastpath_ha_timeout_falls_through_to_orchestrator(monkeypatch, _fixed_room):
-    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
-    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    monkeypatch.setattr(gw, "ha_client", _RaisingHAClient(httpx.ConnectTimeout("timed out")))
-
-    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
-        "Home Assistant didn't respond in time.", "sess-orch-timeout"
-    ))
-    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
-
-    client = TestClient(gw.app)
-    resp = client.post("/ha/conversation", json={
-        "text": "turn off the office light",
-        "device_id": "office",
-        "language": "en",
-    })
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    spoken = body["response"]["speech"]["plain"]["speech"]
-    assert spoken == "Home Assistant didn't respond in time."
-    assert spoken != "I've turned off the office light."
-
-
-def test_ATHENA_121_fastpath_ha_2xx_still_returns_real_success(monkeypatch, _fixed_room):
-    """Regression guard: a genuine 2xx HA response must still take the fast
-    path and speak the canned success line -- the fix must not turn every
-    fast-path command into a fallback.
-
-    ATHENA-69 D17 gated execute_simple_command on fast_path_allowed() (a
-    mode-service call, out of scope for this HA-outcome-propagation test --
-    covered separately by test_gateway_fast_path_guard.py). Keep the gate
-    open here so the assertion below still exercises the real HA call path."""
-    monkeypatch.setattr(sc, "fast_path_allowed", mock.AsyncMock(return_value=True))
-    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
-    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
-    ha_client = _StatusHAClient(200)
-    monkeypatch.setattr(gw, "ha_client", ha_client)
-
-    client = TestClient(gw.app)
-    resp = client.post("/ha/conversation", json={
-        "text": "turn off the office light",
-        "device_id": "office",
-        "language": "en",
-    })
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["response"]["speech"]["plain"]["speech"] == "I've turned off the office light."
-    assert body["response"]["data"] == {"success": True, "targets": []}
-    assert len(ha_client.calls) == 1

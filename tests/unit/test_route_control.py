@@ -94,6 +94,7 @@ def _make_smart_controller(**overrides):
     sc = MagicMock()
     sc.detect_sequence_intent.return_value = False
     sc.extract_sequence_intent = AsyncMock(return_value=None)
+    sc.decide_sequence_rooms = AsyncMock(return_value=None)
     sc.extract_intent = AsyncMock(return_value={"device_type": "light", "action": "turn_on", "room": "living room"})
     sc.execute_intent = AsyncMock(return_value="Done! Lights on.")
     sc._handle_sensor_intent = AsyncMock(return_value="Sensor reading: 72°F")
@@ -183,7 +184,7 @@ class TestStatusQueryOptimisation:
         em = MagicMock()
         _runtime.set_smart_controller(sc)
         _runtime.set_entity_manager(em)
-        state = _make_state(query="what lights are on?")
+        state = _make_state(query="what lights are on?", room="unknown")
         sr = _make_status_result()
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
@@ -205,7 +206,7 @@ class TestStatusQueryOptimisation:
         _runtime.set_smart_controller(sc)
         _runtime.set_entity_manager(em)
         _runtime.set_automation_agent(None)
-        state = _make_state(query="what lights are on?")
+        state = _make_state(query="what lights are on?", room="unknown")
         sr = _make_status_result()
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
@@ -229,6 +230,48 @@ class TestStatusQueryOptimisation:
         sc.extract_intent.assert_not_awaited()
         sc.execute_intent.assert_awaited_once()
         assert sc.execute_intent.await_args.args[0]["action"] == "get_status"
+
+    def test_a_lights_question_from_a_known_room_is_answered_for_that_room_not_from_the_bulk_report(self):
+        sc = _make_smart_controller()
+        em = MagicMock()
+        _runtime.set_smart_controller(sc)
+        _runtime.set_entity_manager(em)
+        _runtime.set_automation_agent(None)
+        state = _make_state(query="what lights are on?", room="living room")
+        bulk = AsyncMock(return_value=_make_status_result())
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  side_effect=_flags()),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
+            patch("orchestrator.nodes.route_control.optimize_status_query", bulk),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.store_conversation_context",
+                  new_callable=AsyncMock),
+        ):
+            _run(route_control_node(state))
+        bulk.assert_not_awaited()
+        sc.execute_intent.assert_awaited_once()
+        assert sc.execute_intent.await_args.args[0]["action"] == "get_status"
+
+    def test_a_lights_question_about_anywhere_from_a_known_room_still_uses_the_bulk_report(self):
+        sc = _make_smart_controller()
+        em = MagicMock()
+        _runtime.set_smart_controller(sc)
+        _runtime.set_entity_manager(em)
+        state = _make_state(query="what lights are on anywhere?", room="living room")
+        bulk = AsyncMock(return_value=_make_status_result())
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  side_effect=_flags()),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
+            patch("orchestrator.nodes.route_control.optimize_status_query", bulk),
+            patch("orchestrator.nodes.route_control.should_skip_synthesis",
+                  return_value=(True, "Kitchen light is on.")),
+        ):
+            result = _run(route_control_node(state))
+        bulk.assert_awaited_once()
+        assert result.answer == "Kitchen light is on."
 
     def test_status_query_optimisation_exception_falls_back(self):
         sc = _make_smart_controller()

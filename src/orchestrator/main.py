@@ -22,6 +22,7 @@ import hashlib
 import asyncio
 import subprocess
 import signal
+import contextvars
 import re
 from typing import Dict, Any, Optional, List, Literal, Tuple, get_args
 from contextlib import asynccontextmanager
@@ -41,6 +42,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
+from shared.ha_registry import create_registry
+from orchestrator import room_choice, room_context
+from orchestrator.utterance_kind import is_indoor_temperature_question
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance
+from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
@@ -1322,6 +1328,30 @@ async def lifespan(app: FastAPI):
     cache_client = CacheClient()
     _runtime.set_cache_client(cache_client)
 
+    # Home Assistant area registry: read-only, fetched in the background (a
+    # slow or unreachable HA never delays startup). Disabled without an HA
+    # token or with HA_AREAS=off. Built as a local first (R2-H1).
+    ha_registry = create_registry(
+        ha_url=ha_url,
+        ha_token=ha_token,
+        mode=_shared_config.get_config().ha_areas,
+        service_api_key=_SERVICE_API_KEY,
+        redis=getattr(cache_client, "client", None),
+    )
+    _runtime.set_ha_registry(ha_registry)
+    await ha_registry.start()
+
+    # The room vocabulary every reader shares (areas, HA_LIGHT_GROUPS, the
+    # satellite map, admin room groups). Local first (R2-H1), then registered.
+    _entity_manager = _runtime.get_entity_manager()
+    room_directory = RoomDirectoryProvider(
+        ha_registry,
+        get_admin_client(),
+        light_group_names=_entity_manager.cached_light_group_names if _entity_manager is not None else None,
+    )
+    await room_directory.start()
+    _runtime.set_room_directory(room_directory)
+
     # Initialize session manager
     session_manager = await get_session_manager()
     _runtime.set_session_manager(session_manager)
@@ -2328,6 +2358,28 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         if prev_context:
             state.prev_context = prev_context.model_dump()
 
+            # A reply to a live "which one?" from the caller who was asked
+            # goes straight to control (no model call). A question or a
+            # command is classified normally; another caller's pending is
+            # not theirs to answer.
+            asked = (state.prev_context.get("parameters") or {}).get("awaiting_room_choice")
+            if (
+                isinstance(asked, dict)
+                and asked.get("fingerprint")
+                and asked.get("fingerprint") == state.caller_fingerprint
+                and room_choice.reply_fits(
+                    asked, state.query, current_directory(),
+                    is_question=classify_utterance(state.query).kind == UtteranceKind.STATE_QUESTION,
+                )
+            ):
+                state.intent = IntentCategory.CONTROL
+                state.confidence = 0.95
+                state.complexity = "simple"
+                state.context_ref_info = context_ref_view(ref_info, "continued")
+                state.continuation_decision = {"decision": "continued", "reason": "room_choice_reply"}
+                state.node_timings["classify"] = time.time() - start
+                return state
+
             # Check for strong intent indicators BEFORE doing context continuation
             # This prevents "restaurant recommendations" from routing to weather
             # just because the previous query was about weather
@@ -2579,19 +2631,14 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Check for room+color patterns (light control without "lights" keyword)
     # This catches commands like "change office to white", "random colors in the kitchen"
-    room_names = [
-        'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-        'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-        'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-        'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta'
-    ]
     color_names = [
         'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple',
         'pink', 'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset',
         'random colors', 'different colors', 'christmas colors', 'ocean'
     ]
     query_lower = state.query.lower()
-    has_room = any(room in query_lower for room in room_names)
+    room_mention = room_context.find_room_mention(state.query, current_directory())
+    has_room = room_mention.kind != "none"
     has_color = any(color in query_lower for color in color_names)
 
     if has_room and has_color:
@@ -2604,10 +2651,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.entities = {"device": "light"}
 
         # Extract room and color for entity info
-        for room in room_names:
-            if room in query_lower:
-                state.entities["room"] = room
-                break
+        state.entities["room"] = room_context.room_values(room_mention)[0]
         for color in color_names:
             if color in query_lower:
                 state.entities["color"] = color
@@ -2960,8 +3004,15 @@ Respond in JSON format:
             pattern_intent, pattern_confidence = _pattern_based_classification(state.query, return_confidence=True)
             logger.info(f"DEBUG pattern classification: query_len={len(state.query)}, pattern_intent={pattern_intent.value}, pattern_confidence={pattern_confidence}")
 
+            # "Is it cold in here" is the thermostat or a room sensor, never the
+            # weather service, whatever the pattern classifier said.
+            if state.intent == IntentCategory.WEATHER and is_indoor_temperature_question(state.query):
+                logger.info("indoor_temperature_override", from_intent="weather")
+                state.intent = IntentCategory.CONTROL
+                state.confidence = 0.9
+                state.entities = {**(state.entities or {}), "device_type": "climate", "action": "get_status"}
             # If LLM returns "unknown", use pattern-based fallback
-            if state.intent == IntentCategory.UNKNOWN:
+            elif state.intent == IntentCategory.UNKNOWN:
                 if pattern_intent != IntentCategory.GENERAL_INFO or pattern_confidence >= 0.8:
                     logger.info(f"LLM returned unknown, pattern-based fallback: {pattern_intent} (confidence: {pattern_confidence})")
                     state.intent = pattern_intent
@@ -6373,6 +6424,13 @@ class QueryRequest(BaseModel):
             "never for the device_id guest-session lookup."
         ),
     )
+    trusted_voice: bool = Field(
+        False,
+        description=(
+            "Set by the gateway for a caller it judged a trusted voice caller. Read only from a "
+            "service-key caller; a client body value is ignored."
+        ),
+    )
 
 
 def _audience_session_class(audience: KnowledgeAudience) -> str:
@@ -6500,6 +6558,19 @@ async def _persist_fast_path_messages(session_id: str, query: str, reply: FastPa
     sm = _runtime.get_session_manager()
     await sm.add_message(session_id=session_id, role="user", content=query, metadata={"intent": "general_info"})
     await sm.add_message(session_id=session_id, role="assistant", content=reply.text, metadata={"fast_path": reply.kind})
+
+
+# chat_completions has already read the gateway's trusted_voice mark under
+# `service_authenticated is True` and runs the non-stream turn through
+# process_query with service_authenticated=False (a /v1 caller is never an
+# owner caller); this carries the vouched mark across that call.
+_vouched_trusted_voice: contextvars.ContextVar[bool] = contextvars.ContextVar("vouched_trusted_voice", default=False)
+
+
+def _turn_trusted_voice(request: "QueryRequest", service_authenticated: bool) -> bool:
+    """Whether the turn is a trusted voice caller's: the body's flag from a
+    service-key caller, or the mark chat_completions vouched for."""
+    return (request.trusted_voice is True and service_authenticated is True) or _vouched_trusted_voice.get()
 
 
 class QueryResponse(BaseModel):
@@ -6832,6 +6903,7 @@ async def process_query(
             entities=initial_entities,  # Include location from request
             interruption_context=request.interruption_context,  # Barge-in: Pass interruption context for natural acknowledgment
             supports_followup=request.supports_followup,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
             caller_fingerprint=_request_caller_fingerprint(
                 request, permissions.get("mode")
             ),
@@ -7379,6 +7451,9 @@ async def process_query(
             and final_state.get("validation_passed", True)
             and response.confidence >= 0.3
             and response.intent != "unknown"
+            # A control answer reports (or asks about) a change in this house:
+            # replaying it from a cache would answer without acting.
+            and response.intent != IntentCategory.CONTROL.value
         )
         if should_cache:
             try:
@@ -7629,6 +7704,7 @@ async def process_query_stream(
                 temperature=request.temperature,
                 interface_type=request.interface_type,
                 supports_followup=request.supports_followup,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -7957,6 +8033,7 @@ async def process_query_stream_v2(
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -8430,7 +8507,10 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_service_caller)])
 @captures_turn("v1_chat_completions")
-async def chat_completions(request: OpenAIChatRequest):
+async def chat_completions(
+    request: OpenAIChatRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     OpenAI-compatible chat completions endpoint with streaming support.
     Wraps the orchestrator's /query endpoint for Home Assistant and Open WebUI compatibility.
@@ -8459,6 +8539,19 @@ async def chat_completions(request: OpenAIChatRequest):
             room=request.room or (request.extra_body or {}).get("room"),
             secret=session_hmac_secret(_shared_config.get_config()),
         )
+        # A believed voice device (the gateway sets both keys only for a device
+        # id it trusts) makes this a follow-up surface. Read only from a
+        # service-key caller; a malformed id is ignored, and a follow-up needs
+        # a device to fingerprint.
+        voice_device_id = None
+        supports_followup = False
+        trusted_voice = False
+        if service_authenticated is True:
+            trusted_voice = (request.extra_body or {}).get("trusted_voice") is True
+            body_device_id = (request.extra_body or {}).get("voice_device_id")
+            if isinstance(body_device_id, str) and re.fullmatch(r"[0-9a-f]{32}", body_device_id):
+                voice_device_id = body_device_id
+                supports_followup = (request.extra_body or {}).get("supports_followup") is True
         sm = _runtime.get_session_manager()
         # The audience (and so the session class) comes first: the first-turn
         # reset, the OpenAI index/cap and the session itself must all use the
@@ -8637,10 +8730,13 @@ async def chat_completions(request: OpenAIChatRequest):
                     request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8],
                     start_time=start_time,
                     interface_type=interface_type,
-                    # OpenAIChatRequest carries no caller_trust or device_id:
-                    # never a follow-up surface (D14).
-                    supports_followup=False,
-                    caller_fingerprint=compute_caller_fingerprint(None, None, room, authz.permissions.get("mode")),
+                    # A follow-up surface only for a device the gateway
+                    # believed (service-key caller); otherwise none (D14).
+                    supports_followup=supports_followup,
+                    trusted_voice=trusted_voice,
+                    caller_fingerprint=compute_caller_fingerprint(
+                        None, voice_device_id, room, authz.permissions.get("mode")
+                    ),
                 )
 
                 # TRUE STREAMING: Run orchestrator for RAG collection, then stream LLM tokens
@@ -8857,12 +8953,19 @@ async def chat_completions(request: OpenAIChatRequest):
             room=(request.room or (request.extra_body or {}).get("room") or "unknown"),
             temperature=request.temperature,
             interface_type=interface_type,
+            voice_device_id=voice_device_id,
+            supports_followup=supports_followup,
+            trusted_voice=trusted_voice,
         )
 
         # process_query opens its own usage scope; inside this one it reuses it, so
         # the totals are visible here.
         with llm_usage_scope() as usage:
-            result = await process_query(query_request, service_authenticated=False)
+            _vouched = _vouched_trusted_voice.set(trusted_voice)
+            try:
+                result = await process_query(query_request, service_authenticated=False)
+            finally:
+                _vouched_trusted_voice.reset(_vouched)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(
@@ -9039,6 +9142,10 @@ async def health_check(detailed: bool = False):
     except Exception as e:
         health["components"]["home_assistant"] = False
         logger.warning("health_check: home_assistant probe failed", exc_info=e)
+
+    # Area registry state only (never counts or names).
+    _registry = _runtime.get_ha_registry()
+    health["components"]["ha_registry"] = _registry.state if _registry is not None else "disabled"
 
     # Conversation capture: configured and writer state only (no text, no DSN).
     # Informational: a capture problem never makes the orchestrator unhealthy.

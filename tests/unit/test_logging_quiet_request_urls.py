@@ -17,7 +17,7 @@ SRC = str(Path(__file__).resolve().parents[2] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-QUIET = ("uvicorn.access", "httpx", "httpcore")
+QUIET = ("uvicorn.access", "httpx", "httpcore", "websockets", "websockets.client")
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +46,7 @@ def test_request_url_loggers_are_warning_after_uvicorn_config():
     configure_logging("test-quiet-urls")
     for name in QUIET:
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING, name
+        assert logging.getLogger(name).level == logging.WARNING, f"{name} is pinned, not just inheriting the root level"
     assert not logging.getLogger("uvicorn.access").isEnabledFor(logging.INFO)
 
 
@@ -145,7 +146,7 @@ def test_filter_leaves_mapping_args_alone():
 def test_request_url_loggers_is_public():
     from shared import logging_config
 
-    assert logging_config.REQUEST_URL_LOGGERS == ("uvicorn.access", "httpx", "httpcore")
+    assert logging_config.REQUEST_URL_LOGGERS == ("uvicorn.access", "httpx", "httpcore", "websockets", "websockets.client")
     assert logging_config._REQUEST_URL_LOGGERS is logging_config.REQUEST_URL_LOGGERS
     logging_config.quiet_request_url_loggers()
     for name in logging_config.REQUEST_URL_LOGGERS:

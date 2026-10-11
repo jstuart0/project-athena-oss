@@ -11,7 +11,7 @@ from ._clock_fixture import UTC_POD, clock  # noqa: F401  (fixture)
 def _run(command: str) -> str:
     from gateway.simple_commands import execute_simple_command
 
-    return asyncio.run(execute_simple_command(command, {}, None, "", ""))
+    return asyncio.run(execute_simple_command(command, {}))
 
 
 def _hour_words(now: datetime) -> str:
