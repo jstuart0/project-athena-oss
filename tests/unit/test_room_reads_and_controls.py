@@ -21,10 +21,10 @@ from shared import ha_registry as hr  # noqa: E402
 def house_with_devices(monkeypatch, **kw):
     chat = Chat(monkeypatch, **kw)
     extra_states = {
-        "fan.study_ceiling": _state("fan.study_ceiling", "off", name="Ceiling Fan"),
-        "fan.galley_ceiling": _state("fan.galley_ceiling", "off", name="Ceiling Fan"),
-        "switch.study_plug": _state("switch.study_plug", "on", name="Desk Plug"),
-        "switch.galley_plug": _state("switch.galley_plug", "off", name="Kettle Plug"),
+        "fan.ceiling_a": _state("fan.ceiling_a", "off", name="Ceiling Fan"),
+        "fan.ceiling_b": _state("fan.ceiling_b", "off", name="Ceiling Fan"),
+        "switch.plug_one": _state("switch.plug_one", "on", name="Desk Plug"),
+        "switch.plug_two": _state("switch.plug_two", "off", name="Kettle Plug"),
         "sensor.study_temp": {"entity_id": "sensor.study_temp", "state": "71.5",
                               "attributes": {"friendly_name": "Study Temperature", "device_class": "temperature",
                                              "unit_of_measurement": "°F"}},
@@ -34,10 +34,10 @@ def house_with_devices(monkeypatch, **kw):
     chat.rig.manager._entities_cache.update(extra_states)
     chat.rig.manager._build_indexes()
     chat.raw_registry["entities"] += [
-        _reg("fan.study_ceiling", area="area_study"),
-        _reg("fan.galley_ceiling", area="area_galley"),
-        _reg("switch.study_plug", area="area_study"),
-        _reg("switch.galley_plug", area="area_galley"),
+        _reg("fan.ceiling_a", area="area_study"),
+        _reg("fan.ceiling_b", area="area_galley"),
+        _reg("switch.plug_one", area="area_study"),
+        _reg("switch.plug_two", area="area_galley"),
         _reg("sensor.study_temp", area="area_study"),
         _reg("sensor.study_humidity", area="area_study"),
     ]
@@ -53,14 +53,14 @@ def test_a_fan_command_acts_on_the_fans_in_the_speakers_area_by_registry_not_by_
     chat = house_with_devices(monkeypatch)
     chat.llm.reply = intent("fan", "turn_on")
     out = chat.turn("turn on the fan")
-    assert chat.written == ["fan.study_ceiling"], (chat.written, out.answer)
+    assert chat.written == ["fan.ceiling_a"], (chat.written, out.answer)
 
 
 def test_a_fan_named_in_another_room_is_that_areas_fan(monkeypatch):
     chat = house_with_devices(monkeypatch)
     chat.llm.reply = intent("fan", "turn_on", "galley")
     chat.turn("start the ceiling fan in the galley")
-    assert chat.written == ["fan.galley_ceiling"]
+    assert chat.written == ["fan.ceiling_b"]
 
 
 def test_a_fan_status_question_reads_only_the_area(monkeypatch):
@@ -79,11 +79,11 @@ def test_a_switch_status_question_reads_the_speakers_area_only(monkeypatch):
 
 def test_without_a_registry_a_fan_falls_back_to_the_name_match(monkeypatch):
     chat = house_with_devices(monkeypatch, registry=False)
-    chat.rig.manager._entities_cache["fan.study_ceiling"]["attributes"]["friendly_name"] = "Study Fan"
+    chat.rig.manager._entities_cache["fan.ceiling_a"]["attributes"]["friendly_name"] = "Study Fan"
     chat.rig.manager._build_indexes()
     chat.llm.reply = intent("fan", "turn_on", "study")
     chat.turn("start the ceiling fan in the study")
-    assert chat.written == ["fan.study_ceiling"]
+    assert chat.written == ["fan.ceiling_a"]
 
 
 # ---------------------------------------------------------------------------

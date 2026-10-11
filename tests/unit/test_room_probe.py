@@ -106,3 +106,10 @@ def test_main_failure_names_the_class_only(monkeypatch, capsys):
     assert room_probe.main(["--runs", "1"]) == 1
     err = capsys.readouterr().err
     assert err.strip() == "probe failed: ConnectionError"
+
+
+def test_main_refuses_zero_runs(monkeypatch, capsys):
+    monkeypatch.setenv("HA_URL", "http://ha.invalid:8123")
+    monkeypatch.setenv("HA_TOKEN", "t")
+    assert room_probe.main(["--runs", "0"]) == 2
+    assert "at least 1" in capsys.readouterr().err
