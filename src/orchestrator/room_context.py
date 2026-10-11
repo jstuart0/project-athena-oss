@@ -431,6 +431,77 @@ def ground_llm_room(
     return claimed_key if claimed_key in keys else None
 
 
+# Words that can sit before "lights" without naming a room: colours, levels,
+# fixture kinds, quantifiers and pointers. A phrase made only of these (or of
+# _NON_ROOM_TOKENS) is never a room.
+_NOT_A_ROOM_WORD = frozenset({
+    "red", "orange", "yellow", "green", "blue", "purple", "pink", "violet", "white", "teal", "cyan",
+    "warm", "cool", "cold", "hot", "soft", "bright", "brighter", "dim", "dimmer", "low", "high",
+    "full", "half", "max", "min", "maximum", "minimum", "medium", "natural", "daylight",
+    "ceiling", "overhead", "table", "floor", "desk", "bedside", "night", "accent", "led", "smart",
+    "ambient", "pendant", "wall", "strip", "string", "fairy", "reading", "mood", "lava", "main",
+    "other", "same", "these", "those", "here", "there", "that", "this", "home", "outside", "inside",
+    "its", "their", "his", "her", "last", "next", "previous", "first", "second", "third",
+})
+_DEVICE_NOUNS = frozenset({
+    "light", "lights", "lamp", "lamps", "fan", "fans", "switch", "switches", "plug", "plugs",
+    "tv", "television", "speaker", "speakers",
+})
+_DETERMINERS = frozenset({"the", "my", "our", "a"})
+_PLACE_WORDS = frozenset({"in"})
+_PHRASE_END = frozenset({
+    "and", "or", "to", "please", "except", "but", "when", "by", "so", "if", "then", "on", "off",
+    "with", "until", "for", "at", "from", "after", "before", "while", "now",
+})
+_MAX_ROOM_WORDS = 3
+
+
+def _room_like(words: Sequence[str]) -> bool:
+    return bool(words) and not any(
+        w in _NON_ROOM_TOKENS or w in _NOT_A_ROOM_WORD or w in _DEVICE_NOUNS or w.isdigit() for w in words
+    )
+
+
+def unknown_room_phrase(query: Optional[str], directory: Optional[RoomDirectory]) -> str:
+    """A phrase that is shaped like a room ("the sunroom lights", "lights in
+    the sunroom", "turn on sunroom lights") but names none the directory
+    knows; "" when there is none. Colours, levels, fixture kinds and pointers
+    ("the red lights", "dim lights", "the ceiling lights", "lights in here")
+    are not rooms. Used before any default: a room the speaker named and
+    Athena doesn't have must not become the speaker's room."""
+    toks = tokens(query or "")
+    if not toks:
+        return ""
+    known = set()
+    for mention in find_room_mentions(query, directory):
+        known.update(range(mention.start, mention.end))
+    n = len(toks)
+    for i, tok in enumerate(toks):
+        # "<noun> in|at|for the X": the words after the place word.
+        if tok in _PLACE_WORDS and any(t in _DEVICE_NOUNS for t in toks[:i]):
+            j = i + 1
+            if j < n and toks[j] in _DETERMINERS:
+                j += 1
+            end = j
+            while end < n and end - j < _MAX_ROOM_WORDS and toks[end] not in _PHRASE_END and toks[end] not in _PLACE_WORDS:
+                end += 1
+            words = toks[j:end]
+            if _room_like(words) and not known.intersection(range(j, end)):
+                return " ".join(words)
+        # "the|my X <noun>" and "on|off X <noun>": the words before the noun.
+        if tok in _DEVICE_NOUNS and i > 0:
+            start = i
+            while start > 0 and i - start < _MAX_ROOM_WORDS and toks[start - 1] not in _DETERMINERS \
+                    and toks[start - 1] not in _PHRASE_END and toks[start - 1] not in _PLACE_WORDS \
+                    and toks[start - 1] not in _DEVICE_NOUNS:
+                start -= 1
+            words = toks[start:i]
+            introduced = start > 0 and (toks[start - 1] in _DETERMINERS or toks[start - 1] in ("on", "off"))
+            if introduced and _room_like(words) and not known.intersection(range(start, i)):
+                return " ".join(words)
+    return ""
+
+
 _JOINERS = frozenset({"and", "the", "my", "also", "plus", "light", "lights", "lamp", "lamps"})
 
 

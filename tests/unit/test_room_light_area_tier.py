@@ -634,3 +634,34 @@ def test_a_multi_room_command_that_does_not_name_two_rooms_is_gated(monkeypatch)
     rig = Rig(monkeypatch, registry=False, states=states, threshold=3, exclude="[]")
     rig.run(light("multi_room", rooms=["den", "living_room"]), "please")
     assert rig.written == []
+
+
+# "All the lights" writes, pinned per caller (fictional house, attic lights on)
+UNTRUSTED_OWNER_WRITES = {"light.galley_bulb_1", "light.galley_bulb_2", "light.galley_relay_1", "light.hall_lamp"}
+TRUSTED_OWNER_WRITES = UNTRUSTED_OWNER_WRITES | {
+    "light.attic_a", "light.attic_b", "light.north_lamp", "light.south_lamp", "light.study_lamp",
+}
+
+
+def _all_the_lights(monkeypatch, *, perms=None, mode="owner", trusted=True, **rig_kw):
+    rig = Rig(monkeypatch, attic_state="on", **rig_kw)
+    rig.run(light("whole_house"), "turn on all the lights", perms, mode, trusted)
+    return set(rig.written)
+
+
+def test_all_the_lights_writes_exactly_these_ids_for_each_kind_of_caller(monkeypatch):
+    assert _all_the_lights(monkeypatch, trusted=False) == UNTRUSTED_OWNER_WRITES, \
+        "owner mode the gateway didn't vouch for: the leaves of every Home Assistant light group"
+    assert _all_the_lights(monkeypatch, trusted=True) == TRUSTED_OWNER_WRITES, "trusted: every area's lamps"
+    assert _all_the_lights(
+        monkeypatch, perms=guest(allowed_intents=["control"]), mode="guest", trusted=True,
+        groups='{"study": "light.study_lamp"}',
+    ) == {"light.study_lamp"}, "guest: only the configured groups, trusted mark or not"
+
+
+def test_unassigned_lights_join_only_a_trusted_owner(monkeypatch):
+    assert _all_the_lights(monkeypatch, trusted=False, unassigned=True) == UNTRUSTED_OWNER_WRITES
+    assert _all_the_lights(monkeypatch, trusted=True, unassigned=True) == TRUSTED_OWNER_WRITES | {"light.loose_lamp"}
+    assert "light.loose_lamp" not in _all_the_lights(
+        monkeypatch, perms=guest(allowed_intents=["control"]), mode="guest", trusted=True, unassigned=True,
+        groups='{"study": "light.study_lamp"}')

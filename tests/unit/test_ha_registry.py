@@ -389,6 +389,27 @@ def test_request_refresh_is_rate_limited_by_the_minimum_interval():
     run(go())
 
 
+def test_a_forced_ensure_bypasses_the_minimum_interval_but_is_itself_rate_limited():
+    fetcher = FakeFetcher()
+    clock = Clock()
+    reg = registry(fetcher, clock, ttl=300, min_refresh_interval=60)
+
+    async def go():
+        await reg.ensure(1)
+        assert fetcher.calls == 1
+        clock.now += 1
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 2, "an unknown device id gets a real refresh inside the 60 s interval"
+        clock.now += 1
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 2, "but not more than once per forced-refresh interval"
+        clock.now += hr.FORCED_REFRESH_MIN_INTERVAL + 1
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 3
+
+    run(go())
+
+
 def test_a_failed_refresh_keeps_the_last_snapshot_and_reports_unavailable():
     fetcher = FakeFetcher()
     clock = Clock()

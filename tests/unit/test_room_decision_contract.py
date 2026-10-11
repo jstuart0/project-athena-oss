@@ -230,3 +230,68 @@ def test_an_untrusted_caller_who_is_not_a_proven_owner_gets_the_groups_only(monk
     chat = Chat(monkeypatch)
     _all_lights(chat, trusted_voice=False, audience=audience)
     assert not (set(chat.written) & ALL_LAMPS), "no group is configured, so nothing area-wide goes"
+
+
+# ---------------------------------------------------------------------------
+# A room that is named but unknown is not the speaker's room
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("query,phrase", [
+    ("turn on the sunroom lights", "sunroom"),
+    ("turn on sunroom lights", "sunroom"),
+    ("turn on the lights in the sunroom", "sunroom"),
+    ("turn off all the lights in the sunroom", "sunroom"),
+    ("turn on the lights in the sunroom please", "sunroom"),
+])
+def test_a_named_room_the_house_does_not_have_writes_nothing_and_says_so(monkeypatch, query, phrase):
+    chat = Chat(monkeypatch)
+    out = chat.turn(query)
+    assert chat.written == [], (query, chat.written)
+    assert out.answer == f"I couldn't find a room called {phrase}.", out.answer
+    assert "study" not in out.answer and "galley" not in out.answer, "no room list leaks"
+
+
+@pytest.mark.parametrize("query", [
+    "turn on the lights",
+    "turn on the red lights",
+    "turn on dim lights",
+    "dim the lights",
+    "turn on the ceiling lights",
+    "turn the lights to 50 percent",
+    "turn on the lights in here",
+    "turn on the lights at sunset",
+    "turn on the bedside lamps",
+])
+def test_a_command_with_no_room_still_uses_the_speakers_room(monkeypatch, query):
+    chat = Chat(monkeypatch)
+    out = chat.turn(query)
+    assert set(chat.written) == STUDY, (query, chat.written, out.answer)
+
+
+def test_an_unknown_room_from_an_unknown_speaker_room_is_still_not_a_question_or_a_write(monkeypatch):
+    chat = Chat(monkeypatch)
+    out = chat.turn("turn on the sunroom lights", room="unknown")
+    assert chat.written == [] and out.answer == "I couldn't find a room called sunroom."
+
+
+def test_a_known_room_beats_the_unknown_check(monkeypatch):
+    chat = Chat(monkeypatch)
+    chat.turn("turn on the galley lights")
+    assert set(chat.written) == GALLEY
+
+
+def test_a_question_about_an_unknown_room_is_not_answered_for_the_speakers_room(monkeypatch):
+    chat = Chat(monkeypatch)
+    chat.llm.reply = {"device_type": "light", "room": None, "action": "get_status",
+                      "target_scope": "group", "parameters": {}}
+    out = chat.turn("are the lights on in the sunroom")
+    assert out.answer == "I couldn't find a room called sunroom."
+
+
+def test_a_room_the_directory_lacks_is_still_found_by_light_names_when_lights_answer_to_it(monkeypatch):
+    chat = Chat(monkeypatch, registry=False)
+    chat.rig.manager._entities_cache["light.gazebo_lamp"] = {
+        "entity_id": "light.gazebo_lamp", "state": "off", "attributes": {"friendly_name": "Gazebo Lamp"}}
+    chat.rig.manager._build_indexes()
+    chat.turn("turn on the gazebo lights")
+    assert chat.written == ["light.gazebo_lamp"]

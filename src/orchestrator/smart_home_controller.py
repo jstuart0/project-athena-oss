@@ -2228,6 +2228,15 @@ Return ONLY valid JSON."""
         if intent.get('decided_excluded'):
             intent['excluded_rooms'] = list(intent['decided_excluded'])
 
+    @staticmethod
+    async def _is_room_group(name: str) -> bool:
+        """Whether the admin room groups have one by this name (the directory
+        refreshes its copy only every few minutes)."""
+        try:
+            return bool(await get_admin_client().resolve_room_group(name))
+        except Exception:
+            return False
+
     async def _room_has_permitted_target(self, domain: str, key: str) -> Optional[bool]:
         """Whether the request may write anything in a room: for lights, its
         lamp leaves after the permission degrade; for other domains, its
@@ -2326,6 +2335,19 @@ Return ONLY valid JSON."""
             decision = room_context.Rooms(tuple(keys), tuple(self._spoken_room(k) for k in keys))
         else:
             mention = room_context.find_room_mention(original_query, directory)
+            if mention.kind == "none":
+                # A room the speaker named that the directory lacks is looked
+                # up by name (a house with no area for it may still have
+                # lights called that). If nothing answers to it, say so: it
+                # must not become the speaker's room, or the whole house.
+                unknown = room_context.unknown_room_phrase(original_query, directory)
+                if unknown:
+                    if (
+                        await self._room_has_permitted_target(domain, room_key(unknown)) is None
+                        and not await self._is_room_group(unknown)
+                    ):
+                        return f"I couldn't find a room called {unknown}."
+                    given = unknown
             if mention.kind == "none" and isinstance(given, str) and given not in ("", "whole_house", "unknown"):
                 phrase = given.replace("_", " ")
                 mention = room_context.find_room_mention(phrase, directory)
@@ -4865,7 +4887,7 @@ Do NOT mention rooms that have no current or recent motion."""
             if not any(rooms):
                 return None, "ask"
 
-        if owner and get_config().ha_whole_house_unassigned_lights is True and snapshot is not None:
+        if area_wide and get_config().ha_whole_house_unassigned_lights is True:
             loose = sorted(
                 eid for eid, ent in entities.items()
                 if eid.startswith('light.') and not isinstance(((ent or {}).get('attributes') or {}).get('entity_id'), list)

@@ -2689,12 +2689,12 @@ async def _warmup_session(device_id: str):
                     f"{ORCHESTRATOR_URL}/session/{session_id}/warmup",
                     headers=service_key_headers(),
                 )
-                logger.debug(f"Session warmed for device {device_id}")
+                logger.debug("device_session_warmed")
         else:
             # No existing session - nothing to warm
-            logger.debug(f"No session to warm for device {device_id}")
+            logger.debug("device_session_nothing_to_warm")
     except Exception as e:
-        logger.warning(f"Session warmup failed for {device_id}: {e}")
+        logger.warning("device_session_warmup_failed", error_class=type(e).__name__)
 
 
 @app.post("/ha/wake-word-detected")
@@ -2726,7 +2726,7 @@ async def ha_wake_word_detected(request: dict) -> dict:
     # Pre-fetch session in background (non-blocking)
     asyncio.create_task(_warmup_session(device_id))
 
-    logger.info("wake_word_detected_warmup_started", device_id=device_id)
+    logger.info("wake_word_detected_warmup_started", has_device_id=bool(device_id))
     return {"status": "warming", "device_id": device_id}
 
 
@@ -2822,9 +2822,9 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
         logger.info("ha_conversation_request", room_known=room != "unknown", query_len=len(request.text))
 
         if existing_session_id:
-            logger.info(f"Using existing session {existing_session_id} for device {device_id}")
+            logger.info("ha_conversation_session", reused=True, has_device_id=bool(believed_device_id), trusted_voice=trusted_voice)
         else:
-            logger.info(f"Creating new session for device {device_id}")
+            logger.info("ha_conversation_session", reused=False, has_device_id=bool(believed_device_id), trusted_voice=trusted_voice)
 
         # Check if simple command fast-path is enabled
         fastpath_enabled = await get_feature_flag("ha_simple_command_fastpath", default=False)
@@ -2939,10 +2939,10 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
         )
 
         if should_continue:
-            logger.info(f"Continued conversation enabled for device {device_id} (response contains question)")
+            logger.info("ha_conversation_continue_enabled")
 
         request_counter.labels(endpoint="ha_conversation", status="success").inc()
-        logger.info(f"HA conversation completed: device {device_id}, session {orchestrator_session_id}")
+        logger.info("ha_conversation_completed", has_session=bool(orchestrator_session_id))
 
         return ha_response
 

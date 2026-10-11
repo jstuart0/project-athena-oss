@@ -329,3 +329,36 @@ def test_room_context_is_pure():
     text = (SRC / "orchestrator" / "room_context.py").read_text(encoding="utf-8")
     imports = re.findall(r"^(?:from|import) ([\w.]+)", text, re.M)
     assert set(imports) <= {"__future__", "re", "dataclasses", "typing", "shared.ha_registry"}, imports
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("turn on the sunroom lights", "sunroom"),
+    ("turn on the lights in the backyard", "backyard"),
+    ("turn off all the lights in the sunroom", "sunroom"),
+    ("turn on the fan in the sunroom", "sunroom"),
+    ("are the lights on in the nursery", "nursery"),
+    ("turn on the lights", ""),
+    ("turn on the red lights", ""),
+    ("set the lights to blue", ""),
+    ("dim the lights", ""),
+    ("turn on dim lights", ""),
+    ("turn on the ceiling lights", ""),
+    ("turn the lights to 50 percent", ""),
+    ("turn on the lights in here", ""),
+    ("turn on the lights in the house", ""),
+    ("turn on all the lights", ""),
+    ("turn on the lights at sunset", ""),
+    ("turn on the kitchen lights", ""),
+    ("what lights are on", ""),
+    ("", ""),
+])
+def test_unknown_room_phrase(query, expected):
+    directory = rc.RoomDirectory.build(areas=(), light_group_keys=(), room_groups=[], satellite_rooms=())
+    assert rc.unknown_room_phrase(query, directory) == expected
+
+
+def test_a_room_the_directory_knows_is_not_unknown():
+    directory = rc.RoomDirectory.build(
+        areas=(rc.Area("a1", "Sunroom", (), "sunroom"),) if hasattr(rc, "Area") else (),
+        light_group_keys=("sunroom",), room_groups=[], satellite_rooms=())
+    assert rc.unknown_room_phrase("turn on the sunroom lights", directory) == ""

@@ -189,7 +189,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). Also read by admin-backend for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
+| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on the orchestrator — without it, mode/permission resolution degrades every request (`get_current_mode`'s outage fallback). The gateway no longer reads it: it makes no mode decision, because every device command goes to the orchestrator. Also read by admin-backend for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them. |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
@@ -668,7 +668,7 @@ can never claim owner. The precedence, most to least trusted:
 
 | Caller | Mode source | `caller_trust` sent to the orchestrator |
 |--------|-------------|------------------------------------------|
-| Gateway (satellite/HA voice) | server-resolved via step 1-3 above | `household` — the gateway's fast path (`mode_gate.py`) only takes effect while the house is actually in owner mode |
+| Gateway (satellite/HA voice) | server-resolved via step 1-3 above | `household` — the gateway sends the caller class and the orchestrator resolves the mode; the gateway no longer decides device commands itself |
 | SMS (`sms_webhook.py`) | server-resolved | `sms` |
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
 | jarvis-web, signed-in operator Bearer or edge-attested household member | server-resolved via step 1-3 above | `web_authenticated` |
@@ -1552,7 +1552,7 @@ with an error.
 names ("bathroom" for the north, south and lower bathrooms) asks "Which
 bathroom: lower, north or south?" and lists only rooms the caller is allowed
 to use. A command with no room named, from a speaker whose room is unknown,
-asks "Which room?". The reply is read strictly: the words you say, less
+asks "Which room?". A room you name that the house doesn't have ("turn on the sunroom lights", "all the lights in the sunroom") is never swapped for the room you are in or for the whole house: Athena looks for lights, fans or switches by that name, and if nothing answers to it says "I couldn't find a room called sunroom" and does nothing. Colours, levels and fixture words ("the red lights", "dim lights", "the ceiling lights") are not room names. The reply is read strictly: the words you say, less
 filler such as "the" or "one", must all belong to one candidate's name; a
 question or a new command cancels the question and runs as itself; two
 matches ask once more. The answer is good for 60 seconds, from the same
@@ -1567,12 +1567,15 @@ the lights", "the whole house", "everything"); a room named in the same
 sentence wins ("all the lights in the kitchen"), and "except the bedroom"
 leaves that room out. Who reaches every area depends on who is asking: an
 owner whose voice device the gateway trusts, or an owner signed in to Jarvis
-web with a valid service key, reaches every area's lamps. Anyone else (a guest,
-an unproven caller, a degraded mode service, a service that doesn't send the
-trusted mark) reaches only the lamps of the `HA_LIGHT_GROUPS` groups and of
-the admin room groups, and is asked which room if there are none. Lights with
-no area are included only when `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS=true`, and
-only for the owner.
+web with a valid service key, reaches every area's lamps. An owner-mode caller
+Athena can't vouch for (an unproven household request, or a service that
+doesn't send the trusted mark) reaches the lights under every Home Assistant
+light group, as before areas existed. A guest or any other non-owner audience
+(a degraded mode service, a public caller) reaches only the lamps of the
+`HA_LIGHT_GROUPS` groups and of the admin room groups, and is asked which room
+if there are none. Lights with no area are included only when
+`HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS=true`, and only for the callers that reach
+every area (a trusted owner).
 
 **When it doesn't work.** `/health` reports the registry's state
 (`ha_registry` in the gateway, `components.ha_registry` in the orchestrator):
@@ -2505,7 +2508,7 @@ rather than guessing a device/room your HA instance doesn't have. See
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
-| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light picked for a room by its area or only by name is dropped when it matches (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
+| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light is dropped when it matches, whether it was picked for a room by its area or only by name, and in "all the lights" (an area's lamps and the leaves of a light group alike); it still never applies to an `HA_LIGHT_GROUPS` entry itself (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
 | `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
 | `HA_AREAS` | `auto` | `auto` reads Home Assistant's area, device and entity registries over its WebSocket API (read-only, in the background; needs `HA_URL` and `HA_TOKEN`). `off` never connects. Any other value logs an error and reads `off`. See "Which room Athena assumes". |
 | `HA_DEVICE_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs or addresses of clients whose Home Assistant device id the gateway believes, for the speaker's room, per-device sessions and follow-ups. A request that presents the gateway's own API key is trusted too. Empty and no gateway key: a device id is ignored. Keep it narrow (Home Assistant's address as `/32`); an entry wider than /24 (IPv4) or /64 (IPv6) logs `ha_device_client_networks_wide`, and one overlapping `TRUSTED_PROXY_CIDRS` is ignored with an error. |

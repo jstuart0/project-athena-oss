@@ -62,6 +62,11 @@ ROOM_SCOPE = (
     "src/gateway/main.py", "src/gateway/speaker_room.py", "src/shared/ha_registry.py",
 )
 _ROOM_TOKENS = tuple(tuple(k.split("_")) for k in ROOM_KEYS)
+# A Home Assistant device id names a physical speaker in a house. The gateway
+# handles them on every voice request, so none may reach one of its logs
+# (log ``has_device_id=`` instead).
+DEVICE_ID_SCOPE_PREFIX = "src/gateway/"
+_DEVICE_ID_TOKENS = (("device", "id"), ("device", "ids"))
 CALLER_KEYS = ("email", "identity", "username", "display_name")
 TEXT_KEYS = ("preview",)
 _KEY_TOKENS = tuple(tuple(k.split("_")) for k in HOUSE_KEYS + CALLER_KEYS + TEXT_KEYS)
@@ -399,8 +404,15 @@ def _is_room_name(identifier: str) -> bool:
     return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _ROOM_TOKENS)
 
 
+def _is_device_id_name(identifier: str) -> bool:
+    tokens = tuple(t for t in identifier.lower().split("_") if t)
+    return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _DEVICE_ID_TOKENS)
+
+
 def _matches(identifier: str, filename: str = "") -> bool:
     if filename in ROOM_SCOPE and _is_room_name(identifier):
+        return True
+    if filename.startswith(DEVICE_ID_SCOPE_PREFIX) and _is_device_id_name(identifier):
         return True
     return (bool(_matched_keys(identifier)) or identifier in PAYLOAD_NAMES or _is_phone_name(identifier)
             or identifier.startswith(("person_name:", "payload:", "text_slice:", "full_text:")))
@@ -943,3 +955,19 @@ def test_room_and_area_values_are_flagged_in_room_resolving_files():
         assert not found, call
     found, _ = find_pii_logs('logger.info(f"lights in {room}")', "src/gateway/livekit_routes.py")
     assert not found
+
+
+def test_a_device_id_in_a_gateway_log_is_flagged():
+    gateway = "src/gateway/main.py"
+    for call in (
+        'logger.info(f"session for device {device_id}")',
+        'logger.info("x", device_id=device_id)',
+        'logger.info("x", voice_device_id=believed_device_id)',
+    ):
+        found, _ = find_pii_logs(call, gateway)
+        assert found, call
+    for call in ('logger.info("x", has_device_id=bool(device_id))', 'logger.info("x", trusted_voice=trusted_voice)'):
+        found, _ = find_pii_logs(call, gateway)
+        assert not found, call
+    found, _ = find_pii_logs('logger.info("x", device_id=device_id)', "src/orchestrator/helpers.py")
+    assert not found, "scoped to the gateway"

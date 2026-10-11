@@ -557,3 +557,15 @@ def test_startup_warns_about_a_wide_device_network(monkeypatch):
     monkeypatch.setattr(gw, "_DEVICE_CLIENT_NETWORKS", parse_networks("192.0.2.0/24"))
     gw._log_speech_network_config()
     assert not [e for e in events if e[1] == "ha_device_client_networks_wide"]
+
+
+def test_an_unknown_device_inside_the_registry_interval_really_refreshes():
+    clock = Clock()
+    fetcher = Fetcher()
+    registry = hr.HARegistry(fetcher, monotonic=clock)
+    asyncio.run(registry.ensure(1))
+    assert fetcher.calls == 1
+    clock.now += 1
+    got = asyncio.run(sr.resolve_speaker_room(device_id=UNKNOWN_ID, trusted=True, registry=registry))
+    assert got == sr.UNKNOWN_ROOM
+    assert fetcher.calls == 2, "the forced refresh ran although the last fetch was a second ago"

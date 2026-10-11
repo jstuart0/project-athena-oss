@@ -466,6 +466,7 @@ def websocket_fetcher(ha_url: str, token: str) -> RegistryFetcher:
 # ---------------------------------------------------------------------------
 
 REFUSED_MARKER_TTL_SECONDS = 24 * 60 * 60
+FORCED_REFRESH_MIN_INTERVAL = 5.0
 _MARKER_PREFIX = "athena:ha_registry:refused:"
 
 STATE_DISABLED = "disabled"
@@ -516,6 +517,7 @@ class HARegistry:
         self._snapshot: Optional[RegistrySnapshot] = None
         self._state = STATE_DISABLED if fetcher is None else STATE_UNAVAILABLE
         self._last_attempt: Optional[float] = None
+        self._last_forced: Optional[float] = None
         self._task: Optional["asyncio.Task[None]"] = None
 
     # -- reads ------------------------------------------------------------
@@ -537,12 +539,20 @@ class HARegistry:
     def _may_fetch(self) -> bool:
         return self._fetcher is not None and self._state not in (STATE_DISABLED, STATE_REFUSED)
 
-    def _start_fetch(self) -> None:
+    def _start_fetch(self, *, forced: bool = False) -> None:
+        """Start the background fetch. ``forced`` (a caller that must see new
+        data, such as an unknown device id) skips the usual minimum interval,
+        but not more than once per ``FORCED_REFRESH_MIN_INTERVAL``."""
         if not self._may_fetch() or (self._task is not None and not self._task.done()):
             return
         now = self._monotonic()
-        if self._last_attempt is not None and now - self._last_attempt < self._min_refresh_interval:
-            return
+        within_interval = self._last_attempt is not None and now - self._last_attempt < self._min_refresh_interval
+        if within_interval:
+            if not forced or (
+                self._last_forced is not None and now - self._last_forced < FORCED_REFRESH_MIN_INTERVAL
+            ):
+                return
+            self._last_forced = now
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -562,7 +572,7 @@ class HARegistry:
         current snapshot (possibly stale, possibly None) either way; the fetch
         keeps running past a timeout."""
         if self._may_fetch() and (refresh or self.stale):
-            self._start_fetch()
+            self._start_fetch(forced=refresh)
             task = self._task
             if task is not None and not task.done():
                 try:
