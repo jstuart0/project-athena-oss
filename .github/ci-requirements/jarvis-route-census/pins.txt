@@ -1,4 +1,4 @@
-# This file was assembled from apps/jarvis-web/backend/requirements.txt (same
+# This file was assembled from jarvis-web's hash-locked requirements (same
 # versions and hashes): the only package the orchestrator's lock lacks that
 # tests/unit/test_ha_permission_wiring.py needs to import jarvis-web's main.py.
 greenlet==3.5.5 \

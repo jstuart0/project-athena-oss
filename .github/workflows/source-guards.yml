@@ -68,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --require-hashes -r src/orchestrator/requirements.txt -r src/orchestrator/requirements-test.txt
-          python3 -m pip install --require-hashes -r .github/ci-requirements/jarvis-route-census/requirements.txt
+          python3 -m pip install --require-hashes -r .github/ci-requirements/jarvis-route-census/pins.txt
           python3 -m pip install --no-deps -e src/shared
 
       - name: Run the behaviour tests
