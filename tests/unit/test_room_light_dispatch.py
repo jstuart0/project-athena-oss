@@ -360,8 +360,8 @@ def test_record_precheck_denial_is_a_noop_without_a_scope():
 
 
 class _MatchOnlyManager:
-    async def get_entities(self):
-        return {}
+    async def get_entities(self, force_refresh=False):
+        return {f"light.m{i}": {"state": "on", "attributes": {}} for i in (1, 2, 3)}
 
     async def find_lights_by_room(self, room):
         return [
@@ -446,25 +446,30 @@ def _listed(answer):
 
 def test_status_lists_the_bathroom_bulbs_only(monkeypatch):
     rig = _Rig(monkeypatch)
-    answer = _status(rig, "bathroom", "are the bathroom lights on")
+    answer = _status(rig, "bathroom", "which bathroom lights are on")
     assert _listed(answer) == {"Bathroom Vanity", "Bath Mirror"}
+    assert _status(rig, "bathroom", "are the bathroom lights on") == "2 lights are on in the bathroom."
 
 
 def test_status_uses_the_per_part_fallback_like_writes(monkeypatch):
     rig = _Rig(monkeypatch)
-    assert _status(rig, "nook", "are the nook lights on") == "The Ceiling Light Nook is on."
+    assert _status(rig, "nook", "are the nook lights on") == "One light is on in the nook."
+    assert _status(rig, "nook", "which nook lights are on") == "These lights are on in the nook: Ceiling Light Nook."
 
 
 def test_status_lists_bulbs_of_a_grouped_room_not_groups(monkeypatch):
     rig = _Rig(monkeypatch)
     off = [f"light.galley_{i}" for i in (4, 5, 6)]
-    answer = _status(rig, "galley", "are the galley lights on", mutate=off)
-    assert _listed(answer) == {"Galley 1", "Galley 2", "Galley 3", "Accent Galley Strip"}
-    assert "7 lights" in _status(_Rig(monkeypatch), "galley", "are the galley lights on")
+    answer = _status(rig, "galley", "which galley lights are on", mutate=off)
+    assert answer.startswith("4 lights are on in the galley, including ")
+    assert _listed(answer.split(", including ", 1)[0] + ": " + answer.split(", including ", 1)[1]) <= {
+        "Galley 1", "Galley 2", "Galley 3", "Accent Galley Strip"}
+    assert len(_listed("x: " + answer.split(", including ", 1)[1])) == 3, "at most three names"
+    assert _status(_Rig(monkeypatch), "galley", "are the galley lights on") == "7 lights are on in the galley."
 
 
 def test_status_follows_the_configured_group(monkeypatch):
     rig = _Rig(monkeypatch, groups_raw='{"galley":"light.galley"}')
     off = [f"light.galley_{i}" for i in (4, 5, 6)]
-    answer = _status(rig, "galley", "are the galley lights on", mutate=off)
+    answer = _status(rig, "galley", "which galley lights are on", mutate=off)
     assert _listed(answer) == {"Galley 1", "Galley 2", "Galley 3"}

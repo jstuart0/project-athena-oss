@@ -139,35 +139,66 @@ def _light_name_token_sets(entity_id: str, entity: Mapping) -> list:
     return sets
 
 
-def _room_candidates(parts: Sequence[frozenset], lights: Mapping[str, dict]) -> tuple:
-    """Name-tier candidates: (ids, excluded_count, source).
+def _name_prefix(phrase: tuple, name_tokens: tuple) -> Optional[tuple]:
+    """The name's tokens up to and including the first whole-token match of
+    ``phrase`` anywhere in it, or None."""
+    n = len(phrase)
+    for i in range(len(name_tokens) - n + 1):
+        if name_tokens[i:i + n] == phrase:
+            return name_tokens[:i + n]
+    return None
 
-    Each requested part matches names anchored at their first token; a part
+
+def _room_candidates(parts: Sequence[frozenset], lights: Mapping[str, dict]) -> tuple:
+    """Name-tier candidates: (ids, excluded_count, source, ambiguous).
+
+    Each requested part matches names anchored at their first token. A part
     with no anchored match falls back to a whole-token match anywhere in the
-    name, for that part only.
+    name, but only when every such light shares one name prefix ("north
+    bathroom ..."): lights under several prefixes ("north bathroom", "south
+    bathroom") are a partial name for several rooms, so none is written and
+    the prefixes come back as ``ambiguous`` for the caller to ask about.
     """
     token_sets = {eid: _light_name_token_sets(eid, ent) for eid, ent in lights.items()}
+    patterns = _room_light_exclude_patterns()
     found = set()
+    excluded = 0
     tiers = set()
+    ambiguous = []
     for phrases in parts:
         for anchored, tier in ((True, 'name_anchored'), (False, 'name_any')):
             hits = {
                 eid for eid, sets in token_sets.items()
                 if any(_name_matches(p, t, anchored=anchored) for p in phrases for t in sets)
             }
-            if hits:
-                found |= hits
-                tiers.add(tier)
-                break
-    patterns = _room_light_exclude_patterns()
-    kept = {eid for eid in found if not any(p.search(eid) for p in patterns)}
+            if not hits:
+                continue
+            kept_hits = {eid for eid in hits if not any(p.search(eid) for p in patterns)}
+            if not anchored:
+                prefixes = {}
+                for eid in kept_hits:
+                    for tokens_ in token_sets[eid]:
+                        prefix = next(
+                            (pre for pre in (_name_prefix(p, tokens_) for p in phrases) if pre), None
+                        )
+                        if prefix:
+                            prefixes.setdefault(prefix, set()).add(eid)
+                            break
+                if len(prefixes) > 1:
+                    ambiguous.extend("_".join(pre) for pre in sorted(prefixes))
+                    break
+            excluded += len(hits) - len(kept_hits)
+            found |= kept_hits
+            tiers.add(tier)
+            break
+    kept = found
     if not kept:
         source = 'none'
     elif len(tiers) == 1:
         source = next(iter(tiers))
     else:
         source = 'mixed'
-    return kept, len(found) - len(kept), source
+    return kept, excluded, source, tuple(dict.fromkeys(ambiguous))
 
 
 def _member_lists(
@@ -279,6 +310,58 @@ def cover_light_targets(
     return sorted(chosen)
 
 
+class RoomLights(list):
+    """The lights that cover a room (a list of the manager's match dicts).
+    ``ambiguous_rooms`` is non-empty when the room name was only part of
+    several rooms' names: the list is then empty and the caller asks which."""
+
+    ambiguous_rooms: tuple = ()
+
+
+def area_lamp_targets(
+    snapshot,
+    area_id: str,
+    entities: Mapping,
+    exclude: Sequence = (),
+) -> List[str]:
+    """The ids to write for an area's lamps, covering each lamp exactly once.
+
+    ``L`` is the area's physical lights (leaves) minus anything that is not a
+    lamp: the registry's non-lamp lights (indicators on a satellite's device,
+    hidden, disabled, categorised) and any id matching an ``exclude`` regex.
+    A group assigned to the area contributes its leaves, except leaves the
+    registry puts in another area. Candidates are ``L`` plus every light
+    group whose (non-empty) leaves all lie in ``L``, so a group holding an
+    excluded relay is never written whole, then ``cover_light_targets`` picks
+    the smallest exact cover.
+    """
+    non_lamp = snapshot.non_lamp_lights
+
+    def is_lamp(entity_id: str) -> bool:
+        return entity_id not in non_lamp and not any(p.search(entity_id) for p in exclude)
+
+    registered = snapshot.entities_in(area_id, 'light')
+    leaves_by_id = expand_light_leaves(registered, entities)
+    lamps = set()
+    for entity_id in registered:
+        for leaf in leaves_by_id[entity_id]:
+            leaf_area = snapshot.area_for(leaf)
+            if leaf_area is not None and leaf_area.area_id != area_id:
+                continue
+            if is_lamp(leaf):
+                lamps.add(leaf)
+    if not lamps:
+        return []
+    groups = [
+        eid for eid, ent in entities.items()
+        if eid.startswith('light.')
+        and isinstance(((ent or {}).get('attributes') or {}).get('entity_id'), list)
+    ]
+    group_leaves = expand_light_leaves(groups, entities)
+    candidates = set(lamps) | {g for g in groups if group_leaves[g] and group_leaves[g] <= lamps}
+    return cover_light_targets(candidates, entities)
+
+
 class HAEntityManager:
     def __init__(self, ha_url: str, ha_token: str):
         self.ha_url = ha_url
@@ -377,7 +460,7 @@ class HAEntityManager:
 
         parts = _room_parts(room_name)
         lights = self._entities_by_type.get('light', {})
-        candidates, excluded, source = _room_candidates(parts, lights)
+        candidates, excluded, source, ambiguous = _room_candidates(parts, lights)
         targets = cover_light_targets(
             candidates, self._entities_cache, _split_room(room_name)
         )
@@ -388,8 +471,22 @@ class HAEntityManager:
             candidates=len(candidates),
             excluded=excluded,
             targets=len(targets),
+            ambiguous=len(ambiguous),
         )
-        return [self._light_match(entity_id) for entity_id in targets]
+        result = RoomLights(self._light_match(entity_id) for entity_id in targets)
+        result.ambiguous_rooms = ambiguous
+        return result
+
+    async def find_area_lights(self, snapshot, area_id: str) -> RoomLights:
+        """The lamps in a registry area as match dicts (see ``area_lamp_targets``)."""
+        entities = await self.get_entities()
+        ids = area_lamp_targets(snapshot, area_id, entities, _room_light_exclude_patterns())
+        logger.info("room_lights_resolved", source="area", targets=len(ids))
+        return RoomLights(self._light_match(entity_id) for entity_id in ids)
+
+    def exclude_patterns(self) -> list:
+        """The compiled HA_ROOM_LIGHT_EXCLUDE_ENTITIES patterns (D12 a)."""
+        return _room_light_exclude_patterns()
 
     def _light_match(self, entity_id: str) -> Dict:
         info = self._light_groups.get(entity_id)

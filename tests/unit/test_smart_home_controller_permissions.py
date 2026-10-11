@@ -405,7 +405,7 @@ class TestUnscopedExecuteIntent:
 # ---------------------------------------------------------------------------
 
 class TestWholeHouseFanOutDenialSurfacing:
-    def test_whole_house_restricted_entity_partial_refusal(self):
+    def test_whole_house_restricted_entity_partial_refusal(self, monkeypatch):
         """Medium (codex full-diff, Pass H): _execute_whole_house_command's
         asyncio.gather fan-out previously had no return_exceptions=True, so
         a per-entity guest denial inside an otherwise-allowed domain
@@ -413,14 +413,23 @@ class TestWholeHouseFanOutDenialSurfacing:
         call, past execute_intent's _finish() wrapper entirely, landing on
         whatever generic "I encountered an error" the caller's own
         try/except produces -- instead of the partial-refusal text naming
-        what ran. light.kitchen is allowed; light.owner_bedroom is
-        guest-restricted; "turn off all lights" must still turn off the
-        kitchen light and report a partial refusal, not crash."""
+        what ran. A guest's whole house is the configured light groups
+        (HA_LIGHT_GROUPS): light.kitchen is allowed; light.owner_bedroom is
+        guest-restricted and sits in the same configured group, so the group
+        is degraded to the kitchen light and "turn off all lights" must
+        still turn it off and report a partial refusal, not crash."""
+        entities = dict(_ENTITIES)
+        entities["light.owner_bedroom"] = {"state": "on", "attributes": {"friendly_name": "Owner Bedroom"}}
+        entities["light.house_group"] = {
+            "state": "on",
+            "attributes": {"friendly_name": "House", "entity_id": ["light.kitchen", "light.owner_bedroom"]},
+        }
         em = _fake_entity_manager()
-        em.get_all_light_groups = AsyncMock(return_value=[
-            {"friendly_name": "Kitchen", "entity_id": "light.kitchen_group", "members": ["light.kitchen"]},
-            {"friendly_name": "Owner Bedroom", "entity_id": "light.owner_bedroom_group", "members": ["light.owner_bedroom"]},
-        ])
+        em.get_entities = AsyncMock(return_value=entities)
+        monkeypatch.setattr(shc, "_light_groups_cache", None)
+        monkeypatch.setattr(shc, "get_config", lambda: MagicMock(
+            ha_light_groups='{"house": "light.house_group"}', ha_whole_house_unassigned_lights=False,
+        ))
         controller = _controller(entity_manager=em)
         ha_client = _raw_ha_client()
         perms = _guest_perms(allowed_intents=["control"], restricted_entities=[r"^light\.owner_bedroom"])

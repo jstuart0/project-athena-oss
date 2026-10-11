@@ -165,10 +165,11 @@ def _has_explicit_scope_cue(original_query: Optional[str], scope_hint: Any) -> b
         return True
     if isinstance(scope_hint, tuple) and len(scope_hint) == 2:
         kind, value = scope_hint
-        if kind == "room_group" and value and str(value).lower() in q:
+        # Room keys carry underscores ("living_room"); the utterance says "living room".
+        if kind == "room_group" and value and str(value).lower().replace("_", " ") in q:
             return True
         if kind == "multi_room" and value:
-            matched = sum(1 for r in value if r and str(r).lower() in q)
+            matched = sum(1 for r in value if r and str(r).lower().replace("_", " ") in q)
             if matched >= 2:
                 return True
     return False
