@@ -313,13 +313,11 @@ async def broadcast_to_admin_jarvis(event: dict):
     Broadcast an event to all connected Admin Jarvis clients.
 
     This is called by the event emitter to push events to the UI. The live feed
-    carries no conversation text: text keys are stripped from the event's data.
+    carries no conversation text: only allowlisted, scalar fields of the event survive (see app/utils/conversation_text.py).
     """
-    from app.utils.conversation_text import strip_conversation_text
+    from app.utils.conversation_text import sanitize_event
 
-    if isinstance(event, dict) and isinstance(event.get("data"), (dict, list)):
-        event = {**event, "data": strip_conversation_text(event["data"], event.get("event_type"))}
-    await ws_manager.broadcast(event)
+    await ws_manager.broadcast(sanitize_event(event))
 
 
 async def broadcast_model_download_event(

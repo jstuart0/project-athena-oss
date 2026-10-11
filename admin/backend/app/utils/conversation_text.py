@@ -47,3 +47,128 @@ def _strip(value: Any, extra: frozenset) -> Any:
     if isinstance(value, list):
         return [_strip(item, extra) for item in value]
     return value
+
+
+# ---------------------------------------------------------------------------
+# Pipeline events: a per-event-type allowlist (not a denylist)
+# ---------------------------------------------------------------------------
+#
+# A pipeline event describes what the pipeline did, never what was said. Only the
+# keys listed here survive, and only as scalars: ids, lengths, durations, counts,
+# tool/model/intent names, success flags and short status values. Unknown keys,
+# nested values, lists and anything shaped like text are dropped, so a new or
+# renamed field can't leak by default. Strings that would carry text become
+# lengths (``error`` -> ``error_len``, ``result_summary`` -> ``result_len``,
+# ``text`` -> ``text_len``); structures become counts.
+
+import re
+
+_LABEL_MAX_CHARS = 100
+_SAFE_LABEL = re.compile(r"^[A-Za-z0-9_ .:/\-]{1,%d}$" % _LABEL_MAX_CHARS)
+
+# Keys whose string value is a name or short status (checked against _SAFE_LABEL).
+_LABEL_KEYS = frozenset({
+    "interface", "engine", "model", "tool_name", "tool_source", "intent", "mode", "room", "room_name",
+    "protocol", "status", "stage",
+})
+# Keys that are plain numbers or booleans.
+_NUMBER_KEYS = frozenset({
+    "confidence", "tokens", "token_count", "chunk_count", "chunks", "progress", "audio_duration_ms",
+    "duration_ms", "total_duration_ms", "execution_time_ms", "count",
+})
+_FLAG_KEYS = frozenset({"success", "requires_llm", "interrupted", "is_final", "partial"})
+# Length/count suffixes are always safe numbers.
+_SAFE_SUFFIXES = ("_len", "_length", "_count", "_ms")
+# value -> (new key, how to measure it)
+_MEASURED = {
+    "text": "text_len", "transcript": "text_len", "utterance": "text_len", "query": "query_len",
+    "query_preview": "query_len", "response": "response_len", "response_preview": "response_len",
+    "answer": "response_len", "result_summary": "result_len", "error": "error_len", "message": "message_len",
+    "content": "content_len",
+}
+_COUNTED = {"entities": "entity_count", "args": "arg_count"}
+
+_EVENT_KEYS = {
+    "session_start": {"interface", "protocol", "interrupted", "mode", "room", "room_name"},
+    "session_end": {"success", "duration_ms", "room_name"},
+    "stt_start": {"engine"},
+    "stt_progress": {"engine", "progress", "is_final", "partial", "duration_ms"},
+    "stt_complete": {"engine", "duration_ms"},
+    "intent_classifying": set(),
+    "intent_classified": {"intent", "confidence", "requires_llm"},
+    "tool_selecting": {"tool_name", "tool_source"},
+    "tool_selected": {"tool_name", "tool_source"},
+    "tool_executing": {"tool_name"},
+    "tool_complete": {"tool_name", "success", "execution_time_ms"},
+    "tool_error": {"tool_name"},
+    "llm_generating": {"model"},
+    "llm_streaming": {"model", "tokens", "token_count", "chunk_count", "chunks", "duration_ms"},
+    "llm_complete": {"model", "tokens", "duration_ms"},
+    "tts_start": {"engine"},
+    "tts_complete": {"engine", "audio_duration_ms"},
+    "response_ready": {"total_duration_ms"},
+    "query_received": {"interface", "room"},
+    "response_generated": {"intent"},
+}
+_GENERIC_KEYS = frozenset({"interface", "engine", "model", "tool_name", "intent", "status", "success", "duration_ms",
+                           "total_duration_ms", "tokens", "confidence"})
+# Event-level fields a broadcast or stored event may carry.
+_EVENT_FIELDS = frozenset({"event_type", "session_id", "interface", "timestamp", "data", "id", "created_at", "offset_ms"})
+
+
+def _event_key(event_type: Any) -> str:
+    return str(getattr(event_type, "value", event_type) or "").strip().lower()
+
+
+def _measure(value: Any) -> Optional[int]:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, (dict, list)):
+        return len(value)
+    return None
+
+
+def sanitize_event_data(event_type: Any, data: Any) -> dict:
+    """The allowlisted, scalar-only form of an event's ``data`` (``{}`` if it isn't a dict)."""
+    if not isinstance(data, dict):
+        return {}
+    allowed = _EVENT_KEYS.get(_event_key(event_type), _GENERIC_KEYS)
+    clean: dict = {}
+    for key, value in data.items():
+        if not isinstance(key, str):
+            continue
+        if key in _MEASURED and (key not in allowed):
+            measured = _measure(value)
+            if measured is not None and _MEASURED[key] not in data:
+                clean[_MEASURED[key]] = measured
+            continue
+        if key in _COUNTED:
+            measured = _measure(value)
+            if measured is not None:
+                clean[_COUNTED[key]] = measured
+            continue
+        if key.endswith(_SAFE_SUFFIXES):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[key] = value
+            continue
+        if key not in allowed:
+            continue
+        if key in _LABEL_KEYS:
+            if isinstance(value, str) and _SAFE_LABEL.match(value):
+                clean[key] = value
+        elif key in _NUMBER_KEYS:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[key] = value
+        elif key in _FLAG_KEYS:
+            if isinstance(value, bool):
+                clean[key] = value
+    return clean
+
+
+def sanitize_event(event: Any) -> Any:
+    """A whole event (broadcast or read shape): known event-level fields only, ``data`` allowlisted."""
+    if not isinstance(event, dict):
+        return event
+    clean = {k: v for k, v in event.items() if k in _EVENT_FIELDS and k != "data"}
+    clean["data"] = sanitize_event_data(event.get("event_type"), event.get("data"))
+    return clean

@@ -164,11 +164,11 @@ class LiveKitIntegration:
         except Exception as e:
             logger.error("livekit_query_error",
                         session_id=session_id,
-                        error=str(e))
+                        error_type=type(e).__name__)
 
             await self._emit_event("error", session_id, {
-                "error": str(e),
-                "query": transcript
+                "error_type": type(e).__name__,
+                "query_len": len(transcript)
             })
 
             return "I encountered an error processing your request. Please try again."

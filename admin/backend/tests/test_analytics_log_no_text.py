@@ -84,7 +84,8 @@ def test_a_new_orchestrator_payload_passes_through_unchanged(client, analytics_r
     payload = {"intent": "control", "query_len": 12, "confidence": 1.0, "user_id": "owner", "room": "porch"}
     assert client.post("/api/internal/analytics/log", headers=KEY,
                        json={"session_id": "s", "event_type": "query_intent", "metadata": payload}).status_code == 200
-    assert json.loads(conn.calls[0][1][2]) == payload and broadcasts[0]["data"] == payload
+    assert json.loads(conn.calls[0][1][2]) == payload  # the stored row keeps the whole (text-free) metadata
+    assert broadcasts[0]["data"] == {"intent": "control", "query_len": 12, "confidence": 1.0}  # the live feed is allowlisted
 
 
 def test_every_live_broadcast_is_stripped_at_the_single_choke_point(monkeypatch):
@@ -100,7 +101,8 @@ def test_every_live_broadcast_is_stripped_at_the_single_choke_point(monkeypatch)
         "event_type": "session_start", "session_id": "s", "data": {"query_preview": SECRET[:50], "mode": "owner"}}))
     asyncio.run(websocket_routes.broadcast_to_admin_jarvis({
         "event_type": "response_ready", "session_id": "s", "data": {"response_preview": "the answer", "total_duration_ms": 5}}))
-    assert [e["data"] for e in seen] == [{"mode": "owner"}, {"total_duration_ms": 5}]
+    assert [e["data"] for e in seen] == [{"mode": "owner", "query_len": len(SECRET[:50])},
+                                         {"total_duration_ms": 5, "response_len": len("the answer")}]
 
 
 def test_old_rows_with_text_are_not_returned_by_the_query_logs_report(client, db, owner_client):
@@ -157,11 +159,12 @@ def test_the_livekit_events_carry_lengths_only():
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[3] / "src" / "gateway" / "livekit_integration.py").read_text()
-    blocks = re.findall(r'_emit_event\("(query_received|response_generated)", session_id, \{(.*?)\}\)', source, re.DOTALL)
-    assert {name for name, _ in blocks} == {"query_received", "response_generated"}
+    blocks = re.findall(r'_emit_event\("(query_received|response_generated|error)", session_id, \{(.*?)\}\)', source, re.DOTALL)
+    assert {name for name, _ in blocks} == {"query_received", "response_generated", "error"}
     for name, body in blocks:
         assert '"query":' not in body and '"response":' not in body and '"interruption_context":' not in body, name
     assert '"query_len": len(transcript)' in source and '"response_len": len(answer)' in source
+    assert '"error": str(e)' not in source and '"query": transcript\n' not in source
 
 
 def test_the_emit_route_stores_and_broadcasts_no_transcript(client, db, owner_client, monkeypatch):
@@ -178,7 +181,7 @@ def test_the_emit_route_stores_and_broadcasts_no_transcript(client, db, owner_cl
     assert resp.status_code == 200, resp.text
     db.expire_all()
     stored = db.query(PipelineEvent).filter(PipelineEvent.session_id == "s9").one().event_data
-    assert stored == {"text_len": len(SECRET), "engine": "whisper", "nested": [{}]}
+    assert stored == {"text_len": len(SECRET), "engine": "whisper"}
     assert "SECRET-TEXT" not in json.dumps(broadcasts)
 
 
