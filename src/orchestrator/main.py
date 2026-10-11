@@ -8449,7 +8449,10 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_service_caller)])
 @captures_turn("v1_chat_completions")
-async def chat_completions(request: OpenAIChatRequest):
+async def chat_completions(
+    request: OpenAIChatRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     OpenAI-compatible chat completions endpoint with streaming support.
     Wraps the orchestrator's /query endpoint for Home Assistant and Open WebUI compatibility.
@@ -8478,6 +8481,17 @@ async def chat_completions(request: OpenAIChatRequest):
             room=request.room or (request.extra_body or {}).get("room"),
             secret=session_hmac_secret(_shared_config.get_config()),
         )
+        # A believed voice device (the gateway sets both keys only for a device
+        # id it trusts) makes this a follow-up surface. Read only from a
+        # service-key caller; a malformed id is ignored, and a follow-up needs
+        # a device to fingerprint.
+        voice_device_id = None
+        supports_followup = False
+        if service_authenticated is True:
+            body_device_id = (request.extra_body or {}).get("voice_device_id")
+            if isinstance(body_device_id, str) and re.fullmatch(r"[0-9a-f]{32}", body_device_id):
+                voice_device_id = body_device_id
+                supports_followup = (request.extra_body or {}).get("supports_followup") is True
         sm = _runtime.get_session_manager()
         # The audience (and so the session class) comes first: the first-turn
         # reset, the OpenAI index/cap and the session itself must all use the
@@ -8656,10 +8670,12 @@ async def chat_completions(request: OpenAIChatRequest):
                     request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8],
                     start_time=start_time,
                     interface_type=interface_type,
-                    # OpenAIChatRequest carries no caller_trust or device_id:
-                    # never a follow-up surface (D14).
-                    supports_followup=False,
-                    caller_fingerprint=compute_caller_fingerprint(None, None, room, authz.permissions.get("mode")),
+                    # A follow-up surface only for a device the gateway
+                    # believed (service-key caller); otherwise none (D14).
+                    supports_followup=supports_followup,
+                    caller_fingerprint=compute_caller_fingerprint(
+                        None, voice_device_id, room, authz.permissions.get("mode")
+                    ),
                 )
 
                 # TRUE STREAMING: Run orchestrator for RAG collection, then stream LLM tokens
@@ -8876,6 +8892,8 @@ async def chat_completions(request: OpenAIChatRequest):
             room=(request.room or (request.extra_body or {}).get("room") or "unknown"),
             temperature=request.temperature,
             interface_type=interface_type,
+            voice_device_id=voice_device_id,
+            supports_followup=supports_followup,
         )
 
         # process_query opens its own usage scope; inside this one it reuses it, so
