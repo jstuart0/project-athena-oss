@@ -2205,7 +2205,7 @@ A request that fails before the turn is understood (the caller can't be identifi
 Conversations are kept for **30 days** by default (1 to 3650; there is no "forever"). Set it under Settings → Privacy. The stored value is read strictly: if it is missing or invalid nothing is deleted and the Conversations banner says so.
 
 - **Automatic**: admin-backend deletes expired turns every 6 hours (first run 5 minutes after it starts, skipped in `DEV_MODE`), whether or not Analytics Mode is on. Expired data is deleted even after capture is turned off.
-- **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only).
+- **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only). A refused purge request (403 or 429) is audited too, but at most once per user, per reason, per minute, per admin-backend process, so a client that retries in a loop can't flood the audit log; the refusals themselves are not throttled.
 
 Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. While it is off, no new conversation text is saved to the conversation history you can review here; Athena still keeps short-lived working memory to follow a conversation (sessions last about an hour) and a response cache (up to 24 hours), which are separate from captured conversations. Turning it on takes effect within about 30 seconds.
 
@@ -2229,6 +2229,8 @@ Debug detail does not switch itself off: the banner shows "Debug detail ON since
 
 ### The older analytics log carries no text
 
+The same holds for the intent metrics behind the Emerging Intents page: the orchestrator no longer sends the query text (only a hash and the length), and admin-backend does not store `raw_query` from an older orchestrator. The page's **sample queries** (examples of what people said) follow the conversation text rule: only an owner (`view_conversation_text`) receives them, everyone else sees "Text hidden: owner only", and each view that carries them is audited. Pipeline events (the live Admin Jarvis feed) keep an allowlist of fields per event type: ids, lengths, durations, counts, tool and model names and status values; any other field is dropped when an event is stored, broadcast or read.
+
 The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page), the pipeline events and the Admin Jarvis live feed carry **no conversation text**: the services send the query's or transcript's length, intent, confidence and timings only, and admin-backend drops any query, answer or transcript text an older service still sends before it stores or broadcasts anything, and removes it from stored pipeline events when they are read. Query Analytics shows lengths where it used to show the query.
 
 Rows written by earlier versions may still hold the query text in their `metadata` (keys `query`, `query_preview`), whatever Analytics Mode said. They are not deleted and are not shown anywhere. To clear the text and keep the counts, run this against admin-backend's database:
@@ -2240,6 +2242,8 @@ WHERE metadata ?| array['query', 'query_preview', 'query_text'];
 ```
 
 (`DELETE FROM conversation_analytics;` removes the rows entirely, which resets those dashboard counts.)
+
+Earlier intent metrics and emerging-intent samples may also hold text. To clear the intent-metric text, run `UPDATE intent_metrics SET raw_query = NULL;`; to clear the samples, `UPDATE emerging_intents SET sample_queries = '[]'::json;`. Neither is done by a migration: the columns stay, and old rows keep their text until you clear them or purge the table.
 
 ### Settings
 

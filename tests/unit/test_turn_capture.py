@@ -754,3 +754,71 @@ def test_error_text_is_digit_redacted_for_a_normal_turn_through_the_sink():
     rec = asyncio.run(run())
     assert "99887766" not in rec.error_message and "5521" not in rec.error_message
     assert rec.error_message.startswith("lookup failed for account")
+
+
+# ---------------------------------------------------------------------------
+# Latency gate: capture on vs unconfigured, at the enqueue boundary
+# ---------------------------------------------------------------------------
+
+_HANDLER_CPU_ITERATIONS = 30_000  # a few milliseconds of work: far less than a real turn, so a stricter bar than production
+_GATE_CALLS = 50
+_GATE_ROUNDS = 3
+_GATE_MAX_OVERHEAD = 0.05
+
+
+def _median_call_seconds(handler, calls):
+    async def go():
+        samples = []
+        for _ in range(calls):
+            started = time.perf_counter()
+            await handler()
+            samples.append(time.perf_counter() - started)
+        return statistics.median(samples)
+
+    return go
+
+
+def test_capture_adds_at_most_five_percent_to_a_handler_versus_no_capture():
+    """The same decorated handler, one process, calls interleaved: sink configured and on (queue,
+    flag cache, record building, enqueue) against no sink at all. Median of 50 per round; the gate
+    passes if any of three rounds is within 5%, which keeps a noisy CI neighbour from failing a
+    real-sized margin (the measured overhead is a small fraction of a percent)."""
+    @tc.captures_turn("query")
+    async def handler():
+        capture = tc.current_capture()
+        capture.bind(session_id="own-lat", query="what's the weather like today", interface_type="voice",
+                     room="porch", user_mode="owner", audience=OWNER, caller_trust="household")
+        capture.observe(State())
+        total = 0
+        for i in range(_HANDLER_CPU_ITERATIONS):
+            total += i * i % 7
+        return Resp("a reasonably normal sized spoken answer for the weather", {})
+
+    async def measure():
+        store = InMemoryCaptureStore(analytics=True)
+        sink = cc.CaptureSink(store, flag_ttl=60, queue_max=100_000)
+        sink.start()
+        for _ in range(200):
+            if sink._flags is not None:
+                break
+            await asyncio.sleep(0.005)
+        results = []
+        for _ in range(_GATE_ROUNDS):
+            on, off = [], []
+            for _ in range(_GATE_CALLS):
+                _runtime.set_turn_capture(sink)
+                started = time.perf_counter()
+                await handler()
+                on.append(time.perf_counter() - started)
+                _runtime.set_turn_capture(None)
+                started = time.perf_counter()
+                await handler()
+                off.append(time.perf_counter() - started)
+            results.append((statistics.median(on), statistics.median(off)))
+        await sink.stop(drain_s=1)
+        return results
+
+    rounds = asyncio.run(measure())
+    overheads = [(on - off) / off for on, off in rounds]
+    print("capture overhead by round:", [f"{o * 100:.2f}%" for o in overheads])
+    assert min(overheads) <= _GATE_MAX_OVERHEAD, overheads
