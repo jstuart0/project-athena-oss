@@ -384,7 +384,6 @@ def test_overlapping_match_only_groups_write_each_bulb_once(monkeypatch):
 
 @pytest.mark.parametrize("path,intent,group", [
     ("multi-overlap", _multi(["galley", "galley main"]), None),
-    ("multi-same-room-twice", _multi(["galley", "galley"]), None),
     ("room-group", _light_intent("ground floor"),
      {"display_name": "G", "members": [{"room_name": "galley"}, {"room_name": "galley_main"}]}),
 ])
@@ -392,6 +391,13 @@ def test_rooms_sharing_bulbs_write_each_once(monkeypatch, path, intent, group):
     rig = _Rig(monkeypatch, room_group=group)
     rig.run(intent, IMPERATIVE_ON)
     assert sorted(_written(rig.raw)) == sorted(GALLEY_LEAVES)
+    assert rig.gate_calls == [tuple(sorted(GALLEY_LEAVES))]
+
+
+def test_a_room_named_twice_is_one_room_and_writes_its_group_once(monkeypatch):
+    rig = _Rig(monkeypatch)
+    rig.run(_multi(["galley", "galley"]), IMPERATIVE_ON)
+    assert _written(rig.raw) == ["light.galley_plus"]
     assert rig.gate_calls == [tuple(sorted(GALLEY_LEAVES))]
 
 

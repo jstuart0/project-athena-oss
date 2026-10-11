@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
-from . import room_context
+from . import room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
@@ -189,6 +189,22 @@ MULTI_ROOM_ACTIONS = frozenset({"turn_on", "turn_off"})
 ROOM_GROUP_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
 WHOLE_HOUSE_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
 SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name one room."
+
+
+# The device types whose room is decided by room_context.decide_room, and the
+# HA domain each writes.
+_DECIDED_DOMAINS = {
+    "light": "light", "fan": "fan", "switch": "switch",
+    "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
+}
+_NO_SPEAKER_ROOM = ("unknown", "guest")
+
+
+def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
+    """The speaker's room for the device types that don't decide one."""
+    if device_room and device_room.lower() not in _NO_SPEAKER_ROOM:
+        return device_room
+    return None
 
 
 _light_groups_cache: Optional[Dict[str, str]] = None
@@ -1631,14 +1647,12 @@ Return ONLY the JSON, no other text."""
         logger = logging.getLogger(__name__)
 
         current_time = local_now().strftime("%H:%M")
-        room = device_room or "unknown"
 
         sequence_prompt = f"""You are a smart home assistant that creates action sequences.
 
 Parse this request and generate a sequence of steps.
 
 User request: "{query}"
-Current room: {room}
 Current time: {current_time}
 
 Generate a JSON response:
@@ -1650,7 +1664,7 @@ Generate a JSON response:
             "action": "turn_on|turn_off|set_color|set_brightness",
             "target": {{
                 "device_type": "light|switch|climate|lock|media_player",
-                "room": "room name"
+                "room": "room name or null"
             }},
             "parameters": {{
                 "brightness": 0-255 or null,
@@ -1669,7 +1683,7 @@ Rules:
 3. For "different colors each time", use distinct colors: red(0), orange(30), yellow(60), green(120), cyan(180), blue(240), purple(280), pink(330)
 4. Use delay_after for relative waits (e.g., "wait 3 seconds" → delay_after: 3)
 5. Use at_time for scheduled actions (e.g., "at 6pm" → at_time: "18:00")
-6. If no room specified, use: {room}
+6. If the request names no room, set room to null (never guess one)
 7. Keep acknowledge brief - it will be spoken aloud
 8. For "keep the light on for X seconds", use turn_on + delay_after + turn_off
 
@@ -1717,7 +1731,7 @@ Return ONLY valid JSON."""
                 "acknowledge": "Let me try that.",
                 "steps": [{
                     "action": "turn_on" if "on" in query.lower() else "turn_off",
-                    "target": {"device_type": "light", "room": room},
+                    "target": {"device_type": "light", "room": None},
                     "parameters": {},
                     "delay_after": 0,
                     "at_time": None
@@ -1935,10 +1949,21 @@ Return ONLY valid JSON."""
                        "For detailed IoT device status, network diagnostics, or protocol-specific queries, "
                        "please check your Home Assistant dashboard or network management tools.")
 
-            # Use device_room as fallback if room not specified in intent
-            if not room and device_room and device_room not in ["unknown", "guest"]:
-                room = device_room
-                intent['room'] = room  # Update intent so downstream handlers have it
+            # Where the command acts is decided once, here, and recorded on
+            # the intent (decided_room and friends): replays and follow-ups
+            # carry it instead of deciding again. Lights, fans, switches and
+            # media players go through decide_room; other devices keep the
+            # room they were given, else the speaker's.
+            decided_domain = _DECIDED_DOMAINS.get(device_type)
+            if decided_domain:
+                outcome = await self._decide_intent_room(intent, original_query, device_room, action, decided_domain)
+                if outcome is not None:
+                    return outcome
+                room = intent.get('room')
+            elif not room:
+                room = _plain_speaker_room(device_room)
+                if room:
+                    intent['room'] = room  # Update intent so downstream handlers have it
 
             # Handle climate/thermostat queries
             if device_type == 'climate':
@@ -2162,7 +2187,188 @@ Return ONLY valid JSON."""
                 current_ha_scope(), "light", service, lt.denied_ids, "entity_or_domain_denied"
             )
 
-    async def _resolve_ambiguous_room(self, room: str, prefixes: Sequence[str]):
+    @staticmethod
+    def _set_decided(
+        intent: Dict, room: str, label: Optional[str] = None,
+        rooms: Sequence[str] = (), excluded: Sequence[str] = (), labels: Sequence[str] = (),
+    ) -> None:
+        """Record where a command acts: the decision other code carries
+        forward unchanged (plain strings only, so it stores as JSON)."""
+        intent['room'] = room
+        intent['decided_room'] = room
+        intent['decided_rooms'] = list(rooms)
+        intent['decided_excluded'] = list(excluded)
+        intent['room_label'] = label or ", ".join(labels)
+        if rooms:
+            intent['rooms'] = list(rooms)
+        if excluded:
+            intent['excluded_rooms'] = list(excluded)
+
+    @staticmethod
+    def _apply_decided(intent: Dict) -> None:
+        """Make an already-decided intent's room fields agree with the
+        decision (a follow-up's merge may have overwritten ``room``)."""
+        intent['room'] = intent['decided_room']
+        if intent.get('decided_rooms'):
+            intent['rooms'] = list(intent['decided_rooms'])
+        if intent.get('decided_excluded'):
+            intent['excluded_rooms'] = list(intent['decided_excluded'])
+
+    async def _room_has_permitted_target(self, domain: str, key: str) -> Optional[bool]:
+        """Whether the request may write anything in a room: for lights, its
+        lamp leaves after the permission degrade; for other domains, its
+        entities of that domain. None when the room has no such targets."""
+        from orchestrator.mode_permission import check_entity_permission, current_ha_scope
+        if domain == 'light':
+            matches = await self._resolve_room_lights(key)
+            if not matches:
+                return None
+            lt = await self._finalize_light_targets(matches, per_light=True)
+            return bool(lt.write_ids)
+        scope = current_ha_scope()
+        spoken = key.replace('_', ' ')
+        entities = await self.entity_manager.get_entities()
+        ids = [
+            eid for eid, ent in entities.items()
+            if eid.startswith(f"{domain}.") and (
+                spoken in eid.replace('_', ' ')
+                or spoken in str(((ent or {}).get('attributes') or {}).get('friendly_name', '')).lower()
+            )
+        ]
+        if not ids:
+            return None
+        if scope is None:
+            return True
+        return any(check_entity_permission(eid, scope.permissions) for eid in ids)
+
+    async def _permitted_rooms(self, domain: str, refs: Sequence) -> Tuple[list, bool]:
+        """(rooms the request may use, whether any room was refused). Rooms
+        with nothing to write are left out of both."""
+        permitted, refused = [], False
+        for ref in refs:
+            verdict = await self._room_has_permitted_target(domain, ref.key)
+            if verdict is True:
+                permitted.append(ref)
+            elif verdict is False:
+                refused = True
+        return permitted, refused
+
+    async def decide_sequence_rooms(
+        self, steps: Sequence[Dict], query: str, device_room: Optional[str],
+    ) -> Optional[str]:
+        """Decide every sequence step's room before anything is scheduled.
+
+        A step's room is the one it names (the model's, which must be a room
+        of the directory or the speaker's), ``whole_house`` only when the
+        utterance says so, else the speaker's room if the directory knows it.
+        Each light/fan/switch/media step comes out carrying its decision
+        (decided_room and friends), so the executor never decides. Returns the
+        question or refusal to answer with (nothing scheduled, nothing
+        recorded), or None when every step is decided."""
+        for step in steps:
+            target = step.get('target') or {}
+            domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
+            if not domain or target.get('entity_id'):
+                continue
+            intent = {k: v for k, v in target.items() if k in ('device_type', 'room', 'rooms')}
+            if intent.get('room') == 'whole_house':
+                if domain == 'light' and room_context.is_explicit_whole_house(query):
+                    self._set_decided(intent, "whole_house", "all the lights")
+                    target.update(intent)
+                    continue
+                # The model chose the whole house for words that don't ask for
+                # it: no step acts on a house nobody named.
+                return room_context.ask_text(room_context.AskRoom())
+            outcome = await self._decide_intent_room(
+                intent, None, device_room, step.get('action', 'turn_on'), domain, record=False,
+            )
+            if outcome is not None:
+                return outcome
+            target.update({k: v for k, v in intent.items() if k in (
+                'room', 'rooms', 'excluded_rooms', 'decided_room', 'decided_rooms', 'decided_excluded', 'room_label')})
+        return None
+
+    async def _decide_intent_room(
+        self, intent: Dict, original_query: Optional[str], device_room: Optional[str],
+        action: str, domain: str, *, record: bool = True,
+    ) -> Optional[str]:
+        """Decide the room once (D18). Returns None when the command goes on
+        (the intent now carries decided_room), or the text to answer with
+        (a question, or a refusal).
+
+        Authorize first: a room is offered, or chosen from several, only when
+        the request's permissions allow at least one target in it, so a
+        denied caller never hears a room list."""
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
+        if intent.get('decided_room'):
+            self._apply_decided(intent)
+            return None
+        read = action == 'get_status'
+        lights = domain == 'light'
+        directory = self._directory()
+        given = intent.get('room')
+        if given == 'multi_room' and intent.get('rooms'):
+            keys = list(dict.fromkeys(room_key(r) for r in intent['rooms'] if r))
+            decision = room_context.Rooms(tuple(keys), tuple(self._spoken_room(k) for k in keys))
+        else:
+            mention = room_context.find_room_mention(original_query, directory)
+            if mention.kind == "none" and isinstance(given, str) and given not in ("", "whole_house", "unknown"):
+                phrase = given.replace("_", " ")
+                mention = room_context.find_room_mention(phrase, directory)
+                if mention.kind == "none":
+                    ref = room_context.RoomRef(room_key(given), self._spoken_room(given))
+                    mention = room_context.RoomMention(phrase, "exact", (ref,))
+            decision = room_context.decide_room(
+                mention, query=original_query, speaker_room=device_room, directory=directory,
+                allow_whole_house=lights,
+            )
+        scope = current_ha_scope()
+
+        if isinstance(decision, room_context.Room):
+            self._set_decided(intent, decision.key, decision.label)
+            return None
+        if isinstance(decision, room_context.WholeHouse):
+            if read:
+                intent['room'] = None
+                return None
+            excluded = [ref.key for ref in decision.excluded]
+            self._set_decided(intent, "whole_house", "all the lights", excluded=excluded)
+            return None
+        if isinstance(decision, room_context.Rooms):
+            refs = [room_context.RoomRef(k, l) for k, l in zip(decision.keys, decision.labels)]
+            permitted, refused = await self._permitted_rooms(domain, refs)
+            if not permitted and not refused:
+                return f"I couldn't find any {'lights' if lights else domain.replace('_', ' ') + 's'} in those rooms."
+            if not permitted:
+                # Nothing is asked here, so nothing leaks: the writer
+                # refuses and records the denial like any other.
+                permitted = refs
+            keys = [r.key for r in permitted]
+            if len(keys) == 1:
+                self._set_decided(intent, keys[0], permitted[0].label)
+            else:
+                self._set_decided(intent, "multi_room", rooms=keys, labels=[r.label for r in permitted])
+            return None
+        if isinstance(decision, room_context.AskWhich):
+            permitted, refused = await self._permitted_rooms(domain, decision.candidates)
+            if not permitted:
+                if refused:
+                    return permission_refusal_message((domain,), scope)
+                return f"I couldn't find any {'lights' if lights else domain.replace('_', ' ') + 's'} in the {decision.phrase}."
+            if len(permitted) == 1:
+                self._set_decided(intent, permitted[0].key, permitted[0].label)
+                return None
+            decision = room_context.AskWhich(tuple(permitted), decision.phrase)
+        elif read:
+            # No room named and the speaker's is unknown: a question about
+            # the house is about the whole house.
+            intent['room'] = None
+            return None
+        return room_choice.ask(intent, decision, record=record and original_query is not None, read=read)
+
+    async def _resolve_ambiguous_room(
+        self, room: str, prefixes: Sequence[str], intent: Optional[Dict] = None, original_query: Optional[str] = None,
+    ):
         """A name that is only part of several rooms' names ("bathroom" for
         "north bathroom" and "south bathroom").
 
@@ -2188,7 +2394,8 @@ Return ONLY valid JSON."""
         refs = tuple(
             room_context.RoomRef(prefix, self._spoken_room(prefix)) for prefix, _ in permitted
         )
-        return room_context.ask_text(room_context.AskWhich(refs, room.replace("_", " ")))
+        question = room_context.AskWhich(refs, room.replace("_", " "))
+        return room_choice.ask(intent or {}, question, record=original_query is not None)
 
     async def _dispatch_light_or_room_command(
         self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
@@ -2233,7 +2440,7 @@ Return ONLY valid JSON."""
         light_matches = await self._resolve_room_lights(room)
         ambiguous = getattr(light_matches, 'ambiguous_rooms', ())
         if ambiguous and not light_matches:
-            resolved = await self._resolve_ambiguous_room(room, ambiguous)
+            resolved = await self._resolve_ambiguous_room(room, ambiguous, intent, original_query)
             if isinstance(resolved, str):
                 return resolved
             room, light_matches = resolved
@@ -4664,7 +4871,8 @@ Do NOT mention rooms that have no current or recent motion."""
         if light_total and light_down == light_total:
             return "None of the lights are responding right now."
         _whole_house_prompt = write_fanout.gate(
-            "light", _whole_house_service, lt.gate_ids, original_query, scope_hint="whole_house",
+            "light", _whole_house_service, lt.gate_ids, original_query,
+            scope_hint=("whole_house_followup", True) if intent.get('referent_followup') else "whole_house",
         )
         if _whole_house_prompt:
             return _whole_house_prompt

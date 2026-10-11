@@ -90,7 +90,12 @@ def test_the_matrix_floor():
 def test_a_command_reply_never_lists_lights(monkeypatch, path, action):
     rig = Rig(monkeypatch, attic_state="on", resolve_group=GROUP if path == "room_group" else None,
               exclude='["(?:^|[._])(?:led_ring|status_led)(?:_|$)", "^light\\\\.galley_relay_1$"]')
-    reply = rig.run(intent_for(path, action), QUERY[action])
+    query = QUERY[action]
+    if path == "whole_house":
+        query += " in the whole house"
+    if path == "whole_house_except":
+        query += " in the whole house except the galley"
+    reply = rig.run(intent_for(path, action), query)
     if action in SUPPORTED.get(path, ACTIONS):
         assert rig.written, (path, action, reply)
     else:

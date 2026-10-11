@@ -27,6 +27,7 @@ from shared.fast_path_vocab import (  # noqa: F401  (re-exported: the vocabulary
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator.mode_permission import current_ha_scope, noun_for_domains
 from orchestrator.room_context import SCOPE_CUE_RE as _SCOPE_CUE_RE
+from shared.ha_registry import tokens
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 
 
@@ -165,12 +166,20 @@ def _has_explicit_scope_cue(original_query: Optional[str], scope_hint: Any) -> b
         return True
     if isinstance(scope_hint, tuple) and len(scope_hint) == 2:
         kind, value = scope_hint
-        # Room keys carry underscores ("living_room"); the utterance says "living room".
-        if kind == "room_group" and value and str(value).lower().replace("_", " ") in q:
+        # "turn them off" after an explicit whole-house command is the same
+        # explicit scope (the follow-up carries the decision, not the words).
+        if kind == "whole_house_followup" and value is True:
+            return True
+        # Room keys carry underscores ("living_room"); the utterance says
+        # "living room". Whole words, so "den" is not found in "garden".
+        spoken = " " + " ".join(tokens(q)) + " "
+        def named(room) -> bool:
+            words = " ".join(tokens(str(room)))
+            return bool(words) and f" {words} " in spoken
+        if kind == "room_group" and value and named(value):
             return True
         if kind == "multi_room" and value:
-            matched = sum(1 for r in value if r and str(r).lower().replace("_", " ") in q)
-            if matched >= 2:
+            if sum(1 for r in value if r and named(r)) >= 2:
                 return True
     return False
 

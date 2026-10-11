@@ -22,6 +22,7 @@ import hashlib
 import asyncio
 import subprocess
 import signal
+import contextvars
 import re
 from typing import Dict, Any, Optional, List, Literal, Tuple, get_args
 from contextlib import asynccontextmanager
@@ -42,7 +43,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
 from shared.ha_registry import create_registry
-from orchestrator import room_context
+from orchestrator import room_choice, room_context
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
@@ -2354,6 +2356,28 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         prev_context = await get_conversation_context(state.session_id)
         if prev_context:
             state.prev_context = prev_context.model_dump()
+
+            # A reply to a live "which one?" from the caller who was asked
+            # goes straight to control (no model call). A question or a
+            # command is classified normally; another caller's pending is
+            # not theirs to answer.
+            asked = (state.prev_context.get("parameters") or {}).get("awaiting_room_choice")
+            if (
+                isinstance(asked, dict)
+                and asked.get("fingerprint")
+                and asked.get("fingerprint") == state.caller_fingerprint
+                and room_choice.reply_fits(
+                    asked, state.query, current_directory(),
+                    is_question=classify_utterance(state.query).kind == UtteranceKind.STATE_QUESTION,
+                )
+            ):
+                state.intent = IntentCategory.CONTROL
+                state.confidence = 0.95
+                state.complexity = "simple"
+                state.context_ref_info = context_ref_view(ref_info, "continued")
+                state.continuation_decision = {"decision": "continued", "reason": "room_choice_reply"}
+                state.node_timings["classify"] = time.time() - start
+                return state
 
             # Check for strong intent indicators BEFORE doing context continuation
             # This prevents "restaurant recommendations" from routing to weather
@@ -6528,6 +6552,19 @@ async def _persist_fast_path_messages(session_id: str, query: str, reply: FastPa
     await sm.add_message(session_id=session_id, role="assistant", content=reply.text, metadata={"fast_path": reply.kind})
 
 
+# chat_completions has already read the gateway's trusted_voice mark under
+# `service_authenticated is True` and runs the non-stream turn through
+# process_query with service_authenticated=False (a /v1 caller is never an
+# owner caller); this carries the vouched mark across that call.
+_vouched_trusted_voice: contextvars.ContextVar[bool] = contextvars.ContextVar("vouched_trusted_voice", default=False)
+
+
+def _turn_trusted_voice(request: "QueryRequest", service_authenticated: bool) -> bool:
+    """Whether the turn is a trusted voice caller's: the body's flag from a
+    service-key caller, or the mark chat_completions vouched for."""
+    return (request.trusted_voice is True and service_authenticated is True) or _vouched_trusted_voice.get()
+
+
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
     answer: str = Field(..., description="Generated response")
@@ -6858,7 +6895,7 @@ async def process_query(
             entities=initial_entities,  # Include location from request
             interruption_context=request.interruption_context,  # Barge-in: Pass interruption context for natural acknowledgment
             supports_followup=request.supports_followup,
-                trusted_voice=request.trusted_voice is True and service_authenticated is True,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
             caller_fingerprint=_request_caller_fingerprint(
                 request, permissions.get("mode")
             ),
@@ -7406,6 +7443,9 @@ async def process_query(
             and final_state.get("validation_passed", True)
             and response.confidence >= 0.3
             and response.intent != "unknown"
+            # A control answer reports (or asks about) a change in this house:
+            # replaying it from a cache would answer without acting.
+            and response.intent != IntentCategory.CONTROL.value
         )
         if should_cache:
             try:
@@ -7656,7 +7696,7 @@ async def process_query_stream(
                 temperature=request.temperature,
                 interface_type=request.interface_type,
                 supports_followup=request.supports_followup,
-                trusted_voice=request.trusted_voice is True and service_authenticated is True,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -7985,7 +8025,7 @@ async def process_query_stream_v2(
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
-                trusted_voice=request.trusted_voice is True and service_authenticated is True,
+                trusted_voice=_turn_trusted_voice(request, service_authenticated),
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -8913,7 +8953,11 @@ async def chat_completions(
         # process_query opens its own usage scope; inside this one it reuses it, so
         # the totals are visible here.
         with llm_usage_scope() as usage:
-            result = await process_query(query_request, service_authenticated=service_authenticated)
+            _vouched = _vouched_trusted_voice.set(trusted_voice)
+            try:
+                result = await process_query(query_request, service_authenticated=False)
+            finally:
+                _vouched_trusted_voice.reset(_vouched)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(

@@ -121,6 +121,7 @@ FIRST_IMPORTS = [
     "orchestrator.nodes.finalize",
     "orchestrator.room_context",
     "orchestrator.room_directory",
+    "orchestrator.room_choice",
     "orchestrator.main",
 ]
 

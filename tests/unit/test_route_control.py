@@ -94,6 +94,7 @@ def _make_smart_controller(**overrides):
     sc = MagicMock()
     sc.detect_sequence_intent.return_value = False
     sc.extract_sequence_intent = AsyncMock(return_value=None)
+    sc.decide_sequence_rooms = AsyncMock(return_value=None)
     sc.extract_intent = AsyncMock(return_value={"device_type": "light", "action": "turn_on", "room": "living room"})
     sc.execute_intent = AsyncMock(return_value="Done! Lights on.")
     sc._handle_sensor_intent = AsyncMock(return_value="Sensor reading: 72°F")

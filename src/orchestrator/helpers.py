@@ -453,16 +453,21 @@ async def configured_assistant_names() -> tuple:
 
 
 def holds_foreign_pending(prev_context: Optional[dict], caller_fingerprint: Optional[str]) -> bool:
-    """The session's stored context holds a pending write confirmation
-    created by a different caller (or one with no fingerprint). A turn for
-    which this is true must not store any context: it would overwrite
-    that caller's pending."""
+    """The session's stored context holds a pending write confirmation or a
+    pending "which room?" created by a different caller (or one with no
+    fingerprint). A turn for which this is true must not store any context:
+    it would overwrite that caller's pending."""
     params = (prev_context or {}).get("parameters") or {}
-    pending = params.get("pending_write_confirmation") if isinstance(params, dict) else None
-    if not pending:
+    if not isinstance(params, dict):
         return False
-    fingerprint = pending.get("fingerprint")
-    return not (bool(fingerprint) and fingerprint == caller_fingerprint)
+    for key in ("pending_write_confirmation", "awaiting_room_choice"):
+        pending = params.get(key)
+        if not pending:
+            continue
+        fingerprint = pending.get("fingerprint")
+        if not (bool(fingerprint) and fingerprint == caller_fingerprint):
+            return True
+    return False
 
 
 async def get_feature_config(flag_name: str) -> Dict[str, Any]:

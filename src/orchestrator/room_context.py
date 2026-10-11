@@ -532,6 +532,7 @@ def decide_room(
     prev_decision: Optional[RoomDecision] = None,
     referent_followup: bool = False,
     directory: Optional[RoomDirectory] = None,
+    allow_whole_house: bool = True,
 ) -> RoomDecision:
     """The room a command acts on.
 
@@ -543,7 +544,7 @@ def decide_room(
     4. The speaker's room, if the directory knows it.
     5. Ask which room.
     """
-    whole = explicit_whole_house(query, directory)
+    whole = explicit_whole_house(query, directory) if allow_whole_house else None
     if whole is not None:
         return whole
     speaker = (directory if directory is not None else _EMPTY).resolves(speaker_room)
