@@ -2176,7 +2176,7 @@ With **Analytics Mode** on (Settings → Privacy), Athena stores what is said to
 
 ### What is stored
 
-Every answered turn on `/query`, `/query/stream`, `/query/stream/v2` and `/v1/chat/completions` (so Home Assistant, Wyoming, LiveKit, Jarvis web, SMS and the website chat are all covered) is stored from anyone who talks to the assistant, including guests and website visitors.
+Every answered turn on `/query`, `/query/stream`, `/query/stream/v2` and `/v1/chat/completions` (so Home Assistant, Wyoming, LiveKit, Jarvis web, SMS and the website chat are all covered) is stored from anyone who talks to the assistant, including guests and website visitors. That includes trivial turns the assistant answers without a model ("thank you", "what time is it").
 
 | Level | What |
 |---|---|
@@ -2189,9 +2189,9 @@ Owner and guest turns are always in separate conversations: a conversation never
 
 ### PIN protection and redaction
 
-- An owner-PIN utterance is never stored as text. Each one leaves a single marker row (withheld, no content), and the next two turns of that session are withheld as well.
-- A query that looks like a PIN or code is withheld whole: the words pin, passcode, code or password next to a number, a run of 6 or more digits, or spoken digits ("one two three four five six"; "to", "for" and similar count only next to another spoken digit).
-- In everything else that is stored, any run of 4 or more digits (years, addresses, amounts included) is replaced by `[number]`. That is deliberate; it costs some tuning detail and keeps PINs and codes out of storage.
+- An owner-PIN utterance is never stored as text. Each one leaves a single marker row (withheld, no content), and the next two turns of that session within 5 minutes are withheld as well.
+- A query that looks like a PIN or code is withheld whole: the words pin, passcode, code or password within about 30 characters of a number or a spoken digit; a run of 6 or more digits; or a run of 4 or more digits that includes at least one spoken digit ("one two three four"). Spaces, commas, dots, dashes and slashes between digits don't break a run, and "to", "for", "too", "won" and "ate" count as digits only beside another spoken-digit word.
+- In everything else that is stored, any run of 4 or more digits (years, addresses, amounts included; the same separators are allowed between digits) is replaced by `[number]`. That is deliberate; it costs some tuning detail and keeps PINs and codes out of storage.
 - The earlier messages of a `/v1/chat/completions` request are never stored, only the final user message.
 
 ### Who can read it
@@ -2207,6 +2207,10 @@ Conversations are kept for **30 days** by default (1 to 3650; there is no "forev
 - **Emerging Intents samples**: the example queries kept on the Emerging Intents page are cleared by the same purges (rows not seen within the retention period automatically; all of them for "Delete all"). The intents and their counters stay.
 - **Automatic**: admin-backend deletes expired turns every 6 hours (first run 5 minutes after it starts, skipped in `DEV_MODE`), whether or not Analytics Mode is on. Expired data is deleted even after capture is turned off.
 - **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only). A refused purge request (403 or 429) is audited too, but at most once per user, per reason, per minute, per admin-backend process, so a client that retries in a loop can't flood the audit log; the refusals themselves are not throttled.
+
+### What can be lost
+
+Capture never delays or fails an answer, so a turn that can't be stored is dropped and counted, not retried. Each orchestrator replica holds up to 256 turns waiting to be written; when the queue is full the newest turn is dropped, and a write that fails is dropped. On shutdown the orchestrator stops accepting turns, gives the queue 2 seconds to drain and counts what is left as dropped; a turn that finishes after shutdown has started is dropped too. Each replica reports its dropped count to the Conversations page about once a minute and sends one last report as it stops. The orchestrator also exports `athena_conversation_capture_total{result}` (`written`, `disabled`, `dropped_queue_full`, `partition_mismatch`, `failed`, `unconfigured`, `shutting_down`). A turn the orchestrator can't write because the database is unreachable or lacks the columns (migration `064`) counts as `failed`.
 
 Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. While it is off, no new conversation text is saved to the conversation history you can review here; Athena still keeps short-lived working memory to follow a conversation (sessions last about an hour) and a response cache (up to 24 hours), which are separate from captured conversations. Turning it on takes effect within about 30 seconds.
 
@@ -2226,21 +2230,31 @@ The orchestrator writes to, and admin-backend reads from, the database named by 
 | failing to write conversations | on, and the latest error is newer than the latest success |
 | on and working | on, and every reporting replica is healthy |
 
+A replica that hasn't reported for 24 hours is no longer counted. The page also shows the stored turn count, the oldest and latest turn, and the dropped total.
+
 Debug detail does not switch itself off: the banner shows "Debug detail ON since <date>" for as long as it is on.
 
 ### The older analytics log carries no text
 
-The same holds for the intent metrics behind the Emerging Intents page: the orchestrator no longer sends the query text (only a keyed hash and the length), and admin-backend does not store `raw_query` from an older orchestrator. `query_hash` is now an HMAC keyed on `SERVICE_API_KEY` (NULL for a PIN-shaped query), so hashes stored by earlier versions (plain MD5) can't be compared with new ones; rotating `SERVICE_API_KEY` likewise starts new groupings. Nothing reads the hash to deduplicate. The page's **sample queries** (examples of what people said) are only collected while Analytics Mode is on, never for a PIN-shaped query, and have runs of 4 or more digits replaced. They follow the conversation text rule: only an owner (`view_conversation_text`) receives them, everyone else sees "Text hidden: owner only", and each view that carries them is audited. Pipeline events (the live Admin Jarvis feed) keep an allowlist of fields per event type: ids, lengths, durations, counts, tool and model names and status values; any other field is dropped when an event is stored, broadcast or read.
+The same holds for the intent metrics behind the Emerging Intents page: the orchestrator no longer sends the query text (only a keyed hash and the length), and admin-backend does not store `raw_query` from an older orchestrator. `query_hash` is now an HMAC keyed on `SERVICE_API_KEY` (NULL for a PIN-shaped query, or when no key is set), so hashes stored by earlier versions (plain MD5) can't be compared with new ones; rotating `SERVICE_API_KEY` likewise starts new groupings. Nothing reads the hash to deduplicate. The page's **sample queries** (up to 10 examples of what people said per intent) are only collected while Analytics Mode is on, never for a PIN-shaped query, and are cut to 200 characters with runs of 4 or more digits replaced (admin-backend replaces them again on receipt). They follow the conversation text rule: only an owner (`view_conversation_text`) receives them, everyone else sees "Text hidden: owner only", and each view that carries them is audited. 
+The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page), the pipeline events and the Admin Jarvis live feed carry **no conversation text**: the services send the query's or transcript's length, intent, confidence and timings only. admin-backend does not rely on that. It keeps allowlisted fields of whatever it receives and drops the rest, before it stores or broadcasts anything and again when rows are read, so an older service, or a field added later, can't put text there:
 
-The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page), the pipeline events and the Admin Jarvis live feed carry **no conversation text**: the services send the query's or transcript's length, intent, confidence and timings only, and admin-backend drops any query, answer or transcript text an older service still sends before it stores or broadcasts anything, and removes it from stored pipeline events when they are read. Query Analytics shows lengths where it used to show the query.
+- `conversation_analytics.metadata`: names (intent, room, mode, status and similar), true/false flags, numbers and `*_len` / `*_count` / `*_ms` values. A text-bearing field becomes its length; an `error` string is kept as `error: true` plus `error_len`.
+- Pipeline events: a fixed set of fields per event type, scalars only (no nested values or lists). A name or status value is kept only if it is at most 100 characters of letters, digits, spaces and `_ . : / -`; any other value is dropped. Event-level fields (event type, session id, interface, timestamp) are kept as sent.
 
-Rows written by earlier versions may still hold the query text in their `metadata` (keys `query`, `query_preview`), whatever Analytics Mode said. They are not deleted and are not shown anywhere. To clear the text and keep the counts, run this against admin-backend's database:
+Query Analytics shows lengths where it used to show the query.
+
+Rows written by earlier versions may still hold the query text in their `metadata` (the key `query`, or `query_preview` and similar), whatever Analytics Mode said. They are not deleted, and reads return only the allowlisted fields, so the text is not shown anywhere. To remove it from the database and keep the counts, run this against admin-backend's database:
 
 ```sql
 UPDATE conversation_analytics
-SET metadata = metadata - 'query' - 'query_preview' - 'query_text'
-WHERE metadata ?| array['query', 'query_preview', 'query_text'];
+SET metadata = metadata - 'query' - 'query_text' - 'query_preview' - 'response' - 'response_text'
+                       - 'response_preview' - 'answer' - 'transcript' - 'utterance'
+WHERE metadata ?| array['query', 'query_text', 'query_preview', 'response', 'response_text',
+                        'response_preview', 'answer', 'transcript', 'utterance'];
 ```
+
+Older pipeline events (`pipeline_events.event_data`) are filtered the same way when read, but they are not rewritten and nothing deletes them automatically; to remove their data, delete the old rows.
 
 (`DELETE FROM conversation_analytics;` removes the rows entirely, which resets those dashboard counts.)
 
