@@ -504,6 +504,34 @@ def _call_service_sites(text: str, filename: str = "<planted>") -> set:
     return found
 
 
+def _ha_client_non_read_calls(text: str, filename: str = "<planted>") -> set:
+    """``func:method`` for every ``ha_client.<method>(...)`` call that is not
+    a read (``get``) or the shutdown (``aclose``): the gateway's shared Home
+    Assistant client must stay read-only."""
+    found = set()
+    stack: list = []
+
+    def visit(node):
+        pushed = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if pushed:
+            stack.append(node.name)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ha_client"
+            and node.func.attr not in ("get", "aclose")
+        ):
+            found.add(f"{stack[-1] if stack else '<module>'}:{node.func.attr}")
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(ast.parse(text, filename=filename))
+    return found
+
+
 class TestGatewaySimpleCommandCallSitesUnchanged:
     """Pattern H drift guard, gateway's share. The gateway writes nothing to
     Home Assistant except one announcement: the only function under
@@ -547,6 +575,20 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
         assert _call_service_sites("async def f(client):\n    await client.call_service('light', 'turn_on', {})\n") == {"f"}
         assert _call_service_sites("def g():\n    return {'type': 'call_service'}\n") == {"g"}
         assert _call_service_sites("def h(client):\n    return client.get('/x')\n") == set()
+
+    def test_the_gateway_ha_client_only_reads(self):
+        found = {}
+        for path in sorted((SRC / "gateway").rglob("*.py")):
+            sites = _ha_client_non_read_calls(path.read_text(encoding="utf-8", errors="ignore"), str(path))
+            if sites:
+                found[str(path.relative_to(REPO_ROOT))] = sorted(sites)
+        assert found == {}
+
+    def test_the_ha_client_check_detects_planted_writers(self):
+        assert _ha_client_non_read_calls("async def f():\n    await ha_client.post(url, json={})\n") == {"f:post"}
+        assert _ha_client_non_read_calls("async def g():\n    await ha_client.request('PUT', url)\n") == {"g:request"}
+        assert _ha_client_non_read_calls("async def h():\n    await ha_client.delete(url)\n") == {"h:delete"}
+        assert _ha_client_non_read_calls("async def k():\n    await ha_client.get(url)\n    await ha_client.aclose()\n") == set()
 
     def test_the_simple_command_module_cannot_write(self):
         text = (SRC / "gateway" / "simple_commands.py").read_text(encoding="utf-8")

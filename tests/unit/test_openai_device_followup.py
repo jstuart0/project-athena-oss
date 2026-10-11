@@ -212,10 +212,10 @@ def test_the_route_handlers_feed_the_device_only_from_the_prompt_marker():
 def test_negative_twin_a_handler_taking_the_device_from_the_request_fails_the_check():
     planted = '''
 async def chat_completions(request, raw_request):
-    marker_device_id, cleaned, _ = speaker_room.extract_device_marker(request.messages)
+    marker_device_id, cleaned, _, _ = speaker_room.extract_device_marker(request.messages)
     room, voice_device_id = request.user, request.session_id
 async def responses_api(request, raw_request):
-    marker_device_id, cleaned, _ = speaker_room.extract_device_marker(request.messages)
+    marker_device_id, cleaned, _, _ = speaker_room.extract_device_marker(request.messages)
     room, voice_device_id = await _speaker_room_for_request(raw_request, device_id=marker_device_id)
 '''
     assert handlers_feed_voice_device_id_only_from_the_marker(planted)

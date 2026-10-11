@@ -309,7 +309,7 @@ def marker(device=STUDY):
 
 
 def test_a_marker_in_the_system_message_is_read_and_stripped():
-    device, cleaned, _ = sr.extract_device_marker([
+    device, cleaned, _, _ = sr.extract_device_marker([
         msg("system", f"You are a helper.\n{marker()}\nBe brief."), msg("user", "turn on the lights"),
     ])
     assert device == STUDY
@@ -318,24 +318,24 @@ def test_a_marker_in_the_system_message_is_read_and_stripped():
 
 def test_the_developer_role_and_the_instructions_text_are_read():
     assert sr.extract_device_marker([msg("developer", marker())])[0] == STUDY
-    device, _, instructions = sr.extract_device_marker([msg("user", "hi")], f"Rules.\n{marker()}")
+    device, _, instructions, _ = sr.extract_device_marker([msg("user", "hi")], f"Rules.\n{marker()}")
     assert device == STUDY and instructions == "Rules."
 
 
 @pytest.mark.parametrize("role", ["user", "assistant", "tool"])
 def test_a_marker_in_any_other_role_is_never_read_or_changed(role):
     messages = [msg("system", "plain"), msg(role, marker())]
-    device, cleaned, _ = sr.extract_device_marker(messages)
+    device, cleaned, _, _ = sr.extract_device_marker(messages)
     assert device is None and cleaned[1]["content"] == marker()
 
 
 def test_a_marker_in_a_later_system_message_counts_only_if_it_is_the_only_one():
-    device, cleaned, _ = sr.extract_device_marker([msg("system", "a"), msg("user", "b"), msg("system", marker())])
+    device, cleaned, _, _ = sr.extract_device_marker([msg("system", "a"), msg("user", "b"), msg("system", marker())])
     assert device == STUDY and cleaned[2]["content"] == ""
 
 
 def test_two_markers_give_no_device_and_both_are_stripped():
-    device, cleaned, _ = sr.extract_device_marker([
+    device, cleaned, _, _ = sr.extract_device_marker([
         msg("system", marker()), msg("system", marker(GALLEY_HUB)),
     ])
     assert device is None and [m["content"] for m in cleaned] == ["", ""]
@@ -343,7 +343,7 @@ def test_two_markers_give_no_device_and_both_are_stripped():
 
 @pytest.mark.parametrize("value", ["A" * 32, "ab" * 8, "ab" * 17, "", "not-hex-" + "0" * 24])
 def test_a_malformed_marker_value_gives_no_device_and_is_still_stripped(value):
-    device, cleaned, _ = sr.extract_device_marker([msg("system", f"keep\nathena_device_id: {value}")])
+    device, cleaned, _, _ = sr.extract_device_marker([msg("system", f"keep\nathena_device_id: {value}")])
     assert device is None and cleaned[0]["content"] == "keep"
 
 
@@ -354,7 +354,7 @@ def test_a_marker_with_surrounding_spaces_and_tabs_is_read():
 def test_a_long_whitespace_line_within_the_cap_parses_quickly():
     line = "athena_device_id:" + " " * 60_000 + STUDY
     started = time.perf_counter()
-    device, _, _ = sr.extract_device_marker([msg("system", line)])
+    device, _, _, _ = sr.extract_device_marker([msg("system", line)])
     assert time.perf_counter() - started < 0.05
     assert device == STUDY
 
@@ -362,7 +362,7 @@ def test_a_long_whitespace_line_within_the_cap_parses_quickly():
 def test_a_whitespace_line_past_the_cap_is_stripped_but_not_honoured():
     line = "athena_device_id:" + " " * 200_000 + STUDY
     started = time.perf_counter()
-    device, cleaned, _ = sr.extract_device_marker([msg("system", line)])
+    device, cleaned, _, _ = sr.extract_device_marker([msg("system", line)])
     assert time.perf_counter() - started < 0.2
     assert device is None and cleaned[0]["content"] == ""
 
@@ -370,14 +370,14 @@ def test_a_whitespace_line_past_the_cap_is_stripped_but_not_honoured():
 def test_a_one_mebibyte_message_is_scanned_only_to_the_cap():
     big = ("x" * 99 + "\n") * 10_000 + marker()
     started = time.perf_counter()
-    device, cleaned, _ = sr.extract_device_marker([msg("system", big)])
+    device, cleaned, _, _ = sr.extract_device_marker([msg("system", big)])
     assert time.perf_counter() - started < 1.0
     assert device is None and marker() not in cleaned[0]["content"], "stripped, but not honoured"
 
 
 def test_a_pydantic_message_is_copied_not_mutated():
     original = gw.ChatMessage(role="system", content=f"hi\n{marker()}")
-    device, cleaned, _ = sr.extract_device_marker([original])
+    device, cleaned, _, _ = sr.extract_device_marker([original])
     assert device == STUDY and cleaned[0].content == "hi" and original.content.endswith(STUDY)
 
 
@@ -468,3 +468,91 @@ def test_satellite_room_map_both_key_kinds_resolve_the_speaker_room():
     assert resolve(registry, device_id=STUDY, trusted=True, satellite_map=mapped).key == "galley"
     entity_mapped = hr.parse_satellite_room_map(json.dumps({"assist_satellite.study_voice": "Galley"}))
     assert resolve(registry, device_id=STUDY, trusted=True, satellite_map=entity_mapped).key == "galley"
+
+
+# ---------------------------------------------------------------------------
+# Security review: rejected marker, state-read cache, bounded negative cache,
+# wide device networks
+# ---------------------------------------------------------------------------
+
+def test_a_rejected_marker_is_flagged_and_skips_the_satellite_guess():
+    for lines in (f"athena_device_id: {STUDY}\nathena_device_id: {GALLEY_HUB}", "athena_device_id: NOT-A-DEVICE"):
+        device, _, _, rejected = sr.extract_device_marker([msg("system", lines)])
+        assert device is None and rejected is True
+    registry, _ = warm()
+
+    async def states():
+        return [ACTIVE]
+
+    guessed = asyncio.run(sr.resolve_speaker_room(
+        device_id=None, trusted=True, registry=registry, read_states=states, marker_rejected=False))
+    assert guessed.source == "guess"
+    refused = asyncio.run(sr.resolve_speaker_room(
+        device_id=None, trusted=True, registry=registry, read_states=states, marker_rejected=True))
+    assert refused == sr.UNKNOWN_ROOM
+
+
+def test_no_marker_and_a_good_marker_are_not_rejected():
+    assert sr.extract_device_marker([msg("system", "plain")])[3] is False
+    assert sr.extract_device_marker([msg("system", f"athena_device_id: {STUDY}")])[3] is False
+
+
+def test_the_negative_cache_is_pruned_and_capped():
+    sr.reset_for_test()
+    for i in range(sr.UNKNOWN_CACHE_MAX + 50):
+        sr._remember_unknown(f"{i:032x}", now=1000.0 + i)
+    assert len(sr._unknown_until) <= sr.UNKNOWN_CACHE_MAX
+    far = 1000.0 + sr.NEGATIVE_CACHE_SECONDS * 10
+    sr._remember_unknown("e" * 32, now=far)
+    assert len(sr._unknown_until) < sr.UNKNOWN_CACHE_MAX / 2, "expired entries are dropped once the cap is reached"
+    assert "e" * 32 in sr._unknown_until
+
+
+def test_the_satellite_state_read_is_reused_for_two_seconds(monkeypatch):
+    calls = []
+
+    async def fetch():
+        calls.append(1)
+        return [ACTIVE]
+
+    clock = Clock()
+    monkeypatch.setattr(gw, "_fetch_assist_satellite_states", fetch)
+    monkeypatch.setattr(gw.time, "monotonic", clock)
+    monkeypatch.setattr(gw, "_satellite_states_cache", (float("-inf"), []))
+
+    async def go():
+        await gw._read_assist_satellite_states()
+        await gw._read_assist_satellite_states()
+        clock.now += gw.SATELLITE_STATES_TTL_SECONDS + 0.1
+        await gw._read_assist_satellite_states()
+
+    asyncio.run(go())
+    assert len(calls) == 2
+
+
+def test_a_device_network_wider_than_a_slash_24_is_counted():
+    count = gw._wide_device_networks
+    assert count(parse_networks("192.0.2.0/24,198.51.100.7")) == 0
+    assert count(parse_networks("192.0.2.0/23")) == 1
+    assert count(parse_networks("10.0.0.0/8,192.0.2.0/24")) == 1
+    assert count(parse_networks("2001:db8::/48")) == 1
+    assert count(parse_networks("2001:db8::/64")) == 0
+
+
+def test_startup_warns_about_a_wide_device_network(monkeypatch):
+    events = []
+
+    class Recorder:
+        def __getattr__(self, level):
+            return lambda event, **kw: events.append((level, event, kw))
+
+    monkeypatch.setattr(gw, "logger", Recorder())
+    monkeypatch.setattr(gw, "_DEVICE_CLIENT_NETWORKS", parse_networks("10.0.0.0/8"))
+    gw._log_speech_network_config()
+    wide = [e for e in events if e[1] == "ha_device_client_networks_wide"]
+    assert wide and wide[0][0] == "warning" and wide[0][2]["count"] == 1
+    assert "10.0.0.0" not in repr(wide)
+    events.clear()
+    monkeypatch.setattr(gw, "_DEVICE_CLIENT_NETWORKS", parse_networks("192.0.2.0/24"))
+    gw._log_speech_network_config()
+    assert not [e for e in events if e[1] == "ha_device_client_networks_wide"]

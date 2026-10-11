@@ -44,6 +44,7 @@ MARKER_SCAN_BYTES = 64 * 1024
 MARKER_ROLES = frozenset({"system", "developer"})
 
 NEGATIVE_CACHE_SECONDS = 60.0
+UNKNOWN_CACHE_MAX = 1000
 COLD_ENSURE_SECONDS = 1.0
 UNKNOWN_DEVICE_ENSURE_SECONDS = 0.5
 DUMMY_KEY = "dummy-key"
@@ -128,12 +129,15 @@ def _strip_marker_lines(text: str, budget: List[int]) -> Tuple[str, List[str]]:
 
 def extract_device_marker(
     messages: Sequence[Any], instructions: Optional[str] = None,
-) -> Tuple[Optional[str], List[Any], Optional[str]]:
+) -> Tuple[Optional[str], List[Any], Optional[str], bool]:
     """Read the `athena_device_id: <32 hex>` line from the system and
     developer messages (and the Responses API `instructions`) only.
 
     Exactly one marker line in all of them gives a device id; none, several,
-    or a malformed value (uppercase, short, long) gives None. Every marker
+    or a malformed value (uppercase, short, long) gives None. The last item
+    is True when a marker line was present but gave no id (several, or
+    malformed): a rejected marker, which must not fall back to guessing the
+    room from the active satellite. Every marker
     line is removed from the returned messages either way, so it never
     reaches the orchestrator's prompt. User, assistant and tool messages are
     never read or changed. At most 64 KiB is scanned.
@@ -157,7 +161,7 @@ def extract_device_marker(
     if len(found) == 1:
         match = _MARKER_LINE.fullmatch(found[0])
         device_id = match.group(1) if match else None
-    return device_id, cleaned, cleaned_instructions
+    return device_id, cleaned, cleaned_instructions, bool(found) and device_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +173,18 @@ _unknown_until: Dict[str, float] = {}
 
 def reset_for_test() -> None:
     _unknown_until.clear()
+
+
+def _remember_unknown(device_id: str, now: float) -> None:
+    """Remember an unknown device id for NEGATIVE_CACHE_SECONDS. Expired
+    entries are dropped first; at the cap the entry closest to expiry goes, so
+    a flood of made-up ids cannot grow the table."""
+    if len(_unknown_until) >= UNKNOWN_CACHE_MAX:
+        for key in [k for k, until in _unknown_until.items() if until <= now]:
+            del _unknown_until[key]
+    if len(_unknown_until) >= UNKNOWN_CACHE_MAX:
+        del _unknown_until[min(_unknown_until, key=_unknown_until.get)]
+    _unknown_until[device_id] = now + NEGATIVE_CACHE_SECONDS
 
 
 ReadStates = Callable[[], Awaitable[Iterable[Dict[str, Any]]]]
@@ -190,6 +206,7 @@ async def resolve_speaker_room(
     registry: Any,
     satellite_map: SatelliteRoomMap = SatelliteRoomMap(),
     read_states: Optional[ReadStates] = None,
+    marker_rejected: bool = False,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> SpeakerRoom:
     """The speaker's room, in order:
@@ -201,7 +218,8 @@ async def resolve_speaker_room(
        unknown for 60 s; the first request before any snapshot waits up to
        1 s;
     3. the guess: exactly one assist satellite is not idle (trusted callers
-       only, and only when no device id was given);
+       only, only when no device id was given, and never after a marker was
+       present but rejected);
     4. unknown.
 
     A device id from a caller that isn't trusted is ignored entirely: no
@@ -229,7 +247,7 @@ async def resolve_speaker_room(
                 registry.request_refresh()
             if snapshot is not None and not snapshot.knows_device(valid_id):
                 if _unknown_until.get(valid_id, 0.0) <= monotonic():
-                    _unknown_until[valid_id] = monotonic() + NEGATIVE_CACHE_SECONDS
+                    _remember_unknown(valid_id, monotonic())
                     snapshot = await registry.ensure(UNKNOWN_DEVICE_ENSURE_SECONDS, refresh=True)
             if snapshot is not None:
                 area = snapshot.area_for(valid_id)
@@ -242,7 +260,7 @@ async def resolve_speaker_room(
                         _log("area", True, started)
                         return SpeakerRoom(area.key, "area")
 
-    if trusted and valid_id is None and read_states is not None:
+    if trusted and valid_id is None and not marker_rejected and read_states is not None:
         guessed = await _guess_from_active_satellite(read_states, registry, satellite_map)
         if guessed is not None:
             _log("guess", False, started)

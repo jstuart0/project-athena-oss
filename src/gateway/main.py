@@ -201,6 +201,16 @@ _DEVICE_CLIENT_NETWORKS, _DEVICE_NETWORKS_DROPPED = without_networks_overlapping
 )
 
 
+_DEVICE_NETWORK_MIN_PREFIX = {4: 24, 6: 64}
+
+
+def _wide_device_networks(networks) -> int:
+    """How many HA_DEVICE_CLIENT_NETWORKS entries cover more than a /24 (IPv4)
+    or /64 (IPv6). Every address in such a network is believed to be a voice
+    device, so a broad one trusts far more than the HA hosts it is meant for."""
+    return sum(1 for net in networks if net.prefixlen < _DEVICE_NETWORK_MIN_PREFIX[net.version])
+
+
 def _log_speech_network_config() -> None:
     """Startup validation for OPENAI_SPEECH_CLIENT_NETWORKS. Counts only, never addresses."""
     invalid = invalid_network_entries(OPENAI_SPEECH_CLIENT_NETWORKS)
@@ -215,6 +225,9 @@ def _log_speech_network_config() -> None:
         logger.error("ha_device_client_networks_invalid", count=len(invalid_device))
     if _DEVICE_NETWORKS_DROPPED:
         logger.error("ha_device_networks_overlap_trusted_proxies", count=_DEVICE_NETWORKS_DROPPED)
+    wide = _wide_device_networks(_DEVICE_CLIENT_NETWORKS)
+    if wide:
+        logger.warning("ha_device_client_networks_wide", count=wide, widest_allowed="/24 (IPv4) or /64 (IPv6)")
 
 
 def _classify_openai_channel(raw_request: Request) -> OutputChannel:
@@ -627,8 +640,24 @@ def _get_room_to_satellite_map() -> Dict[str, str]:
     return {room.lower(): entity_id for entity_id, room in _get_satellite_room_map().entity_rooms.items()}
 
 
+SATELLITE_STATES_TTL_SECONDS = 2.0
+_satellite_states_cache: tuple = (float("-inf"), [])
+
+
 async def _read_assist_satellite_states() -> List[Dict[str, Any]]:
-    """The assist_satellite entities' states, for the active-satellite guess."""
+    """The assist_satellite entities' states, for the active-satellite guess.
+    Reused for SATELLITE_STATES_TTL_SECONDS so a burst of requests makes one
+    Home Assistant read, not one each."""
+    global _satellite_states_cache
+    fetched_at, cached = _satellite_states_cache
+    if time.monotonic() - fetched_at < SATELLITE_STATES_TTL_SECONDS:
+        return cached
+    states = await _fetch_assist_satellite_states()
+    _satellite_states_cache = (time.monotonic(), states)
+    return states
+
+
+async def _fetch_assist_satellite_states() -> List[Dict[str, Any]]:
     ha_url = os.getenv("HA_URL", "http://localhost:8123")
     ha_token = os.getenv("HA_TOKEN")
     if not ha_token:
@@ -665,7 +694,9 @@ def _believed_device_id(raw_request: Request, device_id: Optional[str]) -> Optio
     return None
 
 
-async def _speaker_room_for_request(raw_request: Request, *, device_id: Optional[str]) -> tuple:
+async def _speaker_room_for_request(
+    raw_request: Request, *, device_id: Optional[str], marker_rejected: bool = False,
+) -> tuple:
     """(room key or "unknown", the device id when it was believed).
 
     A device id counts only from a trusted voice caller (see
@@ -678,6 +709,7 @@ async def _speaker_room_for_request(raw_request: Request, *, device_id: Optional
         registry=ha_registry,
         satellite_map=_get_satellite_room_map(),
         read_states=_read_assist_satellite_states,
+        marker_rejected=marker_rejected,
     )
     believed = device_id if trusted and device_id and speaker_room.DEVICE_ID_RE.fullmatch(device_id) else None
     return resolved.key or "unknown", believed
@@ -1848,9 +1880,11 @@ async def chat_completions(
         # The speaker's room: the device id the HA agent put in its prompt
         # (trusted callers only), looked up in the area registry. The marker
         # line is removed before the messages go any further.
-        marker_device_id, cleaned_messages, _ = speaker_room.extract_device_marker(request.messages)
+        marker_device_id, cleaned_messages, _, marker_rejected = speaker_room.extract_device_marker(request.messages)
         request = request.model_copy(update={"messages": cleaned_messages})
-        room, voice_device_id = await _speaker_room_for_request(raw_request, device_id=marker_device_id)
+        room, voice_device_id = await _speaker_room_for_request(
+            raw_request, device_id=marker_device_id, marker_rejected=marker_rejected,
+        )
         trusted_voice = _is_trusted_voice(raw_request)
 
         # Log-only routing hint: every request goes to the orchestrator, so the
@@ -2010,9 +2044,11 @@ async def responses_api(
         )
 
         # The speaker's room (instructions are the first system message here)
-        marker_device_id, cleaned_messages, _ = speaker_room.extract_device_marker(chat_request.messages)
+        marker_device_id, cleaned_messages, _, marker_rejected = speaker_room.extract_device_marker(chat_request.messages)
         chat_request = chat_request.model_copy(update={"messages": cleaned_messages})
-        room, voice_device_id = await _speaker_room_for_request(raw_request, device_id=marker_device_id)
+        room, voice_device_id = await _speaker_room_for_request(
+            raw_request, device_id=marker_device_id, marker_rejected=marker_rejected,
+        )
         trusted_voice = _is_trusted_voice(raw_request)
 
         # Handle streaming
