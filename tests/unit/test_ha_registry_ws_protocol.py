@@ -37,8 +37,13 @@ HARD_TIMEOUT = 10
 
 @pytest.fixture(autouse=True)
 def _restore_websockets_log_levels():
+    """Unpin the library's loggers for the test (another test module may have
+    pinned them), so the module's own silence is what keeps frames out of the
+    log; put them back after."""
     names = ("websockets", "websockets.client")
     saved = {n: logging.getLogger(n).level for n in names}
+    for n in names:
+        logging.getLogger(n).setLevel(logging.NOTSET)
     yield
     for n, level in saved.items():
         logging.getLogger(n).setLevel(level)

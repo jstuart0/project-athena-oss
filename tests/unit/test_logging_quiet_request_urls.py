@@ -46,6 +46,7 @@ def test_request_url_loggers_are_warning_after_uvicorn_config():
     configure_logging("test-quiet-urls")
     for name in QUIET:
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING, name
+        assert logging.getLogger(name).level == logging.WARNING, f"{name} is pinned, not just inheriting the root level"
     assert not logging.getLogger("uvicorn.access").isEnabledFor(logging.INFO)
 
 
