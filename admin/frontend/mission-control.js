@@ -20,7 +20,8 @@
     const state = {
         charts: {},
         refreshInterval: null,
-        data: null
+        data: null,
+        haHtml: null // the Home Assistant card's last write, so an unchanged card is not rewritten
     };
 
     // Configuration
@@ -61,7 +62,7 @@
 
         // Setup auto-refresh (only if authenticated)
         if (window.AppState && window.AppState.isAuthenticated()) {
-            state.refreshInterval = setInterval(refresh, config.refreshIntervalMs);
+            state.refreshInterval = setInterval(() => refresh({ quiet: true }), config.refreshIntervalMs);
         }
 
         console.log('[MissionControl] Initialized');
@@ -83,6 +84,9 @@
                     Refresh
                 </button>
             </div>
+
+            <!-- Home Assistant status: the same card as the Dashboard -->
+            <section id="mc-ha-status" class="mb-6" aria-labelledby="mc-ha-status-heading"></section>
 
             <!-- Dashboard Cards Grid -->
             <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
@@ -176,9 +180,23 @@
     }
 
     /**
-     * Refresh dashboard data.
+     * Write the Home Assistant card, unless it is exactly what is already
+     * there: a rewrite would drop keyboard focus from "Try again" every minute.
      */
-    async function refresh() {
+    function setHomeAssistantHtml(html) {
+        const container = document.getElementById('mc-ha-status');
+        if (!container || state.haHtml === html) return;
+        container.innerHTML = html;
+        state.haHtml = html;
+    }
+
+    /**
+     * Refresh dashboard data and the Home Assistant card. The two requests are
+     * independent: each has its own failure state. The skeleton shows on the
+     * first load and on an explicit refresh, never on the timer ({quiet: true}).
+     */
+    async function refresh(options) {
+        const quiet = Boolean(options && options.quiet);
         try {
             // Check auth state first
             if (window.AppState && !window.AppState.isAuthenticated()) {
@@ -186,8 +204,18 @@
                 return;
             }
 
-            // Fetch dashboard data
-            state.data = await Athena.api('/api/dashboard');
+            if (!quiet || state.haHtml === null) setHomeAssistantHtml(renderHomeAssistantLoading());
+
+            const [dashboardResult, haResult] = await Promise.allSettled([
+                Athena.api('/api/dashboard'),
+                Athena.api('/api/service-registry/home-assistant'),
+            ]);
+            setHomeAssistantHtml(haResult.status === 'fulfilled'
+                ? renderHomeAssistantCard(summarizeHomeAssistant(haResult.value), 'mission')
+                : renderHomeAssistantFailure('mission'));
+
+            if (dashboardResult.status === 'rejected') throw dashboardResult.reason;
+            state.data = dashboardResult.value;
             updateUI();
         } catch (error) {
             console.error('[MissionControl] Refresh failed:', error);
@@ -405,17 +433,13 @@
     }
 
     /**
-     * Pure: a service tile's colour, pulse and tooltip from its display status.
-     * Stale, pending and disabled mean "not known right now", not "down": grey,
-     * no pulse. Only a real problem is red and pulsing.
+     * Pure: a service tile's colour, pulse class and label from its display
+     * status (status-vocab.js). Stale, pending and disabled mean "not known
+     * right now", not "down": grey, no pulse. Only a problem is red and pulses.
      */
     function serviceTileStyle(status) {
-        if (status === 'healthy') return { color: 'green', pulse: false, title: '' };
-        if (status === 'degraded') return { color: 'yellow', pulse: true, title: '' };
-        if (status === 'stale') return { color: 'gray', pulse: false, title: 'No recent check' };
-        if (status === 'pending' || status === 'disabled') return { color: 'gray', pulse: false, title: '' };
-        if (status === 'unconfigured') return { color: 'gray', pulse: false, title: 'Needs setup' };
-        return { color: 'red', pulse: true, title: '' };
+        const info = statusInfo(status);
+        return { color: TONE_TILE[info.tone], pulse: TONE_PULSE[info.tone] || '', label: info.label };
     }
 
     /**
@@ -434,11 +458,11 @@
             const tile = serviceTileStyle(service.status);
 
             return `
-                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg"${tile.title ? ` title="${tile.title}"` : ''}>
+                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg" title="${escapeHtml(tile.label)}">
                     <div class="w-10 h-10 rounded-full bg-${tile.color}-500/20 flex items-center justify-center mb-2">
-                        <span class="w-3 h-3 rounded-full bg-${tile.color}-500 ${tile.pulse ? 'animate-pulse' : ''}"></span>
+                        <span class="w-3 h-3 rounded-full bg-${tile.color}-500 ${tile.pulse}" aria-hidden="true"></span>
                     </div>
-                    <p class="text-xs text-gray-300 text-center truncate w-full">${escapeHtml(service.name)}</p>
+                    <p class="text-xs text-gray-300 text-center truncate w-full">${escapeHtml(service.name)}<span class="sr-only">: ${escapeHtml(tile.label)}</span></p>
                     ${service.latency_ms ? `<p class="text-xs text-gray-500">${service.latency_ms}ms</p>` : ''}
                 </div>
             `;
@@ -463,6 +487,7 @@
         });
         state.charts = {};
         state.data = null;
+        state.haHtml = null;
 
         console.log('[MissionControl] Destroyed');
     }

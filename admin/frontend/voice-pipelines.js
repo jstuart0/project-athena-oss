@@ -211,27 +211,24 @@
         }
     }
 
-    // Services whose state is not "down": switched off, never checked, not
-    // reached recently, or not set up. Grey, never red.
-    const NEUTRAL_STATUSES = ['stale', 'disabled', 'pending', 'unconfigured', 'not configured'];
-
     /**
-     * Pure: 'green' | 'gray' | 'red' for a /api/status service entry. Healthy is
-     * green; no service, or a neutral status, is gray; anything else (including
-     * a status this code has never seen) is red.
+     * Pure: 'green' | 'gray' | 'amber' | 'red' for a /api/status service entry,
+     * from the shared tone (status-vocab.js). Healthy is green; no service, or a
+     * neutral status, is gray; needs-setup is amber; anything else (including a
+     * status this code has never seen) is red.
      */
     function statusTone(service) {
         if (!service) return 'gray';
         // Check both the .healthy boolean and the .status string for health.
-        if (service.healthy === true || service.status === 'running' || service.status === 'running (auth required)') return 'green';
-        return NEUTRAL_STATUSES.includes(service.status) ? 'gray' : 'red';
+        if (service.healthy === true) return 'green';
+        const tone = statusInfo(service.status || 'not configured').tone;
+        return TONE_TILE[tone];
     }
 
-    /** The words beside a status dot: a stale service reads "No recent check". */
+    /** The label beside a status dot, from the shared table. Callers escape it. */
     function statusWord(service) {
-        if (statusTone(service) === 'green') return 'healthy';
-        if (service && service.status === 'stale') return 'No recent check';
-        return (service && service.status) || 'not configured';
+        if (statusTone(service) === 'green') return statusInfo('healthy').label;
+        return statusInfo(service && service.status ? service.status : 'not configured').label;
     }
 
     /**
@@ -254,7 +251,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                     <span class="px-2 py-1 text-xs rounded-full bg-${statusColor}-500/20 text-${statusColor}-400">
-                        ${statusText}
+                        ${escapeHtml(statusText)}
                     </span>
                     ${service ? `
                         <button onclick="Athena.pages.VoicePipelines.restartComponent('${escapeJsAttr(type)}', ${service.port || 0})"
@@ -433,10 +430,10 @@
             container.innerHTML = voiceServices.map(s => `
                 <div class="flex items-center justify-between p-2 bg-dark-bg rounded-lg">
                     <div class="flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full ${{ green: 'bg-green-500', gray: 'bg-gray-500', red: 'bg-red-500' }[statusTone(s)]}"></span>
+                        <span class="w-2 h-2 rounded-full bg-${statusTone(s)}-500"></span>
                         <span class="text-sm text-gray-300">${escapeHtml(s.name)}</span>
                     </div>
-                    <span class="text-xs text-gray-500">${escapeHtml(s.latency_ms ? `${s.latency_ms}ms` : (s.status === 'stale' ? 'No recent check' : (s.status || 'N/A')))}</span>
+                    <span class="text-xs text-gray-500">${escapeHtml(s.latency_ms ? `${s.latency_ms}ms` : (s.status ? statusInfo(s.status).label : 'N/A'))}</span>
                 </div>
             `).join('');
         } catch (error) {

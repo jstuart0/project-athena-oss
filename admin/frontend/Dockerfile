@@ -31,6 +31,7 @@ COPY keyboard.js /usr/share/nginx/html/
 
 # Legacy application scripts
 COPY utils.js /usr/share/nginx/html/
+COPY status-vocab.js /usr/share/nginx/html/
 COPY app.js /usr/share/nginx/html/
 COPY crud-extensions.js /usr/share/nginx/html/
 COPY conversation.js /usr/share/nginx/html/

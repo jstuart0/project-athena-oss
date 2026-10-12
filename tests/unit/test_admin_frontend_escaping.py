@@ -414,13 +414,13 @@ def test_dashboard_badge_call_sites_use_service_status_helper():
     source = APP_JS.read_text()
 
     # Both card-rendering blocks must call serviceStatus(service).
-    assert source.count("const status = serviceStatus(service);") >= 2, (
+    assert source.count("serviceStatus(service)") >= 2, (
         "expected both app.js dashboard-card render sites to call "
         "serviceStatus(service) -- found fewer than 2"
     )
 
     # And the resolved status text must be escaped when rendered.
-    assert "escapeHtml(status)" in source
+    assert "escapeHtml(status)" in source or "escapeHtml(info.label)" in source
 
 
 def test_no_raw_service_status_interpolation_remains_in_app_js():
@@ -639,6 +639,7 @@ def _group_rows(rows):
 def _render_status_cell(row):
     sources = [
         ESCAPE_HTML_JS.read_text(),
+        STATUS_VOCAB_JS.read_text(),
         _extract_block(SERVICE_CONTROL_JS, "const RUN_STATE_BADGES"),
         _extract_block(SERVICE_CONTROL_JS, "function _isNativelyRunning("),
         _extract_block(SERVICE_CONTROL_JS, "function _healthLine("),
@@ -1219,19 +1220,18 @@ def _run_node_utc(sources: list[str], js_expr: str):
     return json.loads(proc.stdout)
 
 
+STATUS_VOCAB_JS = FRONTEND_DIR / "status-vocab.js"
+
+
 def _app_ha_sources() -> list[str]:
-    """escape-html.js plus app.js's status helpers, the Home Assistant card
-    and the registry-row helpers (everything between the vocabulary comment
-    and loadStatus)."""
-    source = APP_JS.read_text()
-    start = source.index("// Status vocabulary shared with Service Control")
-    start = source.rindex("// ----", 0, start)
-    end = source.index("async function loadStatus() {")
+    """escape-html.js, the shared status-vocab.js (statuses, ages, the Home
+    Assistant card) and the app.js row helpers the Dashboard test needs."""
     return [
         ESCAPE_HTML_JS.read_text(),
+        STATUS_VOCAB_JS.read_text(),
         _extract_function_source(APP_JS, "serviceStatus"),
         _extract_function_source(APP_JS, "summarizeServices"),
-        source[start:end],
+        _extract_function_source(APP_JS, "pollerBanner"),
     ]
 
 
@@ -1270,16 +1270,10 @@ def _python_reasons() -> set[str]:
     raise AssertionError("REASONS not found in ha_status.py")
 
 
-# Reasons the backend can already report whose card copy lands with the frontend
-# phase (status-vocab.js). Until then an unknown reason reads "Status unknown".
-# The frontend phase empties this set and the length below becomes 16.
-PENDING_JS_REASONS = {"ip_banned"}
-
-
 def test_the_js_reason_map_has_exactly_the_python_reason_set():
     js_keys = set(_ha("Object.keys(HA_REASON_COPY)"))
-    assert js_keys == _python_reasons() - PENDING_JS_REASONS
-    assert len(js_keys) == 15
+    assert js_keys == _python_reasons()
+    assert len(js_keys) == 16
     assert "gateway_token_rejected" not in js_keys and "gateway_token_rejected" not in _python_reasons()
 
 
@@ -1289,10 +1283,13 @@ HA_COPY = {
                 "Athena hasn't talked to Home Assistant since it started. This updates after the first voice command.", None),
     "token_rejected": ("Token rejected",
                        "Home Assistant turned down Athena's access token, so Athena can't control your home.",
-                       "Create a long-lived access token in Home Assistant (your profile → Security), save it under External API Keys → home-assistant, then restart the orchestrator."),
-    "forbidden": ("Access blocked",
-                  "Home Assistant refused Athena. This usually means it blocked Athena's address after failed sign-ins.",
-                  "Remove Athena's address from Home Assistant's ip_bans.yaml and restart Home Assistant, then check the token."),
+                       "Open your user profile in Home Assistant, go to the Security tab, and create a long-lived access token. Save it in Athena under External API Keys → home-assistant. Athena starts using it within a minute. No restart needed."),
+    "ip_banned": ("Address blocked",
+                  "Home Assistant has blocked the address Athena connects from after too many failed sign-ins. Nothing from Athena gets through until the block is removed.",
+                  "IP_BANNED_OL"),
+    "forbidden": ("Request refused",
+                  "Home Assistant, or a proxy in front of it, refused a request from Athena.",
+                  "If it keeps happening, check Home Assistant's log. If Athena's address is listed as banned, remove it from ip_bans.yaml and restart Home Assistant."),
     "unreachable": ("Can't reach Home Assistant",
                     "Athena couldn't connect. Home Assistant may be off, restarting, or at a different address.",
                     "Check that Home Assistant is running and that the address under External API Keys → home-assistant is right."),
@@ -1304,10 +1301,10 @@ HA_COPY = {
                  "Home Assistant is running but returned an error to Athena. Its own log will say why.", None),
     "registry_unavailable": ("Connected, rooms not loaded",
                              "Commands reach Home Assistant, but Athena couldn't load its areas, so it can't tell which room you're in.",
-                             "Restart the orchestrator to try again."),
+                             "Athena tries again on its own the next time it needs rooms."),
     "registry_refused": ("Connected, rooms not loaded",
                          "Home Assistant turned down Athena's token when it loaded areas earlier. Commands work now.",
-                         "Restart the orchestrator to load rooms."),
+                         "Athena tries again on its own the next time it needs rooms. If this doesn't clear, create a new token and save it under External API Keys → home-assistant."),
     "not_configured": ("Not set up",
                        "Add your Home Assistant address and token so Athena can control your home.", "BUTTON"),
     "orchestrator_unreachable": ("Status unavailable",
@@ -1329,7 +1326,10 @@ def test_each_reason_reads_its_binding_copy(reason):
     out = _summ(reason=reason, state="unknown", last_success_at=None, last_outcome_at=None)
     assert out["headline"] == headline
     assert out["detail"] == detail
-    if action == "BUTTON":
+    if action == "IP_BANNED_OL":
+        assert out["action"].startswith('<ol class="list-decimal pl-5 space-y-1"><li>If the token might be wrong')
+        assert "<code>ip_bans.yaml</code>" in out["action"] and out["action"].endswith("Athena reconnects on its own.</li></ol>")
+    elif action == "BUTTON":
         assert out["action"].startswith('<button type="button" onclick="showTab(\'external-api-keys\')"')
         assert ">Set up Home Assistant</button>" in out["action"]
     else:
@@ -1504,31 +1504,12 @@ def test_time_tag_escapes_a_hostile_time_attribute():
     assert "<img" not in html
 
 
-# -- the shared status vocabulary ------------------------------------------------------------
+# -- the shared status vocabulary (the table itself is pinned in test_admin_frontend_status_vocab.py) ---
 
-SIX_CODES = ["healthy", "unhealthy", "unconfigured", "pending", "stale", "disabled"]
-SIX_WORDS = ["Healthy", "Unhealthy", "Needs setup", "Checking…", "No recent check", "Not monitored"]
-
-
-def _service_control_status_label(code: str) -> str:
-    return _run_node_utc([_extract_block(SERVICE_CONTROL_JS, "function statusLabel(")], f"statusLabel({json.dumps(code)})")
-
-
-def test_the_dashboard_and_service_control_status_words_are_equal_on_the_six_codes():
-    app_words = [_ha(f"statusLabel({json.dumps(code)})") for code in SIX_CODES]
-    control_words = [_service_control_status_label(code) for code in SIX_CODES]
-    assert app_words == control_words == SIX_WORDS
-
-
-def test_an_unknown_status_code_is_passed_through_for_the_caller_to_escape():
-    assert _ha("statusLabel('weird')") == "weird"
-    assert _ha("statusLabel('constructor')") == "constructor"
-
-
-def test_monitoring_label_for_a_switched_off_row():
-    assert _ha(f"monitoringLabel({{last_health_check: null}}, {json.dumps(CHECKED_AT)})") == "Not monitored · never checked"
-    assert _ha(f"monitoringLabel({{last_health_check: '2026-09-27T08:00:00+00:00'}}, {json.dumps(CHECKED_AT)})") == \
-        "Not monitored · last checked 27 Sep"
+def test_not_monitored_text_for_a_switched_off_row():
+    now = f"Date.parse({json.dumps(CHECKED_AT)})"
+    assert _ha(f"notMonitoredText(null, {now})") == "Not monitored · never checked"
+    assert _ha(f"notMonitoredText('2026-09-27T08:00:00+00:00', {now})") == "Not monitored · last checked 27 Sep"
 
 
 # -- the poller banner --------------------------------------------------------------------------
@@ -1664,15 +1645,11 @@ def test_a_switched_off_row_never_checked_says_never_checked():
 def _sc(expr: str):
     sources = [
         ESCAPE_HTML_JS.read_text(),
+        STATUS_VOCAB_JS.read_text(),
         _extract_block(SERVICE_CONTROL_JS, "const RUN_STATE_BADGES"),
         _extract_block(SERVICE_CONTROL_JS, "function _isNativelyRunning("),
         _extract_block(SERVICE_CONTROL_JS, "function _healthLine("),
-        _extract_block(SERVICE_CONTROL_JS, "function statusLabel("),
-        _extract_line(SERVICE_CONTROL_JS, "const _SC_MONTHS = "),
-        _extract_line(SERVICE_CONTROL_JS, "const _SC_MONTHS_LONG = "),
-        _extract_block(SERVICE_CONTROL_JS, "function _scAgeWords("),
         _extract_block(SERVICE_CONTROL_JS, "function servicePollerBanner("),
-        _extract_block(SERVICE_CONTROL_JS, "function _notMonitoredText("),
         _extract_block(SERVICE_CONTROL_JS, "function renderStatusCell("),
         _extract_block(SERVICE_CONTROL_JS, "function _freshnessChip("),
         _extract_block(SERVICE_CONTROL_JS, "function _buildStatusAriaLabel("),
@@ -1770,21 +1747,26 @@ def test_the_refresh_button_is_disabled_on_a_switched_off_row():
 # -- Mission Control --------------------------------------------------------------------------------------
 
 def _tile(status: str):
-    return _run_node_utc([_extract_block(MISSION_CONTROL_JS, "function serviceTileStyle(")], f"serviceTileStyle({json.dumps(status)})")
+    return _run_node_utc([STATUS_VOCAB_JS.read_text(), _extract_block(MISSION_CONTROL_JS, "function serviceTileStyle(")],
+                         f"serviceTileStyle({json.dumps(status)})")
 
 
-@pytest.mark.parametrize("status,color,pulse,title", [
-    ("healthy", "green", False, ""),
-    ("degraded", "yellow", True, ""),
-    ("stale", "gray", False, "No recent check"),
-    ("pending", "gray", False, ""),
-    ("disabled", "gray", False, ""),
-    ("unhealthy", "red", True, ""),
-    ("unreachable", "red", True, ""),
-    ("unconfigured", "gray", False, "Needs setup"),
+PULSE = "motion-safe:animate-pulse"
+
+
+@pytest.mark.parametrize("status,color,pulse,label", [
+    ("healthy", "green", "", "Healthy"),
+    ("degraded", "red", PULSE, "Degraded"),
+    ("stale", "gray", "", "No recent check"),
+    ("pending", "gray", "", "Checking…"),
+    ("disabled", "gray", "", "Not monitored"),
+    ("unhealthy", "red", PULSE, "Unhealthy"),
+    ("unreachable", "red", PULSE, "Unreachable"),
+    ("unconfigured", "amber", "", "Needs setup"),
+    (None, "gray", "", "Not reported"),
 ])
-def test_mission_control_tile_colour_and_pulse(status, color, pulse, title):
-    assert _tile(status) == {"color": color, "pulse": pulse, "title": title}
+def test_mission_control_tile_colour_pulse_and_label(status, color, pulse, label):
+    assert _tile(status) == {"color": color, "pulse": pulse, "label": label}
 
 
 # -- the escaping gate is not vacuous on the new markup ------------------------------------------------------

@@ -24,6 +24,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYSTEM_CONFIG_JS = REPO_ROOT / "admin" / "frontend" / "system-config.js"
+STATUS_VOCAB_JS = REPO_ROOT / "admin" / "frontend" / "status-vocab.js"
 
 NODE_BIN = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE_BIN is None, reason="node is required for this fixture")
@@ -37,6 +38,8 @@ def _map_status(service: dict):
     global.window = global;
     global.document = {{ getElementById: () => null, querySelectorAll: () => [] }};
     global.fetch = () => Promise.resolve({{ ok: false }});
+    vm.runInThisContext(fs.readFileSync({json.dumps(str(STATUS_VOCAB_JS))}, 'utf8'), {{ filename: 'status-vocab.js' }});
+    global.escapeHtml = (value) => String(value);
     const src = fs.readFileSync({json.dumps(str(SYSTEM_CONFIG_JS))}, 'utf8');
     vm.runInThisContext(src, {{ filename: 'system-config.js' }});
     const result = mapServiceStatusToUiBucket({json.dumps(service)});
@@ -49,26 +52,29 @@ def _map_status(service: dict):
 
 @requires_node
 @pytest.mark.parametrize("service,expected", [
-    ({"healthy": True, "status": "healthy"}, "healthy"),
-    ({"healthy": False, "status": "healthy (auth required)"}, "unhealthy"),  # healthy=False wins
-    ({"healthy": False, "status": "unhealthy"}, "unhealthy"),
+    ({"healthy": True, "status": "healthy"}, "good"),
+    ({"healthy": False, "status": "healthy (auth required)"}, "bad"),  # healthy=False wins over a good-looking word
+    ({"healthy": False, "status": "unhealthy"}, "bad"),
     ({"healthy": False, "status": "disabled"}, "neutral"),
-    ({"healthy": False, "status": "unconfigured"}, "neutral"),
-    ({"healthy": False, "status": "not configured"}, "neutral"),
+    ({"healthy": False, "status": "unconfigured"}, "setup"),
+    ({"healthy": False, "status": "not configured"}, "setup"),
     ({"healthy": False, "status": "pending"}, "neutral"),
     ({"healthy": False, "status": "stale"}, "neutral"),  # the checker hasn't reached it: unknown, not down
     ({"healthy": False, "status": "error"}, "offline"),
     ({"healthy": False, "status": "error: HTTP 503"}, "offline"),
     ({"healthy": False, "status": "timeout"}, "offline"),
     ({"healthy": False, "status": "unreachable"}, "offline"),
+    ({"healthy": False, "status": "not deployed"}, "offline"),
+    ({"healthy": False, "status": "a word nobody has seen"}, "bad"),
+    ({"healthy": False}, "neutral"),
 ])
-def test_map_service_status_to_ui_bucket(service, expected):
+def test_map_service_status_to_tone(service, expected):
     assert _map_status(service) == expected
 
 
 @requires_node
 def test_healthy_true_always_wins_regardless_of_status_string():
-    assert _map_status({"healthy": True, "status": "unconfigured"}) == "healthy"
+    assert _map_status({"healthy": True, "status": "unconfigured"}) == "good"
 
 
 def _eval(expression: str):
@@ -79,8 +85,9 @@ def _eval(expression: str):
     global.window = global;
     global.document = {{ getElementById: () => null, querySelectorAll: () => [] }};
     global.fetch = () => Promise.resolve({{ ok: false }});
-    const src = fs.readFileSync({json.dumps(str(SYSTEM_CONFIG_JS))}, 'utf8');
-    vm.runInThisContext(src, {{ filename: 'system-config.js' }});
+    global.escapeHtml = (value) => String(value);
+    vm.runInThisContext(fs.readFileSync({json.dumps(str(STATUS_VOCAB_JS))}, 'utf8'), {{ filename: 'status-vocab.js' }});
+    vm.runInThisContext(fs.readFileSync({json.dumps(str(SYSTEM_CONFIG_JS))}, 'utf8'), {{ filename: 'system-config.js' }});
     process.stdout.write(JSON.stringify({expression}));
     """
     proc = subprocess.run([NODE_BIN, "-e", script], capture_output=True, text=True, timeout=15)
@@ -89,28 +96,41 @@ def _eval(expression: str):
 
 
 @requires_node
-@pytest.mark.parametrize("status,expected", [
-    ("stale", "No recent check"),
-    ("disabled", "Not monitored"),
-    ("pending", "Checking…"),
-    ("unconfigured", "Not Configured"),
-    ("not configured", "Not Configured"),
-    (None, "Not Configured"),
-    ("<img src=x>", "Not Configured"),
+@pytest.mark.parametrize("tone,word,expected", [
+    ("good", None, "Healthy"),
+    ("bad", "unhealthy", "Unhealthy"),
+    ("offline", "not deployed", "Unreachable"),
+    ("offline", "timeout", "Not responding"),
+    ("offline", None, "Unreachable"),
+    ("setup", "unconfigured", "Needs setup"),
+    ("setup", "not configured", "Needs setup"),
+    ("neutral", "stale", "No recent check"),
+    ("neutral", "disabled", "Not monitored"),
+    ("neutral", "pending", "Checking…"),
+    ("neutral", None, "Not reported"),
+    ("bad", "<img src=x>", "<img src=x>"),   # the raw word; the renderer escapes it
 ])
-def test_neutral_label_says_why_a_service_is_neither_up_nor_down(status, expected):
-    assert _eval(f"neutralLabel({json.dumps(status)})") == expected
+def test_the_card_label_is_the_shared_label_of_the_word_behind_the_tone(tone, word, expected):
+    assert _eval(f"serviceCardLabel({json.dumps(tone)}, {json.dumps(word)})") == expected
 
 
 @requires_node
-def test_unhealthy_stays_unhealthy_and_timeout_stays_offline():
-    assert _map_status({"healthy": False, "status": "unhealthy"}) == "unhealthy"
-    assert _map_status({"healthy": False, "status": "timeout"}) == "offline"
-    assert _map_status({"healthy": False, "status": "stale"}) == "neutral"
+@pytest.mark.parametrize("tone,color,icon,pulses", [
+    ("good", "green", "✅", False),
+    ("bad", "red", "❌", True),
+    ("offline", "red", "❌", True),
+    ("setup", "amber", "⚠️", False),
+    ("neutral", "gray", "➖", False),
+])
+def test_each_tone_has_its_colour_icon_and_pulse(tone, color, icon, pulses):
+    view = _eval(f"SERVICE_CARD_VIEW[{json.dumps(tone)}]")
+    assert (view["color"], view["icon"]) == (color, icon)
+    assert view["pulse"] == ("motion-safe:animate-pulse" if pulses else "")
 
 
 @requires_node
-def test_a_neutral_card_shows_the_raw_words_label_not_a_fixed_not_configured():
-    script_text = SYSTEM_CONFIG_JS.read_text()
-    assert "neutralLabel(svc.word)" in script_text
-    assert "svc.status === 'neutral' ? 'Not Configured'" not in script_text
+def test_unhealthy_is_red_not_yellow_and_the_card_escapes_the_service_name():
+    assert _map_status({"healthy": False, "status": "unhealthy"}) == "bad"
+    source = SYSTEM_CONFIG_JS.read_text()
+    assert "${escapeHtml(svc.name)}" in source and "${svc.name}" not in source
+    assert "rounded-full bg-${view.color}-500 ${view.pulse}" in source

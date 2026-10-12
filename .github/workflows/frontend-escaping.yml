@@ -12,6 +12,14 @@ on:
       - "tests/unit/test_frontend_guard_scripts.py"
       - "tests/unit/test_admin_frontend_system_config_status_mapping.py"
       - "tests/unit/test_voice_pipelines_status_tone.py"
+      - "tests/unit/test_admin_frontend_status_vocab.py"
+      - "tests/unit/test_admin_frontend_script_order.py"
+      - "tests/unit/test_admin_frontend_voice_config_ha.py"
+      - "tests/unit/test_admin_frontend_mission_control_ha.py"
+      - "tests/unit/test_admin_frontend_ha_reason_v1_fallback.py"
+      - "tests/unit/frontend_node.py"
+      - "tests/fixtures/admin_frontend/**"
+      - "admin/backend/app/services/health_poller.py"
       - "admin/backend/app/services/ha_status.py"
       - "admin/backend/app/utils/service_state.py"
       - "src/shared/ha_link.py"
@@ -35,6 +43,14 @@ on:
       - "tests/unit/test_frontend_guard_scripts.py"
       - "tests/unit/test_admin_frontend_system_config_status_mapping.py"
       - "tests/unit/test_voice_pipelines_status_tone.py"
+      - "tests/unit/test_admin_frontend_status_vocab.py"
+      - "tests/unit/test_admin_frontend_script_order.py"
+      - "tests/unit/test_admin_frontend_voice_config_ha.py"
+      - "tests/unit/test_admin_frontend_mission_control_ha.py"
+      - "tests/unit/test_admin_frontend_ha_reason_v1_fallback.py"
+      - "tests/unit/frontend_node.py"
+      - "tests/fixtures/admin_frontend/**"
+      - "admin/backend/app/services/health_poller.py"
       - "admin/backend/app/services/ha_status.py"
       - "admin/backend/app/utils/service_state.py"
       - "src/shared/ha_link.py"
@@ -295,3 +311,9 @@ jobs:
           else
             python3 scripts/check-no-new-test-skips.py --base "origin/${GITHUB_BASE_REF:-main}"
           fi
+
+      - name: Run the status vocabulary and Home Assistant surface tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_admin_frontend_status_vocab.py tests/unit/test_admin_frontend_script_order.py tests/unit/test_admin_frontend_voice_config_ha.py tests/unit/test_admin_frontend_mission_control_ha.py tests/unit/test_admin_frontend_ha_reason_v1_fallback.py
