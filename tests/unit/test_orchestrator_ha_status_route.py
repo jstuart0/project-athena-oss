@@ -228,3 +228,52 @@ def test_the_response_matches_the_golden_file(monkeypatch, client):
         GOLDEN.write_text(rendered, encoding="utf-8")
     assert GOLDEN.read_text(encoding="utf-8") == rendered
     assert ha_link.link_state(body) == ("connected", "ok")
+
+
+# -- a token with no URL must boot and read "not set up" -----------------------------------------
+
+def test_a_token_without_a_url_builds_no_home_assistant_client_and_no_entity_manager():
+    monitor = ha_link.HALinkMonitor()
+    for url, token in ((None, "tok"), ("", "tok"), ("https://ha.test", None), ("https://ha.test", ""), (None, None)):
+        assert _main_module._build_ha_channels(url, token, monitor) == (None, None), (url, token)
+
+
+def test_a_url_and_a_token_build_both_clients_recording_into_the_monitor():
+    monitor = ha_link.HALinkMonitor()
+    client, entity_manager = _main_module._build_ha_channels("https://ha.test", "tok", monitor)
+    assert client is not None and client.is_configured
+    assert entity_manager is not None and entity_manager.ha_url == "https://ha.test"
+
+
+def test_a_token_only_configuration_reports_not_configured_end_to_end(monkeypatch, client):
+    """The lifespan's own wiring for a token with no URL: the channels are None, the
+    publisher built from them says not configured, and /health and /admin/ha-status
+    answer instead of the process failing to start."""
+    _mode(monkeypatch, "enforce")
+    monkeypatch.delenv("HA_URL", raising=False)
+    raw, entity_manager = _main_module._build_ha_channels(None, "tok", ha_link.HALinkMonitor())
+    publisher = ha_link.create_publisher(ha_link.HALinkMonitor(), HARegistry(None), None, raw)
+    assert (raw, entity_manager) == (None, None)
+    _runtime.set_ha_link_publisher(publisher)
+    _runtime.set_llm_router(mock.MagicMock())
+    body = client.get("/admin/ha-status", headers=_key()).json()
+    assert body["configured"] is False
+    assert ha_link.link_state(body) == ("not_configured", "not_configured")
+    assert client.get("/health").json()["components"]["home_assistant"] is False
+
+
+def test_only_the_gate_builds_the_entity_manager_and_the_lifespan_tests_for_it():
+    import ast
+
+    tree = ast.parse(Path(_main_module.__file__).read_text(encoding="utf-8"))
+    builders = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "HAEntityManager":
+                    builders.append(fn.name)
+    assert set(builders) == {"_build_ha_channels"}, builders
+    lifespan = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+    guards = [ast.unparse(n.test) for n in ast.walk(lifespan) if isinstance(n, ast.If)]
+    assert "entity_manager is not None" in guards
+    assert "ha_token" not in guards, "a token alone must not start the Home Assistant consumers"

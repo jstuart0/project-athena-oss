@@ -1128,6 +1128,21 @@ async def ensure_gateway_running() -> bool:
         return False
 
 
+def _build_ha_channels(
+    ha_url: Optional[str], ha_token: Optional[str], monitor: "ha_link.HALinkMonitor"
+) -> Tuple[Optional[HomeAssistantClient], Optional[HAEntityManager]]:
+    """Both Home Assistant REST clients, or ``(None, None)`` unless a URL and a
+    token both exist (the rule ``HomeAssistantClient.is_configured`` applies).
+    A token with no URL used to build an entity manager over ``base_url=None``,
+    which raises at startup."""
+    if not (ha_url and ha_token):
+        return None, None
+    return (
+        HomeAssistantClient(url=ha_url, token=ha_token, link_monitor=monitor),
+        HAEntityManager(ha_url=ha_url, ha_token=ha_token, link_monitor=monitor),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
@@ -1186,13 +1201,11 @@ async def lifespan(app: FastAPI):
     # constructor below wrapping this same local again is a no-op).
     ha_link_monitor = ha_link.HALinkMonitor()
     _runtime.set_ha_link(ha_link_monitor)
-    ha_client_raw = (
-        HomeAssistantClient(url=ha_url, token=ha_token, link_monitor=ha_link_monitor) if ha_token else None
-    )
+    ha_client_raw, entity_manager = _build_ha_channels(ha_url, ha_token, ha_link_monitor)
     ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
     if not ha_client:
-        logger.warning("ha_client_not_initialized", reason="No token available")
+        logger.warning("ha_client_not_initialized", reason="No Home Assistant URL and token available")
     if not degraded_permissions()["restricted_entities"]:
         logger.warning(
             "ha_permission_fallback_disabled",
@@ -1246,8 +1259,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_do_prewarm())
 
     # Initialize entity manager for dynamic HA entity discovery
-    if ha_token:
-        entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token, link_monitor=ha_link_monitor)
+    if entity_manager is not None:
         _runtime.set_entity_manager(entity_manager)
         try:
             await entity_manager.refresh_entities()
@@ -1328,7 +1340,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("follow_me_init_failed", error=str(e))
     else:
-        logger.warning("entity_manager_not_initialized", reason="No HA token available")
+        logger.warning("entity_manager_not_initialized", reason="No Home Assistant URL and token available")
 
     cache_client = CacheClient()
     _runtime.set_cache_client(cache_client)
