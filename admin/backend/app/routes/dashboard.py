@@ -19,14 +19,16 @@ from app.utils.rag_urls import check_ssrf_safe
 from app.utils.service_state import NOT_CHECKED_STATUSES, display_status
 import httpx
 
+from app.services import service_urls
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 # Service URLs — configurable via env vars.
 # GATEWAY_URL and ORCHESTRATOR_URL are set by k8s deployments to cluster services.
-_GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
-_ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
+_GATEWAY_BASE = service_urls.gateway_url()
+_ORCHESTRATOR_BASE = service_urls.orchestrator_url()
 
 # Core (non-RAG) services shown on the voice-health card, keyed by their
 # service-registry row name.

@@ -21,7 +21,6 @@ table (``tests/fixtures/ha_link/truth_table.json``).
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +34,7 @@ from app.utils.rag_urls import check_ssrf_safe
 
 logger = structlog.get_logger()
 
+from app.services import service_urls
 LEG_TIMEOUT_SECONDS = 2.0
 MAX_BODY_BYTES = 64 * 1024
 ORCHESTRATOR_PATH = "/admin/ha-status"
@@ -311,10 +311,6 @@ def classify(
 # The fetch: two legs, each its own client
 # ---------------------------------------------------------------------------
 
-def _base(env_name: str, default: str) -> str:
-    return os.getenv(env_name, default).rstrip("/")
-
-
 async def _read_capped(response: httpx.Response) -> Optional[bytes]:
     """The body, or None when it is longer than ``MAX_BODY_BYTES``."""
     body = bytearray()
@@ -355,7 +351,7 @@ async def _get(
 
 
 async def _orchestrator_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Tuple[Any, Optional[str]]:
-    url = _base("ORCHESTRATOR_URL", "http://localhost:8001") + ORCHESTRATOR_PATH
+    url = service_urls.orchestrator_url() + ORCHESTRATOR_PATH
     allowed, _ = await check_ssrf_safe(url)
     if not allowed:
         logger.warning("ha_status_orchestrator_leg", reason="orchestrator_blocked")
@@ -381,7 +377,7 @@ async def _orchestrator_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Tu
 async def _gateway_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Optional[str]:
     """The gateway's ``ha_registry`` word, or None when it couldn't be read. No
     credentials are sent."""
-    url = _base("GATEWAY_URL", "http://localhost:8000") + GATEWAY_PATH
+    url = service_urls.gateway_url() + GATEWAY_PATH
     allowed, _ = await check_ssrf_safe(url)
     if not allowed:
         return None

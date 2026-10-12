@@ -21,6 +21,8 @@ from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
 from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
+from app.services import service_urls
+
 logger = structlog.get_logger()
 
 # n8n configuration
@@ -491,7 +493,7 @@ async def notify_orchestrator_tool_refresh():
 
     Non-fatal if this fails - orchestrator will refresh on next cache expiry.
     """
-    orchestrator_url = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+    orchestrator_url = service_urls.orchestrator_url()
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:

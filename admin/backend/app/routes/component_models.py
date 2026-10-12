@@ -20,6 +20,8 @@ from app.utils.rag_urls import check_ollama_ssrf_safe
 from shared.config import get_config
 from app.utils.service_auth import require_service_or_user_permission
 
+from app.services import service_urls
+
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/component-models", tags=["component-models"])
 
@@ -366,7 +368,7 @@ async def invalidate_cache(
 
 async def _invalidate_orchestrator_cache() -> Dict[str, Any]:
     """Internal function to call orchestrator cache invalidation."""
-    orchestrator_url = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001") + "/admin/invalidate-model-cache"
+    orchestrator_url = service_urls.orchestrator_url() + "/admin/invalidate-model-cache"
 
     try:
         async with httpx.AsyncClient() as client:

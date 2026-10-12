@@ -19,6 +19,8 @@ from app.auth.oidc import get_current_user
 from app.models import User, ToolRegistry, ToolCallingSetting, ToolCallingTrigger, ToolUsageMetric, ToolApiKeyRequirement, ExternalAPIKey
 from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 
+from app.services import service_urls
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/tool-calling", tags=["tool-calling"])
@@ -1497,7 +1499,7 @@ async def refresh_tool_registry(
     import time
     import os
 
-    orchestrator_url = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+    orchestrator_url = service_urls.orchestrator_url()
 
     logger.info("refresh_tool_registry_started",
                orchestrator_url=orchestrator_url,
