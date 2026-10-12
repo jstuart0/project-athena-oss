@@ -4,7 +4,7 @@
     "note": "Every count here is measured against the actual tree, not copied from the plan."
   },
   "callee_sinks": {
-    "sink-escaped": 139,
+    "sink-escaped": 141,
     "sink-unescaped": 0,
     "unresolved": 0
   },
@@ -33,6 +33,7 @@
       "admin/frontend/icons.js",
       "admin/frontend/integrations.js",
       "admin/frontend/llm-components.js",
+      "admin/frontend/memory-management.js",
       "admin/frontend/mission-control.js",
       "admin/frontend/model-config.js",
       "admin/frontend/model-downloads.js",
@@ -55,7 +56,7 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 344
+    "total": 347
   },
   "definitions": [
     {
@@ -75,11 +76,11 @@
   "definitions_entity_map_any_name": [],
   "emerging_intents_raw_text_node_sites": 19,
   "handler_escaping": {
-    "bare_expression_total": 169,
+    "bare_expression_total": 165,
     "builder_set": [
       "admin/frontend/oss-profiles.js:99 actionButton"
     ],
-    "correct_total": 139,
+    "correct_total": 141,
     "handrolled_escape_sites": [],
     "unescaped_quoted_builder": 0,
     "unescaped_quoted_total": 0,
@@ -141,7 +142,7 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 442
+    "total": 436
   },
   "insert_adjacent_html": {
     "files": [
@@ -165,7 +166,7 @@
     "srcdoc": 0,
     "style": [
       "admin/frontend/analytics.js:133",
-      "admin/frontend/app.js:3461",
+      "admin/frontend/app.js:3797",
       "admin/frontend/cloud-providers.js:524",
       "admin/frontend/escalation.js:107",
       "admin/frontend/icons.js:169",
@@ -177,7 +178,7 @@
     ],
     "style_set": [
       "admin/frontend/analytics.js:133",
-      "admin/frontend/app.js:3461",
+      "admin/frontend/app.js:3797",
       "admin/frontend/cloud-providers.js:524",
       "admin/frontend/escalation.js:107",
       "admin/frontend/icons.js:169",

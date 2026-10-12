@@ -5,6 +5,8 @@ import httpx
 import logging
 from typing import List, Optional, Dict, Any
 
+from shared.ha_link import HALinkMonitor, recording_transport
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +23,13 @@ class HomeAssistantClient:
     HomeAssistantNotConfiguredError with a helpful message.
     """
 
-    def __init__(self, url: Optional[str] = None, token: Optional[str] = None):
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        token: Optional[str] = None,
+        *,
+        link_monitor: Optional[HALinkMonitor] = None,
+    ):
         # Get URL from parameter, env var, or leave empty (no hardcoded default)
         self.url = url or os.getenv("HA_URL", "")
         self.token = token or os.getenv("HA_TOKEN", "")
@@ -32,7 +40,7 @@ class HomeAssistantClient:
         if self._disabled:
             logger.warning(
                 "ha_not_configured",
-                extra={"msg": "HomeAssistantClient will not function. Set HA_URL and HA_TOKEN to enable."}
+                extra={"detail": "HomeAssistantClient will not function. Set HA_URL and HA_TOKEN to enable."}
             )
             self.headers = {}
             self.client = None
@@ -45,7 +53,10 @@ class HomeAssistantClient:
                 base_url=self.url,
                 headers=self.headers,
                 verify=False,  # Self-signed cert
-                timeout=30.0
+                timeout=30.0,
+                # With a monitor, every response and transport failure is
+                # recorded for the HA link status (shared.ha_link).
+                transport=recording_transport(link_monitor) if link_monitor is not None else None,
             )
 
     def _check_configured(self) -> None:
@@ -119,19 +130,6 @@ class HomeAssistantClient:
             )
             raise
     
-    async def health_check(self) -> bool:
-        """Check if Home Assistant is reachable.
-
-        Returns False if not configured or if HA is unreachable.
-        """
-        if self._disabled:
-            return False
-        try:
-            response = await self.client.get("/api/")
-            return response.status_code == 200
-        except Exception:
-            return False
-
     async def create_automation(
         self,
         automation_id: str,

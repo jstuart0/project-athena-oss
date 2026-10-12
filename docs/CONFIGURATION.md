@@ -253,6 +253,8 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 
 **Dashboard aggregation (ATHENA-112)**: `GET /api/service-registry/services` computes `healthy_services` and `overall_health` over **enabled** rows only. A disabled row is reported with `health_status: "disabled"` regardless of its last cached poller value (which goes stale the moment it's disabled) and is excluded from both the counts and the health rollup. `enabled_services` / `disabled_services` are new response fields; `total_services` still counts every row for backward compatibility.
 
+**Row monitoring (`monitoring`, `stale`)**: every status-serving read of a registry row (`GET /api/service-registry/services` and `/{name}`, `GET /api/service-control`, `GET /api/dashboard`, `GET /api/status`, and the telemetry service counts) decides the displayed status in one place, `app/utils/service_state.py::display_status`. A row carries `monitoring`: `off` (disabled), `pending` (enabled, never checked), `stale` (last check older than the threshold) or `live`. `health_status` then reads `disabled`, `pending`, `stale` or the cached status, and `last_observed_health` keeps the raw cached value (null when the row is off, so an off row never shows an old status word). The stale threshold is `2 x HEALTH_POLL_INTERVAL_SECONDS + 40 s (the poller's leader lease) + 30 s`, 130 s at the default 30 s interval; an age equal to the threshold is live and a time in the future is live. `overall_health` is `unknown` when no enabled row is live. Mission Control leaves off, pending and stale rows out of its health total and its "needs attention" list (`voice_health.stale_count` reports the stale ones). Switching a row's check off doesn't delete anything; `run_state` and the audit log still read the raw column. `last_health_check` is stored as UTC with a time zone.
+
 **Mission Control voice-health card and RAG test probes (ATHENA-113b)**: the admin-backend's dashboard (`admin/backend/app/routes/dashboard.py`) and voice-test routes (`admin/backend/app/routes/voice_tests.py`) resolve each RAG service's URL independently via `app.utils.rag_urls.resolve_rag_url`, instead of assuming every RAG shares one host behind `RAG_HOST`/`RAG_SERVICE_HOST` -- in Kubernetes each RAG is its own Service, so a single shared host is an OSS-First violation and (when unset) reported every RAG as "unreachable" rather than "not configured". Resolution order per service:
 
 1. **Service registry** -- a row in `athena_service_registry` for that service name (host/port/protocol, or `endpoint_url` directly), configured via the Admin UI's service registry.
@@ -626,6 +628,20 @@ through `admin/backend/app/services/memory_vectors.py`.
 | `HA_TOKEN` | *(empty)* | Long-Lived Access Token |
 | `HA_WS_URL` | *(derived)* | WebSocket URL (usually auto-derived) |
 | `MUSIC_ASSISTANT_URL` | *(empty)* | Music Assistant URL |
+
+#### Home Assistant status on the Dashboard
+
+The Dashboard's Home Assistant card describes the connection Athena actually uses. It is **passive**: nothing is sent to Home Assistant to produce it, and no health or probe route contacts Home Assistant (a request that fails sign-in counts toward Home Assistant's IP ban). Each orchestrator replica records the outcome of the Home Assistant traffic it already makes, plus its area-registry state, so the card shows the last contact and can lag while the house is idle (it says so after 15 minutes).
+
+*What counts.* Only responses on Home Assistant's ordinary read and write paths (`/api/`, `/api/states*`, `/api/services/*` except reloads) and transport errors. A 2xx or 404 is `ok`; 401 is `auth_rejected`; 403 is `forbidden`; 5xx is `ha_error`; a timeout, a refused connection or a TLS failure is `timeout`, `unreachable` or `tls_error`. Admin-only paths (`/api/config/*`) and other 4xx responses (a bad service call) record nothing, so they never colour the card.
+
+*States.* `connected` (green); `attention` (amber): a registry problem beside a working link (rooms not loaded), or a `forbidden` or `ha_error` response fewer than three in a row; `failing` (red): a rejected token, three or more `forbidden` or `ha_error` in a row, or an unreachable, timed-out or TLS-failing connection; `not_configured` (no URL and token) and `unknown` (no contact yet, or the admin panel couldn't reach the orchestrator) are grey. The admin panel never reads a failure on its own way to the orchestrator as a Home Assistant failure: those read `unknown` with an `orchestrator_*` reason. The gateway adds only a muted note ("gateway check failed" or "not checked"), sampled from one gateway replica's `ha_registry`; it never changes the state. One truth table decides the state, both for the card and for the orchestrator's `components.home_assistant` (true for `connected` and `attention`): `tests/fixtures/ha_link/truth_table.json`.
+
+*Across replicas.* Each replica publishes a small summary (enums, counts and timestamps, no names or URLs) to the Redis hash `athena:ha_link:v1` on change and every 15 s, and merges the hash in the background; requests read the merged view from memory and never wait on Redis. The payload's `coverage` is `cluster`, or `replica` with `coverage_reason` `redis_error` or `redis_unconfigured` when Athena could only see its own copy (the card says "this replica only"). The card is only as trustworthy as write access to that Redis hash: each replica reads at most 64 fields, skips any value over 4 KiB or that isn't a valid summary (and deletes it), but a writer that can reach Redis can still publish a plausible one. A replica whose clock is more than 5 s ahead is ignored, event times can't be later than when this replica first saw them, and a silent replica drops out after 15 minutes.
+
+*Routes.* `GET /api/service-registry/home-assistant` (admin-backend; the `read` permission; a service key alone is refused) returns the card's data: `state`, `reason`, `areas`, `last_outcome_at`, `last_success_at`, `coverage`, `replicas_reporting`, `checked_at`, `gateway`, `gateway_sampled`. It asks the orchestrator's `GET /admin/ha-status` (service key per request, no redirects, 64 KiB cap, through the address check that `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` extends, so the orchestrator's private address must be allowed there) and reads the gateway's `/health`. `GET /admin/ha-status` is one of the orchestrator's ingress-gated routes: `{configured, rest, registry, coverage, coverage_reason, replicas_reporting, observed_at}`, with the REST side's last outcome, last success and consecutive failures, and the registry's state, area count and last success and failure with a failure class. It is enums, counts and timestamps only. `/health` stays count-free.
+
+*Not covered.* The orchestrator reads the area registry at startup only, so after a registry failure the card says "restart the orchestrator". The orchestrator's Home Assistant REST clients ignore `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` and don't verify Home Assistant's certificate (as before).
 
 ### Guest Mode
 
@@ -1579,7 +1595,7 @@ every area (a trusted owner).
 
 **When it doesn't work.** `/health` reports the registry's state
 (`ha_registry` in the gateway, `components.ha_registry` in the orchestrator):
-`ok`, `unavailable` (retrying), `refused` or `disabled`. `refused` means Home
+`ok`, `unavailable` (restart the orchestrator to retry), `refused` or `disabled`. `refused` means Home
 Assistant rejected the token; Athena stops retrying for 24 hours so it can't
 trigger Home Assistant's IP ban. Fix the token, then delete the Redis keys
 `athena:ha_registry:refused:*` (or wait 24 hours). Before a roll, the

@@ -1486,7 +1486,7 @@ class PermissionEnforcingHAClient:
     no-op).
 
     The read allowlist is deliberately narrow: only ``get_state``,
-    ``get_states``, ``health_check``, ``close``, and ``is_configured`` pass
+    ``get_states``, ``close``, and ``is_configured`` pass
     through. Any other attribute access (``client``, ``token``, ``url``,
     ``headers``, an unintercepted write method) raises AttributeError --
     the raw authenticated transport is never reachable through the guard.
@@ -1499,7 +1499,7 @@ class PermissionEnforcingHAClient:
 
     _athena_ha_guard = _GUARD_SENTINEL
 
-    _READ_ALLOWLIST = frozenset({"get_state", "get_states", "health_check", "close", "is_configured"})
+    _READ_ALLOWLIST = frozenset({"get_state", "get_states", "close", "is_configured"})
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner

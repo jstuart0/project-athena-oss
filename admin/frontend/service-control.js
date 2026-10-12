@@ -197,6 +197,9 @@ function renderServiceControlBanners() {
         `);
     }
 
+    const pollerWarning = servicePollerBanner(serviceControl.services, Date.now());
+    if (pollerWarning) banners.push(pollerWarning);
+
     container.innerHTML = banners.join('');
 }
 
@@ -217,6 +220,67 @@ function groupServiceControlRows(rows) {
         groups[key].push(row);
     }
     return groups;
+}
+
+/**
+ * The words for a row's display status. app.js keeps an equal copy for the
+ * Dashboard (a Node test pins the two equal on these six codes); both pages
+ * speak one language.
+ */
+function statusLabel(status) {
+    const labels = {
+        healthy: 'Healthy',
+        unhealthy: 'Unhealthy',
+        unconfigured: 'Needs setup',
+        pending: 'Checking…',
+        stale: 'No recent check',
+        disabled: 'Not monitored',
+    };
+    return Object.prototype.hasOwnProperty.call(labels, status) ? labels[status] : String(status);
+}
+
+const _SC_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const _SC_MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/**
+ * Age of an ISO time as words: '12m ago', '3h ago', or at 24 h and more an
+ * absolute '27 Sep' (year added when it isn't this year). spoken=true spells
+ * it out for screen readers ('12 minutes ago', '27 September'). null when the
+ * time can't be read; a future time reads 'just now'.
+ */
+function _scAgeWords(iso, nowMs, spoken) {
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) return null;
+    const ageMs = nowMs - at;
+    if (ageMs < 60 * 1000) return 'just now';
+    const minutes = Math.floor(ageMs / 60000);
+    if (minutes < 60) return spoken ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago` : `${minutes}m ago`;
+    const hours = Math.floor(ageMs / 3600000);
+    if (hours < 24) return spoken ? `${hours} ${hours === 1 ? 'hour' : 'hours'} ago` : `${hours}h ago`;
+    const when = new Date(at);
+    const year = when.getFullYear() === new Date(nowMs).getFullYear() ? '' : ` ${when.getFullYear()}`;
+    return `${when.getDate()} ${(spoken ? _SC_MONTHS_LONG : _SC_MONTHS)[when.getMonth()]}${year}`;
+}
+
+/**
+ * Pure: the one page-level warning when the health checker has stopped (every
+ * enabled row is stale), as HTML; '' otherwise. Said once here rather than
+ * once per row.
+ */
+function servicePollerBanner(services, nowMs) {
+    const enabled = (services || []).filter((row) => row.enabled !== false);
+    if (enabled.length === 0 || !enabled.every((row) => row.monitoring === 'stale')) return '';
+    const checked = enabled.map((row) => Date.parse(row.last_health_check)).filter((ms) => !Number.isNaN(ms));
+    let sentence = "Health checks haven't run yet.";
+    if (checked.length) {
+        const newest = new Date(Math.max(...checked));
+        const sameDay = nowMs - newest.getTime() < 24 * 60 * 60 * 1000;
+        const when = sameDay
+            ? `${String(newest.getHours()).padStart(2, '0')}:${String(newest.getMinutes()).padStart(2, '0')}`
+            : _scAgeWords(newest.toISOString(), nowMs, false);
+        sentence = `Health checks haven't run since ${escapeHtml(when)}.`;
+    }
+    return `<div class="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4" role="status"><p class="text-yellow-200">${sentence} The statuses below may be out of date.</p></div>`;
 }
 
 const RUN_STATE_BADGES = {
@@ -257,6 +321,8 @@ function _healthLine(row) {
         case 'unhealthy':
         case 'degraded':
             return { text: 'Unhealthy', cls: 'text-red-400' };
+        case 'stale':
+            return { text: 'No recent check', cls: 'text-gray-400' };
         case 'pending':
         case null:
         case undefined:
@@ -264,6 +330,12 @@ function _healthLine(row) {
         default:
             return null;
     }
+}
+
+/** "Not monitored · last checked 27 Sep" / "Not monitored · never checked". */
+function _notMonitoredText(lastHealthCheck, nowMs) {
+    const age = lastHealthCheck ? _scAgeWords(lastHealthCheck, nowMs, false) : null;
+    return age ? `Not monitored · last checked ${age}` : 'Not monitored · never checked';
 }
 
 /**
@@ -287,10 +359,18 @@ function renderStatusCell(row) {
     const nativeState = row.native_state
         ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(String(row.native_state))}</div>`
         : '';
-    const errorDetail = row.last_error
-        ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(String(row.last_error).substring(0, 100))}</div>`
+    // A switched-off row isn't watched: say so, with when it was last checked,
+    // and show its old error only as history (grey, dated), never as a live fault.
+    const isOff = row.monitoring === 'off';
+    const offLine = isOff
+        ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(_notMonitoredText(row.last_health_check, Date.now()))}</div>`
         : '';
-    return `<div>${badge}${healthLine}${nativeState}${errorDetail}</div>`;
+    const errorDetail = row.last_error
+        ? (isOff
+            ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml('Last result before it was turned off: ' + String(row.last_error).substring(0, 100))}</div>`
+            : `<div class="text-xs text-red-400 mt-1">${escapeHtml(String(row.last_error).substring(0, 100))}</div>`)
+        : '';
+    return `<div>${badge}${healthLine}${offLine}${nativeState}${errorDetail}</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,47 +619,54 @@ function renderRagServicesTable(ragRows) {
 }
 
 /**
- * Compute a human-readable "freshness" string and CSS class from a
- * last_health_check ISO timestamp.
+ * The small freshness chip under a row's status, keyed off the server's
+ * `monitoring` state so there is one notion of "stale", not a second ladder.
  *
- * Thresholds (ruby r1 / plan Phase 4 E):
- *   < 60s     → silent (no chip rendered)
- *   60s–5min  → grey  "checked Xs ago"
- *   5–15min   → amber "stale (Xm)"
- *   > 15min   → red   "stale (>15m)"
+ *   live    -> grey "checked Xm ago" between 60 s and the server's threshold
+ *   stale   -> grey "last checked 12m ago", with a tooltip about the checker
+ *   off / pending / no time -> nothing (an off row says so in its status cell)
  *
- * Returns {text, colorClass} or null when silent (<60s or null timestamp).
+ * Returns {text, colorClass, title} or null.
  */
-function _freshnessChip(lastHealthCheck) {
-    if (!lastHealthCheck) return null;
-    const ageMs = Date.now() - new Date(lastHealthCheck).getTime();
-    if (isNaN(ageMs) || ageMs < 0) return null;
-    const ageSec = Math.floor(ageMs / 1000);
-    if (ageSec < 60) return null;
-    if (ageSec < 300) {
-        const label = ageSec < 120 ? '1m' : `${Math.floor(ageSec / 60)}m`;
-        return { text: `checked ${label} ago`, colorClass: 'text-gray-500', title: 'How long ago the last health check ran.' };
+function _freshnessChip(service, nowMs) {
+    const now = nowMs === undefined ? Date.now() : nowMs;
+    const monitoring = service && service.monitoring;
+    if (!service || !service.last_health_check || (monitoring !== 'live' && monitoring !== 'stale')) return null;
+    const at = Date.parse(service.last_health_check);
+    if (Number.isNaN(at) || now - at < 60 * 1000) return null;
+    if (monitoring === 'stale') {
+        return {
+            text: `last checked ${_scAgeWords(service.last_health_check, now, false)}`,
+            colorClass: 'text-gray-500',
+            title: "Athena's background checker hasn't reached this service recently.",
+        };
     }
-    if (ageSec < 900) {
-        return { text: `stale (${Math.floor(ageSec / 60)}m)`, colorClass: 'text-yellow-500', title: 'Health check hasn\'t run recently — the poller may be stalled.' };
-    }
-    return { text: 'stale (>15m)', colorClass: 'text-red-500', title: 'Health check hasn\'t run in over 15 minutes — the poller may be stalled.' };
+    return {
+        text: `checked ${_scAgeWords(service.last_health_check, now, false).replace(' ago', '')} ago`,
+        colorClass: 'text-gray-500',
+        title: 'How long ago the last health check ran.',
+    };
 }
 
 /**
- * Build a human-readable aria-label for a service row's status cell.
- * Form: "<ServiceName>: <status>, checked <N> seconds ago[, response <N>ms]."
+ * Build a human-readable aria-label for a service row's status cell, in the
+ * same words as the screen: "<name>: healthy, checked 3 minutes ago, response
+ * 12ms." / "<name>: no recent check, last checked 12 minutes ago." /
+ * "<name>: not monitored, last checked 27 September." A switched-off row never
+ * says "healthy", whatever it last cached.
  */
-function _buildStatusAriaLabel(displayName, healthStatus, lastHealthCheck, responseTimeMs) {
-    const parts = [`${displayName}: ${healthStatus || 'unknown'}`];
-    if (lastHealthCheck) {
-        const ageSec = Math.floor((Date.now() - new Date(lastHealthCheck).getTime()) / 1000);
-        if (!isNaN(ageSec) && ageSec >= 0) {
-            parts.push(`checked ${ageSec} seconds ago`);
-        }
-    }
-    if (responseTimeMs != null) {
-        parts.push(`response ${responseTimeMs}ms`);
+function _buildStatusAriaLabel(displayName, healthStatus, lastHealthCheck, responseTimeMs, monitoring, nowMs) {
+    const now = nowMs === undefined ? Date.now() : nowMs;
+    const age = lastHealthCheck ? _scAgeWords(lastHealthCheck, now, true) : null;
+    let parts;
+    if (monitoring === 'off') {
+        parts = [`${displayName}: not monitored`, age ? `last checked ${age}` : 'never checked'];
+    } else if (monitoring === 'stale') {
+        parts = [`${displayName}: no recent check`, age ? `last checked ${age}` : 'never checked'];
+    } else {
+        parts = [`${displayName}: ${healthStatus || 'unknown'}`];
+        if (age) parts.push(`checked ${age}`);
+        if (responseTimeMs != null) parts.push(`response ${responseTimeMs}ms`);
     }
     return parts.join(', ') + '.';
 }
@@ -591,7 +678,7 @@ function renderRagServiceRow(service) {
 
     // Freshness pill — silent when < 60 s old, own tooltip (ruby M5-adjacent
     // chip tooltip ask). (ruby r1 / plan Phase 4 E)
-    const chip = _freshnessChip(service.last_health_check);
+    const chip = _freshnessChip(service);
     const freshnessPill = chip
         ? `<div class="text-xs ${chip.colorClass} mt-1" title="${escapeHtml(chip.title)}">${escapeHtml(chip.text)}</div>`
         : '';
@@ -608,14 +695,23 @@ function renderRagServiceRow(service) {
         service.health_status,
         service.last_health_check,
         service.last_response_time_ms,
+        service.monitoring,
     );
 
     const isEnabled = service.enabled !== false;
+    // A switched-off row can't be checked on demand (the server answers 409).
+    const refreshOff = service.monitoring === 'off';
     // safeName is for display/attribute positions; rawName feeds the handler
     // attrs below, which escape it themselves at the call site -- wrapping
     // rawName in escapeHtml first would double-escape it (codex r2 F1).
     const rawName = service.name || '';
     const safeName = escapeHtml(rawName);
+    // The id is written once; only the static remainder differs, so no
+    // attribute position carries a conditional expression.
+    const refreshOpen = `<button id="check-btn-${safeName}"`;
+    const refreshButton = refreshOff
+        ? refreshOpen + ' disabled title="Turn the check on to refresh it" class="px-2 py-1 text-xs bg-blue-600 text-white rounded opacity-50 cursor-not-allowed">Refresh</button>'
+        : refreshOpen + ` onclick="checkRagServiceHealth('${escapeJsAttr(rawName)}', this)" class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">Refresh</button>`;
 
     // Check-type label (ATHENA-109): a tcp row has no HTTP path to show.
     const checkTypeLabel = service.protocol === 'tcp'
@@ -651,11 +747,7 @@ function renderRagServiceRow(service) {
                                 class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                             ${isEnabled ? 'Disable' : 'Enable'}
                         </button>
-                        <button id="check-btn-${safeName}"
-                                onclick="checkRagServiceHealth('${escapeJsAttr(rawName)}', this)"
-                                class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
-                            Refresh
-                        </button>
+                        ${refreshButton}
                         <button onclick="showEditRagServiceModal('${escapeJsAttr(rawName)}')"
                                 class="px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white rounded">
                             Edit

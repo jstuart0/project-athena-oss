@@ -36,6 +36,7 @@ this repo's, not the scanner's.
 from __future__ import annotations
 
 import ast
+import functools
 import re
 from pathlib import Path
 
@@ -117,7 +118,7 @@ _ROUTE_PATTERN = re.compile(
     r"""|/sessions"""
     r"""|/session/[^"']*?/warmup"""
     r"""|/admin/(?:invalidate-feature-cache|invalidate-model-cache"""
-    r"""|reset-circuit-breaker|reset-all-circuits)"""
+    r"""|reset-circuit-breaker|reset-all-circuits|ha-status)"""
     r"""|/api/base-knowledge/public["'?]"""
     r"""|/docker/\{action\}"""
     r"""|/process/\{action\}"""
@@ -294,17 +295,42 @@ def _module_level_assign_texts(tree: ast.Module, source: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
-            text = ast.get_source_segment(source, node.value) or ""
+            text = _segment(source, node.value) or ""
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     out[target.id] = text
     return out
 
 
+@functools.lru_cache(maxsize=8)
+def _source_lines(source: str) -> list[str]:
+    """`source` split on \\r\\n, \\n and \\r only (as ast does), computed once per file."""
+    return re.findall(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+", source)
+
+
+def _segment(source: str, node: ast.AST) -> str | None:
+    """`ast.get_source_segment` without re-splitting the whole file on every
+    call. That re-split made one scan of this repo take about five minutes;
+    this scan runs for each test below, so it is cached per file."""
+    try:
+        lineno = node.lineno - 1
+        end_lineno = node.end_lineno - 1
+        col_offset = node.col_offset
+        end_col_offset = node.end_col_offset
+    except (AttributeError, TypeError):
+        return None
+    lines = _source_lines(source)
+    if end_lineno == lineno:
+        return lines[lineno].encode()[col_offset:end_col_offset].decode()
+    first = lines[lineno].encode()[col_offset:].decode()
+    last = lines[end_lineno].encode()[:end_col_offset].decode()
+    return "".join([first, *lines[lineno + 1:end_lineno], last])
+
+
 def _scope_text(scope: ast.AST | None, source: str) -> str:
     if scope is None:
         return source
-    return ast.get_source_segment(source, scope) or source
+    return _segment(source, scope) or source
 
 
 def _local_name_bindings(scope: ast.AST | None, source: str) -> dict[str, str]:
@@ -317,12 +343,12 @@ def _local_name_bindings(scope: ast.AST | None, source: str) -> dict[str, str]:
     nodes = ast.walk(scope) if scope is not None else []
     for node in nodes:
         if isinstance(node, ast.Assign):
-            text = ast.get_source_segment(source, node.value) or ""
+            text = _segment(source, node.value) or ""
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     out[target.id] = text
         elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-            out[node.target.id] = ast.get_source_segment(source, node.iter) or ""
+            out[node.target.id] = _segment(source, node.iter) or ""
     return out
 
 
@@ -361,17 +387,18 @@ def _analyse_file(path: Path):
     preauth_clients = {
         name
         for name, ctor_call in scanner.client_constructions.items()
-        if _has_header_marker(ast.get_source_segment(source, ctor_call) or "")
+        if _has_header_marker(_segment(source, ctor_call) or "")
     }
     # Local `with ... as name:` bindings, scoped per enclosing function --
     # see _CallSiteScanner's docstring for why this one can't be file-global.
     preauth_with_clients = {
         key
         for key, ctor_call in scanner.with_client_constructions.items()
-        if _has_header_marker(ast.get_source_segment(source, ctor_call) or "")
+        if _has_header_marker(_segment(source, ctor_call) or "")
     }
 
     results = []
+    bindings_by_scope: dict[int, dict[str, str]] = {}
     for call_node, scope, callee in scanner.call_sites:
         # Only the call's own arguments decide whether it targets a gated
         # route -- NOT the whole enclosing function's text (that over-broad
@@ -380,11 +407,13 @@ def _analyse_file(path: Path):
         # dict.get()/list.get()-style calls that share a scope with a real
         # orchestrator call).
         arg_nodes = list(call_node.args) + [kw.value for kw in call_node.keywords]
-        bindings = _local_name_bindings(scope, source)
+        if id(scope) not in bindings_by_scope:
+            bindings_by_scope[id(scope)] = _local_name_bindings(scope, source)
+        bindings = bindings_by_scope[id(scope)]
 
         gated = False
         for arg in arg_nodes:
-            arg_text = ast.get_source_segment(source, arg) or ""
+            arg_text = _segment(source, arg) or ""
             if _resolves_to_gated_route(arg_text, bindings, module_assigns):
                 gated = True
                 break
@@ -412,7 +441,7 @@ def _analyse_file(path: Path):
         # function, one headered and one not: the unheadered call read as
         # "headered" purely because the OTHER call's header text appeared
         # somewhere else in the same function body.
-        call_own_text = ast.get_source_segment(source, call_node) or ""
+        call_own_text = _segment(source, call_node) or ""
         header_directly_present = _has_header_marker(call_own_text)
 
         header_via_binding = False
@@ -442,6 +471,7 @@ def _analyse_file(path: Path):
     return results
 
 
+@functools.lru_cache(maxsize=None)
 def _find_gated_call_sites():
     """Returns {file: [result, ...]} for every file with >=1 gated call
     site, and the flat list of (file, result) pairs."""
@@ -511,7 +541,7 @@ def test_AU4_client_constructed_with_header_carve_out_is_exercised():
     found_carve_out_case = False
     for call_node, scope, callee in scanner.call_sites:
         if callee == "orchestrator_client" and call_node.lineno and \
-                "/query" in (ast.get_source_segment(source, call_node) or ""):
+                "/query" in (_segment(source, call_node) or ""):
             scope_text = _scope_text(scope, source)
             if _HEADER_LITERAL not in scope_text:
                 found_carve_out_case = True

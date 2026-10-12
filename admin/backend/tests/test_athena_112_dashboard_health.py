@@ -25,6 +25,8 @@ os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SERVICE_API_KEY"] = _SERVICE_KEY
 os.environ.setdefault("CONTROL_AGENT_ENABLED", "false")
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -90,6 +92,8 @@ def _svc(db, name, *, enabled, health_status, host="127.0.0.1", port=8000):
         service_type="rag",
         enabled=enabled,
         health_status=health_status,
+        # a row the checker reached just now (the display status needs a check time)
+        last_health_check=None if health_status is None else datetime.now(timezone.utc),
     )
     db.add(svc)
     return svc

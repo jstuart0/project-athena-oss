@@ -42,6 +42,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
+from shared import ha_link
 from shared.ha_registry import create_registry
 from orchestrator import room_choice, room_context
 from orchestrator.utterance_kind import is_indoor_temperature_question
@@ -1127,6 +1128,21 @@ async def ensure_gateway_running() -> bool:
         return False
 
 
+def _build_ha_channels(
+    ha_url: Optional[str], ha_token: Optional[str], monitor: "ha_link.HALinkMonitor"
+) -> Tuple[Optional[HomeAssistantClient], Optional[HAEntityManager]]:
+    """Both Home Assistant REST clients, or ``(None, None)`` unless a URL and a
+    token both exist (the rule ``HomeAssistantClient.is_configured`` applies).
+    A token with no URL used to build an entity manager over ``base_url=None``,
+    which raises at startup."""
+    if not (ha_url and ha_token):
+        return None, None
+    return (
+        HomeAssistantClient(url=ha_url, token=ha_token, link_monitor=monitor),
+        HAEntityManager(ha_url=ha_url, ha_token=ha_token, link_monitor=monitor),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
@@ -1183,11 +1199,13 @@ async def lifespan(app: FastAPI):
     # register -- ha_client_raw is never registered or handed to a holder
     # unwrapped; ensure_permission_enforcing is idempotent, so every holder
     # constructor below wrapping this same local again is a no-op).
-    ha_client_raw = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
+    ha_link_monitor = ha_link.HALinkMonitor()
+    _runtime.set_ha_link(ha_link_monitor)
+    ha_client_raw, entity_manager = _build_ha_channels(ha_url, ha_token, ha_link_monitor)
     ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
     if not ha_client:
-        logger.warning("ha_client_not_initialized", reason="No token available")
+        logger.warning("ha_client_not_initialized", reason="No Home Assistant URL and token available")
     if not degraded_permissions()["restricted_entities"]:
         logger.warning(
             "ha_permission_fallback_disabled",
@@ -1241,8 +1259,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_do_prewarm())
 
     # Initialize entity manager for dynamic HA entity discovery
-    if ha_token:
-        entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token)
+    if entity_manager is not None:
         _runtime.set_entity_manager(entity_manager)
         try:
             await entity_manager.refresh_entities()
@@ -1323,7 +1340,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("follow_me_init_failed", error=str(e))
     else:
-        logger.warning("entity_manager_not_initialized", reason="No HA token available")
+        logger.warning("entity_manager_not_initialized", reason="No Home Assistant URL and token available")
 
     cache_client = CacheClient()
     _runtime.set_cache_client(cache_client)
@@ -1340,6 +1357,16 @@ async def lifespan(app: FastAPI):
     )
     _runtime.set_ha_registry(ha_registry)
     await ha_registry.start()
+
+    # Home Assistant link status: this replica's outcomes merged with its peers'
+    # through Redis, served from memory. Local first (R2-H1). It sends nothing
+    # to Home Assistant; `configured` is the HA client's own answer.
+    ha_link_publisher = ha_link.create_publisher(
+        ha_link_monitor, ha_registry, getattr(cache_client, "client", None), ha_client_raw
+    )
+    _runtime.set_ha_link_publisher(ha_link_publisher)
+    if getattr(cache_client, "client", None) is not None:
+        ha_link_task = asyncio.create_task(ha_link_publisher.run())  # long-lived; closed by _runtime.close_all()
 
     # The room vocabulary every reader shares (areas, HA_LIGHT_GROUPS, the
     # satellite map, admin room groups). Local first (R2-H1), then registered.
@@ -9116,6 +9143,16 @@ async def set_follow_me_enabled(enabled: bool):
 # Health and Metrics Endpoints
 # ============================================================================
 
+def _home_assistant_link_view() -> Dict[str, Any]:
+    """The merged Home Assistant link view, from memory (no I/O)."""
+    publisher = _runtime.get_ha_link_publisher()
+    return publisher.view() if publisher is not None else ha_link.empty_view()
+
+
+def _home_assistant_link_ok() -> bool:
+    return ha_link.home_assistant_reachable(_home_assistant_link_view())
+
+
 @app.get("/health")
 async def health_check(detailed: bool = False):
     """
@@ -9134,11 +9171,10 @@ async def health_check(detailed: bool = False):
         }
     }
 
-    # Check Home Assistant (optional - won't fail health check)
+    # Home Assistant (optional - won't fail health check). The last observed
+    # state of Athena's own connection; a probe never contacts Home Assistant.
     try:
-        _ha = _runtime.get_ha_client()
-        ha_healthy = await _ha.health_check() if _ha else False
-        health["components"]["home_assistant"] = ha_healthy
+        health["components"]["home_assistant"] = _home_assistant_link_ok()
     except Exception as e:
         health["components"]["home_assistant"] = False
         logger.warning("health_check: home_assistant probe failed", exc_info=e)
@@ -9346,11 +9382,9 @@ async def readiness_probe():
         ready = False
         logger.warning("readiness_probe: llm_router probe failed", exc_info=e)
 
-    # Check Home Assistant (optional - degraded if down)
+    # Home Assistant (optional - never gates readiness): the last observed state.
     try:
-        _ha = _runtime.get_ha_client()
-        ha_healthy = await _ha.health_check() if _ha else False
-        components["home_assistant"] = ha_healthy
+        components["home_assistant"] = _home_assistant_link_ok()
     except Exception as e:
         components["home_assistant"] = False
         logger.warning("readiness_probe: home_assistant probe failed", exc_info=e)
@@ -9450,6 +9484,23 @@ async def reset_circuit_breaker(service_name: str):
     except Exception as e:
         logger.error(f"Failed to reset circuit breaker for {service_name}: {e}")
         return {"status": "error", "error": str(e)}
+
+
+@app.get("/admin/ha-status", dependencies=[Depends(require_service_caller)])
+async def ha_status():
+    """Athena's own Home Assistant connection as last observed, merged across
+    orchestrator replicas. Enums, counts and timestamps only; no request is
+    sent to Home Assistant."""
+    view = _home_assistant_link_view()
+    return {
+        "configured": view["configured"],
+        "rest": view["rest"],
+        "registry": view["registry"],
+        "coverage": view["coverage"],
+        "coverage_reason": view["coverage_reason"],
+        "replicas_reporting": view["replicas_reporting"],
+        "observed_at": view["observed_at"],
+    }
 
 
 @app.post("/admin/reset-all-circuits", dependencies=[Depends(require_service_caller)])

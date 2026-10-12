@@ -12,6 +12,7 @@ import structlog
 
 from shared.config import get_config
 from shared.guest_policy import parse_json_array_env
+from shared.ha_link import HALinkMonitor, recording_transport
 from shared.ha_registry import tokens
 
 logger = structlog.get_logger(__name__)
@@ -363,7 +364,7 @@ def area_lamp_targets(
 
 
 class HAEntityManager:
-    def __init__(self, ha_url: str, ha_token: str):
+    def __init__(self, ha_url: str, ha_token: str, *, link_monitor: Optional[HALinkMonitor] = None):
         self.ha_url = ha_url
         self.ha_token = ha_token
         self.headers = {
@@ -374,7 +375,8 @@ class HAEntityManager:
             base_url=ha_url,
             headers=self.headers,
             verify=False,
-            timeout=30.0
+            timeout=30.0,
+            transport=recording_transport(link_monitor) if link_monitor is not None else None,
         )
         
         # Cache

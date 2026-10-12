@@ -180,7 +180,11 @@ When adding a new node, helper, or utility:
 
 **Ingress authentication (ATHENA-89, D10)**
 
-Orchestrator ingress routes (`/query*`, `/v1/chat/completions`, `/sessions*`, `/session/{id}/warmup`, `/admin/*` — 13 routes) are gated by `orchestrator/ingress_auth.py::require_service_caller`; mode via `ORCHESTRATOR_INGRESS_AUTH` (`warn`/`enforce`); every in-cluster caller must send `X-Service-Key` and is checked by `tests/unit/test_orchestrator_callers_send_service_key.py`.
+Orchestrator ingress routes (`/query*`, `/v1/chat/completions`, `/sessions*`, `/session/{id}/warmup`, `/admin/*` — 14 routes, including `GET /admin/ha-status`) are gated by `orchestrator/ingress_auth.py::require_service_caller`; mode via `ORCHESTRATOR_INGRESS_AUTH` (`warn`/`enforce`); every in-cluster caller must send `X-Service-Key` and is checked by `tests/unit/test_orchestrator_callers_send_service_key.py`.
+
+**HA link status**
+
+The Dashboard's Home Assistant card is passive. `src/shared/ha_link.py` is the one recorder: both orchestrator HA REST clients (`HomeAssistantClient`, `HAEntityManager`) pass `transport=RecordingTransport(...)`, and `TestHALinkChannels` pins that every httpx client holding the HA token is one of the known sites. Nothing calls Home Assistant for health: no `health_check`, and the `/health*` routes, `/admin/ha-status` and the gateway's `/health` send it nothing (`test_health_probes.py`, `test_gateway_health_no_ha_requests.py` fail on any request). Each replica publishes to Redis `athena:ha_link:v1` off the request path and `view()` is read from memory; `link_state` is the one truth table (`tests/fixtures/ha_link/truth_table.json`, shared with admin-backend's `ha_status.classify`). A registry row's displayed status is decided only in `service_state.display_status`/`apply_monitoring` (a drift test allowlists the raw `health_status` reads), and `last_health_check` is written as aware UTC. `configured` is the HA client's own `is_configured`.
 
 **HA write authorization (ATHENA-69)**
 

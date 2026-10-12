@@ -247,6 +247,29 @@
     }
 
     /**
+     * Pure: the voice health card's text and colours. With no live row to count
+     * (every row stale, pending or off) there is no percentage, so the card is
+     * grey and says so rather than showing 0% in red. Rows the checker hasn't
+     * reached recently are out of the count; the label names them.
+     */
+    function voiceHealthView(data) {
+        const total = Number(data.total) || 0;
+        if (total === 0) {
+            return { valueText: '—', valueClass: 'text-gray-400', label: 'Not checked recently', sparkColor: '#6b7280' };
+        }
+        const pct = data.percentage;
+        const label = data.stale_count > 0
+            ? `${pct}% healthy · ${data.stale_count} not checked recently`
+            : `${pct}% healthy`;
+        return {
+            valueText: `${data.healthy}/${total}`,
+            valueClass: pct >= 90 ? 'text-green-400' : pct >= 70 ? 'text-yellow-400' : 'text-red-400',
+            label,
+            sparkColor: pct >= 90 ? '#22c55e' : pct >= 70 ? '#f59e0b' : '#ef4444',
+        };
+    }
+
+    /**
      * Update voice health card.
      */
     function updateVoiceHealth(data) {
@@ -256,13 +279,14 @@
         const labelEl = document.getElementById('voice-health-label');
         const canvas = document.getElementById('voice-health-sparkline');
 
+        const view = voiceHealthView(data);
         if (valueEl) {
-            valueEl.textContent = `${data.healthy}/${data.total}`;
-            valueEl.className = `text-3xl font-bold ${data.percentage >= 90 ? 'text-green-400' : data.percentage >= 70 ? 'text-yellow-400' : 'text-red-400'}`;
+            valueEl.textContent = view.valueText;
+            valueEl.className = `text-3xl font-bold ${view.valueClass}`;
         }
 
         if (labelEl) {
-            labelEl.textContent = `${data.percentage}% healthy`;
+            labelEl.textContent = view.label;
         }
 
         // Update sparkline
@@ -272,7 +296,7 @@
             } else {
                 state.charts.voiceHealth = Athena.charts.createSparkline(canvas, {
                     data: data.history,
-                    color: data.percentage >= 90 ? '#22c55e' : data.percentage >= 70 ? '#f59e0b' : '#ef4444'
+                    color: view.sparkColor
                 });
             }
         }
@@ -381,6 +405,20 @@
     }
 
     /**
+     * Pure: a service tile's colour, pulse and tooltip from its display status.
+     * Stale, pending and disabled mean "not known right now", not "down": grey,
+     * no pulse. Only a real problem is red and pulsing.
+     */
+    function serviceTileStyle(status) {
+        if (status === 'healthy') return { color: 'green', pulse: false, title: '' };
+        if (status === 'degraded') return { color: 'yellow', pulse: true, title: '' };
+        if (status === 'stale') return { color: 'gray', pulse: false, title: 'No recent check' };
+        if (status === 'pending' || status === 'disabled') return { color: 'gray', pulse: false, title: '' };
+        if (status === 'unconfigured') return { color: 'gray', pulse: false, title: 'Needs setup' };
+        return { color: 'red', pulse: true, title: '' };
+    }
+
+    /**
      * Update service status grid.
      */
     function updateServiceStatus(services) {
@@ -393,13 +431,12 @@
         }
 
         container.innerHTML = services.map(service => {
-            const isHealthy = service.status === 'healthy';
-            const statusColor = isHealthy ? 'green' : service.status === 'degraded' ? 'yellow' : 'red';
+            const tile = serviceTileStyle(service.status);
 
             return `
-                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg">
-                    <div class="w-10 h-10 rounded-full bg-${statusColor}-500/20 flex items-center justify-center mb-2">
-                        <span class="w-3 h-3 rounded-full bg-${statusColor}-500 ${!isHealthy ? 'animate-pulse' : ''}"></span>
+                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg"${tile.title ? ` title="${tile.title}"` : ''}>
+                    <div class="w-10 h-10 rounded-full bg-${tile.color}-500/20 flex items-center justify-center mb-2">
+                        <span class="w-3 h-3 rounded-full bg-${tile.color}-500 ${tile.pulse ? 'animate-pulse' : ''}"></span>
                     </div>
                     <p class="text-xs text-gray-300 text-center truncate w-full">${escapeHtml(service.name)}</p>
                     ${service.latency_ms ? `<p class="text-xs text-gray-500">${service.latency_ms}ms</p>` : ''}

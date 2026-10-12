@@ -42,7 +42,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -493,7 +493,7 @@ async def _poll_all_services(semaphore: asyncio.Semaphore) -> dict:
         tasks = [_poll_one(client, semaphore, *t) for t in targets]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     summary = {'services_polled': len(targets), 'healthy': 0, 'unhealthy': 0, 'unknown': 0}
 
     with get_db_context() as db:

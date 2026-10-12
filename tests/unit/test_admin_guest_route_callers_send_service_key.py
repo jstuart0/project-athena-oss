@@ -72,7 +72,7 @@ GATED_PATH = re.compile(
     r"|/internal/\{download_id\}/progress"
 )
 
-# Every family that holds one of the 93 reviewed routes. Wider than
+# Every family that holds one of the 94 reviewed routes. Wider than
 # GATED_PATH on purpose: the route-mapping tests look at every call into
 # these families and decide by the route it maps to.
 REVIEWED_FAMILY = re.compile(
@@ -106,7 +106,7 @@ PREDECESSOR_TARGETS = {
     "src/orchestrator/main.py": {"get_origin_placeholder_patterns"},
 }
 
-# The callers of the 93 reviewed routes.
+# The callers of the 94 reviewed routes.
 REVIEWED_TARGETS = {
     "src/shared/admin_config.py": {
         "get_intent_routing", "get_provider_routing", "get_llm_backends", "get_feature_flags",
@@ -693,7 +693,7 @@ def _family_calls():
 
 def test_each_scanned_call_maps_to_a_service_reachable_route():
     routes = reviewed_routes()
-    assert len(routes) == 93
+    assert len(routes) == 94
     problems, mapped = [], {}
     for rel, name, lineno, method, ops in _family_calls():
         if (rel, name) == DEAD_USER_ROUTE_CALLER:
@@ -746,7 +746,7 @@ def test_route_mapping_self_test():
 def test_the_only_caller_of_a_user_only_route_is_the_dead_one():
     routes = reviewed_routes()
     user_only = {op for op, (kind, _p) in routes.items() if kind == "user"}
-    assert len(user_only) == 42
+    assert len(user_only) == 43
     callers = {}
     for rel, name, lineno, _method, ops in _family_calls():
         if any(op in user_only for op in ops):

@@ -10,6 +10,8 @@ on:
       - "admin/frontend/**"
       - "tests/unit/test_admin_frontend_escaping.py"
       - "tests/unit/test_frontend_guard_scripts.py"
+      - "tests/unit/test_admin_frontend_system_config_status_mapping.py"
+      - "tests/unit/test_voice_pipelines_status_tone.py"
       - "scripts/_frontend_escape_scan.py"
       - "scripts/check-frontend-escape-load-order.js"
       - "scripts/check-frontend-cache-busters.py"
@@ -28,6 +30,8 @@ on:
       - "admin/frontend/**"
       - "tests/unit/test_admin_frontend_escaping.py"
       - "tests/unit/test_frontend_guard_scripts.py"
+      - "tests/unit/test_admin_frontend_system_config_status_mapping.py"
+      - "tests/unit/test_voice_pipelines_status_tone.py"
       - "scripts/_frontend_escape_scan.py"
       - "scripts/check-frontend-escape-load-order.js"
       - "scripts/check-frontend-cache-busters.py"
@@ -117,6 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pytest tests/unit/test_frontend_guard_scripts.py -v
+
+      - name: Run the /api/status page tests (stale and unknown states render grey)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/unit/test_admin_frontend_system_config_status_mapping.py tests/unit/test_voice_pipelines_status_tone.py -v
 
       - name: Exactly one file defines escapeHtml/escapeJsAttr (Phase 5, absolute)
         shell: bash

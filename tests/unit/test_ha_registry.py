@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -670,3 +671,100 @@ def test_a_forced_refresh_outside_the_interval_still_counts_against_the_forced_l
         assert fetcher.calls == 3
 
     run(go())
+
+
+# -- link summary: wall-clock facts for the Home Assistant link status ------
+
+WALL = [datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)]
+
+
+def wall_registry(fetcher, **kwargs):
+    WALL[0] = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
+    return hr.HARegistry(fetcher, monotonic=Clock(), wall=lambda: WALL[0], **kwargs)
+
+
+LINK_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class"}
+
+
+def test_link_summary_has_exactly_five_keys_and_no_names():
+    reg = wall_registry(FakeFetcher())
+    run(reg.ensure(1))
+    summary = reg.link_summary()
+    assert set(summary) == LINK_KEYS
+    assert summary["state"] == "ok" and summary["areas"] == snapshot().counts()["areas"]
+    assert summary["last_success_at"] == WALL[0].isoformat()
+    assert summary["last_failure_at"] is None and summary["last_failure_class"] is None
+    assert not any(name in json.dumps(summary) for name in RAW["areas"][0].values() if isinstance(name, str))
+
+
+def test_a_disabled_registry_summarises_as_disabled_with_nothing_else():
+    assert hr.HARegistry(None).link_summary() == {
+        "state": "disabled", "areas": None, "last_success_at": None,
+        "last_failure_at": None, "last_failure_class": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "error,expected_class",
+    [
+        (asyncio.TimeoutError(), "timeout"),
+        (TimeoutError(), "timeout"),
+        (ConnectionRefusedError("down"), "unreachable"),
+        (OSError("net"), "unreachable"),
+        (ValueError("odd"), "other"),
+    ],
+)
+def test_a_failed_fetch_records_when_and_what_class_of_failure(error, expected_class):
+    reg = wall_registry(FakeFetcher(error=error))
+    run(reg.ensure(1))
+    summary = reg.link_summary()
+    assert summary["state"] == "unavailable"
+    assert summary["last_failure_at"] == WALL[0].isoformat()
+    assert summary["last_failure_class"] == expected_class
+    assert summary["last_success_at"] is None
+
+
+def test_a_fetch_over_its_deadline_is_a_timeout_failure():
+    reg = wall_registry(FakeFetcher(gate=asyncio.Event()), fetch_timeout=0.05)
+    run(reg.ensure(2))
+    assert reg.link_summary()["last_failure_class"] == "timeout"
+
+
+def test_a_success_after_a_failure_keeps_both_times():
+    fetcher = FakeFetcher(error=OSError("down"))
+    clock = Clock()
+    reg = hr.HARegistry(fetcher, monotonic=clock, wall=lambda: WALL[0], ttl=300, min_refresh_interval=60)
+
+    async def go():
+        WALL[0] = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
+        await reg.ensure(1)
+        fetcher.error = None
+        clock.now += 400
+        WALL[0] = datetime(2026, 10, 11, 12, 10, 0, tzinfo=timezone.utc)
+        await reg.ensure(1)
+
+    run(go())
+    summary = reg.link_summary()
+    assert summary["state"] == "ok"
+    assert summary["last_failure_at"] == "2026-10-11T12:00:00+00:00"
+    assert summary["last_success_at"] == "2026-10-11T12:10:00+00:00"
+
+
+def test_an_auth_refusal_records_a_failure_of_class_auth():
+    reg = wall_registry(FakeFetcher(error=hr.AuthInvalid()))
+    run(reg.ensure(1))
+    summary = reg.link_summary()
+    assert summary["state"] == "refused"
+    assert (summary["last_failure_at"], summary["last_failure_class"]) == (WALL[0].isoformat(), "auth")
+
+
+def test_a_start_that_finds_the_refusal_marker_records_class_auth_now():
+    marker = hr.token_marker_key(TOKEN, "service-key-for-tests")
+    redis = FakeRedis(present={f"athena:ha_registry:refused:{marker}"})
+    fetcher = FakeFetcher()
+    reg = wall_registry(fetcher, token_marker_key=marker, redis=redis)
+    run(reg.start())
+    summary = reg.link_summary()
+    assert fetcher.calls == 0
+    assert (summary["state"], summary["last_failure_class"]) == ("refused", "auth")
+    assert summary["last_failure_at"] == WALL[0].isoformat()

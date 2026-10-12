@@ -11,6 +11,7 @@ SQLite-in-memory DB via the existing db/client fixture pattern
 """
 import os
 import sys
+from datetime import datetime, timezone
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 if os.path.join(_REPO_ROOT, 'src') not in sys.path:
@@ -157,6 +158,7 @@ def test_envelope_carries_protocol_and_health_fields_for_a_tcp_row(client, db):
         name="redis-tcp", display_name="Redis", host="redis.athena-prod.svc",
         port=6379, protocol="tcp", enabled=True, health_status="healthy",
         health_message="tcp connect ok", last_response_time_ms=12,
+        last_health_check=datetime.now(timezone.utc),
     )
     db.add(tcp_row)
     db.commit()

@@ -1,0 +1,856 @@
+{
+  "description": "Link state truth table (shared by orchestrator link_state and admin classify). A tie between the newest success and the newest failure resolves to the success.",
+  "cases": [
+    {
+      "id": "not_configured_with_failures_recorded",
+      "row": 1,
+      "view": {
+        "configured": false,
+        "rest": {
+          "last_outcome": "unreachable",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 5
+        },
+        "registry": {
+          "state": "refused",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "not_configured",
+      "reason": "not_configured",
+      "home_assistant": false
+    },
+    {
+      "id": "not_configured_with_a_success_recorded",
+      "row": 1,
+      "view": {
+        "configured": false,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 3,
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "not_configured",
+      "reason": "not_configured",
+      "home_assistant": false
+    },
+    {
+      "id": "waiting_nothing_recorded",
+      "row": 2,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "unknown",
+      "reason": "waiting",
+      "home_assistant": false
+    },
+    {
+      "id": "waiting_registry_disabled",
+      "row": 2,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "unknown",
+      "reason": "waiting",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_rest_only",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "auth_rejected",
+          "last_outcome_at": "2026-10-11T11:58:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_newer_than_success",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "auth_rejected",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:20:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_after_many",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "auth_rejected",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T07:00:00+00:00",
+          "consecutive_failures": 9
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_registry_auth_no_success",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "refused",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:58:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_registry_auth_newer_than_rest_success",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:40:00+00:00",
+          "last_success_at": "2026-10-11T11:40:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "refused",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:55:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_rest_newer_than_registry_failure",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "auth_rejected",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:51:00+00:00",
+          "last_failure_class": "timeout"
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "forbidden_once_after_success",
+      "row": 4,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "forbidden",
+      "home_assistant": true
+    },
+    {
+      "id": "forbidden_twice",
+      "row": 4,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 2
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "forbidden",
+      "home_assistant": true
+    },
+    {
+      "id": "ha_error_once_after_success",
+      "row": 4,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ha_error",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "ha_error",
+      "home_assistant": true
+    },
+    {
+      "id": "ha_error_twice_no_success",
+      "row": 4,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ha_error",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 2
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "ha_error",
+      "home_assistant": true
+    },
+    {
+      "id": "forbidden_three_in_a_row",
+      "row": 5,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 3
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "forbidden",
+      "home_assistant": false
+    },
+    {
+      "id": "ha_error_five_in_a_row",
+      "row": 5,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ha_error",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 5
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "ha_error",
+      "home_assistant": false
+    },
+    {
+      "id": "timeout",
+      "row": 6,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "timeout",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "timeout",
+      "home_assistant": false
+    },
+    {
+      "id": "unreachable",
+      "row": 6,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "unreachable",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 2
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "unreachable",
+      "home_assistant": false
+    },
+    {
+      "id": "tls_error",
+      "row": 6,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "tls_error",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "tls_error",
+      "home_assistant": false
+    },
+    {
+      "id": "unclassified_error_reads_unreachable",
+      "row": 6,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "error",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 1
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "unreachable",
+      "home_assistant": false
+    },
+    {
+      "id": "registry_timeout_no_success",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "timeout"
+        }
+      },
+      "state": "failing",
+      "reason": "timeout",
+      "home_assistant": false
+    },
+    {
+      "id": "registry_unreachable_no_success",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "unreachable"
+        }
+      },
+      "state": "failing",
+      "reason": "unreachable",
+      "home_assistant": false
+    },
+    {
+      "id": "registry_other_no_success",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other"
+        }
+      },
+      "state": "failing",
+      "reason": "unreachable",
+      "home_assistant": false
+    },
+    {
+      "id": "registry_failure_after_rest_success_timeout",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:50:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:00:00+00:00",
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "timeout"
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_failure_after_rest_success_other",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:50:00+00:00",
+          "last_success_at": "2026-10-11T11:50:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other"
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_failure_after_registry_success",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "unreachable"
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_refused_rest_success_newer",
+      "row": 8,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "refused",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:40:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "attention",
+      "reason": "registry_refused",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_refused_state_with_old_failure",
+      "row": 8,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "refused",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:00:00+00:00",
+          "last_failure_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "attention",
+      "reason": "registry_refused",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_unavailable_state_rest_success",
+      "row": 9,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "registry_ok_but_areas_unknown",
+      "row": 9,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": null,
+          "last_success_at": "2026-10-11T11:55:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_rest_and_registry",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:57:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_rest_only_registry_disabled",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_registry_success_only",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:57:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_zero_areas",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 0,
+          "last_success_at": "2026-10-11T11:57:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_after_old_auth_rejection",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:57:00+00:00",
+          "last_failure_at": "2026-10-11T03:40:00+00:00",
+          "last_failure_class": "auth"
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "connected_registry_success_newer_than_old_rest_failure",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "timeout",
+          "last_outcome_at": "2026-10-11T11:20:00+00:00",
+          "last_success_at": "2026-10-11T11:10:00+00:00",
+          "consecutive_failures": 2
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:57:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "tie_success_and_failure_resolves_to_success",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:58:00+00:00",
+          "last_success_at": "2026-10-11T11:58:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:55:00+00:00",
+          "last_failure_at": "2026-10-11T11:58:00+00:00",
+          "last_failure_class": "timeout"
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    }
+  ]
+}
