@@ -6,27 +6,23 @@ Provides endpoints for managing HA voice pipelines:
 - Get/set preferred pipeline
 - Switch between streaming (Ollama) and non-streaming (Gateway) modes
 
-Connects to HA via WebSocket API for pipeline operations.
+Connects to HA through the shared WebSocket session (``ha_access.ws_session``),
+whose pipelines profile can send only the pipeline list and set-preferred
+commands. Failures reach the browser as closed phrases (``ha_access.http_error``),
+never Home Assistant's own text.
 """
-import os
-import json
-import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import structlog
-import websockets
 
 from app.auth.oidc import get_current_user
+from app.services import ha_access
 from app.utils.service_auth import require_user_permission
+from shared import ha_ws
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/ha-pipelines", tags=["ha-pipelines"])
-
-# Home Assistant configuration - defaults empty, should be configured via env or admin backend
-HA_URL = os.getenv("HA_URL", "")
-HA_WS_URL = os.getenv("HA_WS_URL", "")
-HA_TOKEN = os.getenv("HA_TOKEN", "")
 
 # Pipeline modes - Three options for different use cases
 PIPELINE_MODES = {
@@ -76,82 +72,16 @@ async def ha_websocket_command(command: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         The response dict from HA
     """
-    if not HA_TOKEN:
-        raise HTTPException(
-            status_code=500,
-            detail="HA_TOKEN not configured"
-        )
-
-    ws_url = HA_WS_URL.replace("https://", "wss://").replace("http://", "ws://")
-    if not ws_url.endswith("/api/websocket"):
-        ws_url = ws_url.rstrip("/") + "/api/websocket"
-
-    import ssl
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
     try:
-        async with websockets.connect(
-            ws_url,
-            ssl=ssl_context,
-            close_timeout=10
-        ) as ws:
-            # Wait for auth_required message
-            auth_required = await asyncio.wait_for(ws.recv(), timeout=5)
-            auth_msg = json.loads(auth_required)
+        async with ha_access.ws_session(ha_ws.PIPELINES) as ws:
+            response = await ws.command(command)
+    except Exception as e:
+        raise ha_access.http_error(e)
 
-            if auth_msg.get("type") != "auth_required":
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Unexpected HA message: {auth_msg}"
-                )
-
-            # Send authentication
-            await ws.send(json.dumps({
-                "type": "auth",
-                "access_token": HA_TOKEN
-            }))
-
-            # Wait for auth result
-            auth_result = await asyncio.wait_for(ws.recv(), timeout=5)
-            auth_result_msg = json.loads(auth_result)
-
-            if auth_result_msg.get("type") != "auth_ok":
-                raise HTTPException(
-                    status_code=401,
-                    detail=f"HA authentication failed: {auth_result_msg}"
-                )
-
-            # Send the command with ID
-            command_with_id = {**command, "id": 1}
-            await ws.send(json.dumps(command_with_id))
-
-            # Wait for response
-            response = await asyncio.wait_for(ws.recv(), timeout=10)
-            response_msg = json.loads(response)
-
-            if not response_msg.get("success", True):
-                error = response_msg.get("error", {})
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"HA command failed: {error.get('message', 'Unknown error')}"
-                )
-
-            return response_msg
-
-    except websockets.exceptions.WebSocketException as e:
-        logger.error("ha_websocket_error", error=str(e))
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to connect to Home Assistant: {str(e)}"
-        )
-    except asyncio.TimeoutError:
-        logger.error("ha_websocket_timeout")
-        raise HTTPException(
-            status_code=504,
-            detail="Home Assistant WebSocket timeout"
-        )
+    if not response.get("success", True):
+        logger.warning("ha_pipeline_command_failed", command_type=command.get("type"))
+        raise HTTPException(status_code=400, detail="Home Assistant rejected the command.")
+    return response
 
 
 # =============================================================================
@@ -194,8 +124,8 @@ async def list_pipelines() -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("list_pipelines_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("list_pipelines_failed", error_class=type(e).__name__)
+        raise ha_access.http_error(e)
 
 
 @router.get("/pipelines/preferred", dependencies=[Depends(require_user_permission("read"))])
@@ -260,23 +190,23 @@ async def get_preferred_pipeline() -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("get_preferred_pipeline_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_preferred_pipeline_failed", error_class=type(e).__name__)
+        raise ha_access.http_error(e)
 
 
 # =============================================================================
 # Pipeline Switching
 # =============================================================================
 
-@router.post("/pipelines/set-preferred")
+@router.post("/pipelines/set-preferred", dependencies=[Depends(require_user_permission("write"))])
 async def set_preferred_pipeline(
     request: SetPipelineRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Set the preferred voice pipeline in Home Assistant.
 
-    Requires authentication.
+    Requires a signed-in user with write permission.
     """
     try:
         # First verify the pipeline exists
@@ -309,7 +239,7 @@ async def set_preferred_pipeline(
             "pipeline_preference_changed",
             pipeline_id=request.pipeline_id,
             pipeline_name=pipeline_info.get("name") if pipeline_info else "unknown",
-            user=current_user.get("username")
+            user=current_user.username
         )
 
         return {
@@ -322,8 +252,8 @@ async def set_preferred_pipeline(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("set_preferred_pipeline_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("set_preferred_pipeline_failed", error_class=type(e).__name__)
+        raise ha_access.http_error(e)
 
 
 @router.post("/mode/set", dependencies=[Depends(require_user_permission("write"))])
@@ -381,12 +311,9 @@ async def set_voice_mode(
                 break
 
         if not target_pipeline:
-            # List available conversation engines for better error message
-            available_engines = [f"{p.get('name')} ({p.get('conversation_engine')})" for p in pipelines]
             raise HTTPException(
                 status_code=404,
-                detail=f"No pipeline found for mode '{request.mode}'. "
-                       f"Available pipelines: {available_engines}"
+                detail=f"No pipeline found for mode '{request.mode}'."
             )
 
         # Set as preferred
@@ -419,8 +346,8 @@ async def set_voice_mode(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("set_voice_mode_failed", error=str(e), mode=request.mode)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("set_voice_mode_failed", error_class=type(e).__name__, mode=request.mode)
+        raise ha_access.http_error(e)
 
 
 @router.get("/modes", dependencies=[Depends(require_user_permission("read"))])
@@ -442,42 +369,3 @@ async def get_available_modes() -> Dict[str, Any]:
             for mode_id, config in PIPELINE_MODES.items()
         ]
     }
-
-
-# =============================================================================
-# Health Check
-# =============================================================================
-
-@router.get("/health", dependencies=[Depends(require_user_permission("read"))])
-async def check_ha_connection() -> Dict[str, Any]:
-    """
-    Check connectivity to Home Assistant WebSocket API.
-
-    Tests authentication and basic command execution.
-    """
-    try:
-        response = await ha_websocket_command({
-            "type": "assist_pipeline/pipeline/list"
-        })
-
-        pipeline_count = len(response.get("result", {}).get("pipelines", []))
-
-        return {
-            "status": "healthy",
-            "connected": True,
-            "pipeline_count": pipeline_count,
-            "ha_url": HA_URL.replace(HA_TOKEN, "***") if HA_TOKEN else HA_URL
-        }
-
-    except HTTPException as e:
-        return {
-            "status": "unhealthy",
-            "connected": False,
-            "error": e.detail
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "connected": False,
-            "error": str(e)
-        }

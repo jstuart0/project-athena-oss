@@ -59,19 +59,6 @@ class FakeFetcher:
         return copy.deepcopy(self.raw)
 
 
-class FakeRedis:
-    def __init__(self, present=()):
-        self.keys = set(present)
-        self.sets = []
-
-    async def exists(self, key):
-        return 1 if key in self.keys else 0
-
-    async def set(self, key, value, ex=None):
-        self.keys.add(key)
-        self.sets.append((key, value, ex))
-
-
 def registry(fetcher, clock=None, **kwargs):
     return hr.HARegistry(fetcher, monotonic=clock or Clock(), **kwargs)
 
@@ -483,47 +470,32 @@ def test_a_fetch_over_its_deadline_reads_unavailable():
 TOKEN = "tok-" + "x" * 40
 
 
-def test_auth_invalid_latches_refused_and_writes_a_24_hour_hmac_marker():
-    redis = FakeRedis()
-    marker = hr.token_marker_key(TOKEN, "service-key-for-tests")
-    reg = registry(FakeFetcher(error=hr.AuthInvalid()), token_marker_key=marker, redis=redis)
+def test_auth_invalid_reads_refused_and_notes_a_failure_of_class_auth():
+    reg = registry(FakeFetcher(error=hr.AuthInvalid()))
     run(reg.ensure(1))
     assert reg.state == hr.STATE_REFUSED
-    [(key, value, ttl)] = redis.sets
-    assert key == f"athena:ha_registry:refused:{marker}" and ttl == 86400
-    assert TOKEN not in key and len(marker) == 16
+    assert reg.link_summary()["last_failure_class"] == "auth"
 
 
-def test_the_marker_key_is_keyed_on_the_service_key_and_absent_without_one():
-    assert hr.token_marker_key(TOKEN, "k1") != hr.token_marker_key(TOKEN, "k2")
-    assert hr.token_marker_key(TOKEN, "k1") == hr.token_marker_key(TOKEN, "k1")
-    assert hr.token_marker_key(TOKEN, "") is None and hr.token_marker_key(TOKEN, None) is None
+def test_a_registry_keeps_no_refusal_marker_of_its_own():
+    text = Path(hr.__file__).read_text(encoding="utf-8")
+    assert "athena:ha_registry" not in text and "_redis" not in text, "the shared latch owns the stop"
 
 
-def test_without_a_service_key_the_latch_is_in_process_only():
-    redis = FakeRedis()
-    reg = registry(FakeFetcher(error=hr.AuthInvalid()), token_marker_key=None, redis=redis)
+@pytest.mark.parametrize("reason", ["latched", "admin_only", "budget"])
+def test_a_fetch_the_latch_withheld_reads_refused_with_class_auth(reason):
+    reg = registry(FakeFetcher(error=hr.HAWithheld(reason)))
     run(reg.ensure(1))
-    assert reg.state == hr.STATE_REFUSED and redis.sets == []
+    assert reg.state == hr.STATE_REFUSED and reg.link_summary()["last_failure_class"] == "auth"
 
 
-def test_a_new_client_with_the_marker_makes_no_fetches_and_logs_an_error_every_start():
-    marker = hr.token_marker_key(TOKEN, "service-key-for-tests")
-    redis = FakeRedis(present={f"athena:ha_registry:refused:{marker}"})
-    for _ in range(2):
-        fetcher = FakeFetcher()
-        reg = registry(fetcher, token_marker_key=marker, redis=redis)
-        with structlog.testing.capture_logs() as logs:
-            run(reg.start())
-            run(reg.ensure(1, refresh=True))
-        assert fetcher.calls == 0 and reg.state == hr.STATE_REFUSED
-        assert any(
-            e["event"] == "ha_registry_auth_refused_marker_present" and e["log_level"] == "error"
-            for e in logs
-        )
+def test_a_gated_fetch_reads_unavailable_not_refused():
+    reg = registry(FakeFetcher(error=hr.HAWithheld("gated")))
+    run(reg.ensure(1))
+    assert reg.state == hr.STATE_UNAVAILABLE and reg.link_summary()["last_failure_class"] == "other"
 
 
-def test_a_refused_registry_makes_no_fetcher_calls_over_fifty_turns():
+def test_a_refused_registry_tries_again_at_the_normal_interval_not_on_every_turn():
     fetcher = FakeFetcher(error=hr.AuthInvalid())
     clock = Clock()
     reg = registry(fetcher, clock)
@@ -532,43 +504,152 @@ def test_a_refused_registry_makes_no_fetcher_calls_over_fifty_turns():
         await reg.ensure(1)
         assert fetcher.calls == 1
         for _ in range(50):
-            clock.now += 1000
+            clock.now += 1
             reg.current()
             reg.request_refresh(force=True)
-            await reg.ensure(0.01, refresh=True)
+            await reg.ensure(0.01, refresh=False)
+        assert fetcher.calls == 1, "inside the minimum interval nothing is tried"
+        clock.now += 61
+        reg.request_refresh(force=True)
+        await reg.ensure(1)
 
     run(go())
-    assert fetcher.calls == 1
+    assert fetcher.calls == 2
+
+
+def test_a_refused_registry_recovers_by_itself_once_the_latch_lets_a_fetch_through():
+    fetcher = FakeFetcher(error=hr.HAWithheld("latched"))
+    clock = Clock()
+    reg = registry(fetcher, clock)
+
+    async def go():
+        await reg.ensure(1)
+        assert reg.state == hr.STATE_REFUSED
+        fetcher.error = None
+        clock.now += 61
+        await reg.ensure(1, refresh=True)
+
+    run(go())
+    assert reg.state == hr.STATE_OK and reg.current() is not None
+
+
+def test_replaced_credentials_give_a_refused_registry_a_fresh_try_now():
+    fetcher = FakeFetcher(error=hr.AuthInvalid())
+    clock = Clock()
+    reg = registry(fetcher, clock)
+
+    async def go():
+        await reg.ensure(1)
+        fetcher.error = None
+        clock.now += 1  # well inside the minimum interval
+        reg.credentials_changed()
+        await reg.ensure(1)
+
+    run(go())
+    assert fetcher.calls == 2 and reg.state == hr.STATE_OK
+
+
+def test_a_blocked_address_reads_unavailable_class_other_with_the_ban_flag_until_a_fetch_works():
+    fetcher = FakeFetcher(error=hr.HABanned())
+    clock = Clock()
+    reg = registry(fetcher, clock)
+
+    async def go():
+        await reg.ensure(1)
+        banned = reg.link_summary()
+        fetcher.error = None
+        clock.now += 61
+        await reg.ensure(1, refresh=True)
+        return banned, reg.link_summary()
+
+    banned, recovered = run(go())
+    assert (banned["state"], banned["last_failure_class"], banned["ban_suspected"]) == ("unavailable", "other", True)
+    assert (recovered["state"], recovered["ban_suspected"]) == ("ok", False)
+
+
+def test_the_registry_is_enabled_exactly_while_home_assistant_is_configured():
+    flag = {"on": False}
+    fetcher = FakeFetcher()
+    reg = registry(fetcher, configured=lambda: flag["on"])
+
+    async def go():
+        await reg.ensure(1)
+        assert (fetcher.calls, reg.state) == (0, hr.STATE_DISABLED)
+        flag["on"] = True
+        await reg.ensure(1)
+        enabled = (fetcher.calls, reg.state)
+        flag["on"] = False
+        return enabled, reg.link_summary()["state"]
+
+    enabled, after = run(go())
+    assert enabled == (1, hr.STATE_OK) and after == hr.STATE_DISABLED
+
+
+def test_a_credentials_not_configured_error_from_the_fetch_reads_disabled():
+    flag = {"on": True}
+    reg = registry(FakeFetcher(error=hr.HomeAssistantNotConfiguredError("x")), configured=lambda: flag["on"])
+
+    async def go():
+        flag["on"] = False
+        await reg.ensure(1)
+
+    run(go())
+    assert reg.state == hr.STATE_DISABLED
+
+
+def test_read_is_current_that_asks_for_a_refresh_only_when_stale():
+    fetcher = FakeFetcher()
+    clock = Clock()
+    reg = registry(fetcher, clock)
+
+    async def go():
+        assert reg.read() is None  # nothing yet: a refresh starts
+        await asyncio.sleep(0.01)
+        first = fetcher.calls
+        got = reg.read()  # fresh now
+        await asyncio.sleep(0.01)
+        clock.now += 400  # past the ttl and the minimum interval
+        reg.read()
+        await asyncio.sleep(0.01)
+        return first, got, fetcher.calls
+
+    first, got, calls = run(go())
+    assert first == 1 and got is not None and calls == 2
 
 
 # -- the send allowlist -----------------------------------------------------
 
 def test_only_auth_and_the_three_list_commands_may_be_sent():
+    from shared import ha_ws
+
     assert hr._ALLOWED_TYPES == frozenset({
         "auth", "config/area_registry/list", "config/device_registry/list", "config/entity_registry/list",
     })
+    assert hr._ALLOWED_TYPES == ha_ws.REGISTRY_READ.types | {"auth"}
 
 
-class _Socket:
-    def __init__(self):
-        self.sent = []
+def test_the_real_fetcher_reads_through_a_session_limited_to_the_registry_read_profile():
+    from shared import ha_auth, ha_registry, ha_ws
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
 
-    async def send(self, text):
-        self.sent.append(json.loads(text))
+    from .ha_auth_fakes import FakeHA
 
+    fake = FakeHA()
+    creds = resolve(KeyLookup.found("https://ha-fixture.invalid", "sekret-token-123"), {}, previous=None, service_api_key="k")
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+    sessions = []
+    original = ha_ws.ha_ws_session
 
-@pytest.mark.parametrize("frame_type", ["call" + "_service", "subscribe_events", "config/area_registry/create", "", None])
-def test_sending_any_other_frame_type_raises_before_it_reaches_the_socket(frame_type):
-    ws = _Socket()
-    with pytest.raises(hr.ForbiddenFrameType):
-        run(hr._send(ws, {"id": 9, "type": frame_type}))
-    assert ws.sent == []
+    def spy(*args, **kwargs):
+        sessions.append(kwargs["profile"])
+        return original(*args, **kwargs)
 
-
-def test_an_allowed_frame_is_sent():
-    ws = _Socket()
-    run(hr._send(ws, {"id": 1, "type": "config/area_registry/list"}))
-    assert ws.sent == [{"id": 1, "type": "config/area_registry/list"}]
+    ha_registry.ha_ws_session = spy
+    try:
+        raw = run(ha_registry.snapshot_fetcher(StaticResolver(creds), latch, caller="orchestrator_registry", connect=fake.ws_connect())())
+    finally:
+        ha_registry.ha_ws_session = original
+    assert sessions == [ha_ws.REGISTRY_READ] and set(raw) == {"areas", "devices", "entities"}
 
 
 def test_the_module_has_no_service_call_frame_type_anywhere():
@@ -597,16 +678,17 @@ def test_a_failure_logs_the_exception_class_and_never_its_text(caplog):
     assert any(e.get("error_class") == "RuntimeError" for e in logs)
 
 
-def test_websocket_url_follows_the_scheme():
-    assert hr.websocket_url("http://ha.example:8123") == "ws://ha.example:8123/api/websocket"
-    assert hr.websocket_url("https://ha.example/") == "wss://ha.example/api/websocket"
+def test_create_registry_is_disabled_when_off_and_idle_until_home_assistant_is_configured():
+    from shared import ha_auth
+    from shared.ha_credentials import HACredentials, KeyLookup, StaticResolver, resolve
 
-
-def test_create_registry_is_disabled_when_off_or_missing_credentials():
-    assert hr.create_registry(ha_url="http://ha.example", ha_token="t", mode="off").state == hr.STATE_DISABLED
-    assert hr.create_registry(ha_url="", ha_token="t", mode="auto").state == hr.STATE_DISABLED
-    assert hr.create_registry(ha_url="http://ha.example", ha_token=None, mode="auto").state == hr.STATE_DISABLED
-    assert hr.create_registry(ha_url="http://ha.example", ha_token="t", mode="auto").state == hr.STATE_UNAVAILABLE
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+    configured = StaticResolver(resolve(KeyLookup.found("http://ha.example", "t"), {}, previous=None, service_api_key="k"))
+    empty = StaticResolver(HACredentials())
+    kwargs = dict(latch=latch, caller="orchestrator_registry")
+    assert hr.create_registry(credentials=configured, mode="off", **kwargs).state == hr.STATE_DISABLED
+    assert hr.create_registry(credentials=empty, mode="auto", **kwargs).state == hr.STATE_DISABLED
+    assert hr.create_registry(credentials=configured, mode="auto", **kwargs).state == hr.STATE_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -683,10 +765,10 @@ def wall_registry(fetcher, **kwargs):
     return hr.HARegistry(fetcher, monotonic=Clock(), wall=lambda: WALL[0], **kwargs)
 
 
-LINK_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class"}
+LINK_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class", "ban_suspected"}
 
 
-def test_link_summary_has_exactly_five_keys_and_no_names():
+def test_link_summary_has_exactly_six_keys_and_no_names():
     reg = wall_registry(FakeFetcher())
     run(reg.ensure(1))
     summary = reg.link_summary()
@@ -700,7 +782,7 @@ def test_link_summary_has_exactly_five_keys_and_no_names():
 def test_a_disabled_registry_summarises_as_disabled_with_nothing_else():
     assert hr.HARegistry(None).link_summary() == {
         "state": "disabled", "areas": None, "last_success_at": None,
-        "last_failure_at": None, "last_failure_class": None,
+        "last_failure_at": None, "last_failure_class": None, "ban_suspected": False,
     }
 
 
@@ -758,13 +840,15 @@ def test_an_auth_refusal_records_a_failure_of_class_auth():
     assert (summary["last_failure_at"], summary["last_failure_class"]) == (WALL[0].isoformat(), "auth")
 
 
-def test_a_start_that_finds_the_refusal_marker_records_class_auth_now():
-    marker = hr.token_marker_key(TOKEN, "service-key-for-tests")
-    redis = FakeRedis(present={f"athena:ha_registry:refused:{marker}"})
-    fetcher = FakeFetcher()
-    reg = wall_registry(fetcher, token_marker_key=marker, redis=redis)
-    run(reg.start())
+def test_a_start_that_the_latch_withholds_records_class_auth_now():
+    fetcher = FakeFetcher(error=hr.HAWithheld("latched"))
+    reg = wall_registry(fetcher)
+
+    async def go():
+        await reg.start()
+        await asyncio.sleep(0.01)
+
+    run(go())
     summary = reg.link_summary()
-    assert fetcher.calls == 0
     assert (summary["state"], summary["last_failure_class"]) == ("refused", "auth")
     assert summary["last_failure_at"] == WALL[0].isoformat()

@@ -26,12 +26,14 @@ from ..database import SessionLocal, get_db
 from ..models import SMSIncoming, CalendarEvent, GuestSMSPreference
 from shared.config import get_config
 
+from app.services import service_urls
+
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/sms/webhook", tags=["SMS Webhook"])
 
 # Orchestrator URL for processing queries
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+ORCHESTRATOR_URL = service_urls.orchestrator_url()
 
 # Twilio auth token for signature validation.
 # If unset, validation is skipped with a warning (allows local dev without Twilio config).

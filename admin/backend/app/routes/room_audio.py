@@ -12,22 +12,16 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
 import structlog
-import httpx
-import os
 import re
 
 from app.database import get_db
 from app.models import RoomAudioConfig
 from app.auth.oidc import get_current_user
+from app.services import ha_access
 from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/room-audio", tags=["room-audio"])
-
-# Home Assistant configuration - defaults empty, should be configured
-HA_URL = os.getenv("HA_URL", "")
-HA_TOKEN = os.getenv("HA_TOKEN", "")
-
 
 # Pydantic models
 class RoomAudioCreate(BaseModel):
@@ -233,80 +227,67 @@ async def discover_media_players(
 
     Returns list of media_player entities with their current state.
     """
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            response = await client.get(
-                f"{HA_URL}/api/states",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"}
-            )
+        response = await ha_access.channel().request("GET", "/api/states", timeout=10.0)
 
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Home Assistant returned status {response.status_code}"
-                )
+        if response.status_code != 200:
+            raise ha_access.http_error(response)
 
-            states = response.json()
+        states = response.json()
 
-            # Filter to media_player entities
-            media_players = []
-            for state in states:
-                entity_id = state.get("entity_id", "")
-                if entity_id.startswith("media_player."):
-                    attrs = state.get("attributes", {})
-                    friendly_name = attrs.get("friendly_name", entity_id)
+        # Filter to media_player entities
+        media_players = []
+        for state in states:
+            entity_id = state.get("entity_id", "")
+            if entity_id.startswith("media_player."):
+                attrs = state.get("attributes", {})
+                friendly_name = attrs.get("friendly_name", entity_id)
 
-                    # Detect integration type
-                    attrs_str = str(attrs).lower()
-                    if "mass_" in entity_id or "music_assistant" in attrs_str:
-                        integration = "music_assistant"
-                    elif "sonos" in entity_id.lower() or "sonos" in friendly_name.lower():
-                        integration = "sonos"
-                    elif "cast" in entity_id.lower() or "chromecast" in friendly_name.lower():
-                        integration = "chromecast"
-                    elif "airplay" in entity_id.lower():
-                        integration = "airplay"
-                    else:
-                        integration = "native"
+                # Detect integration type
+                attrs_str = str(attrs).lower()
+                if "mass_" in entity_id or "music_assistant" in attrs_str:
+                    integration = "music_assistant"
+                elif "sonos" in entity_id.lower() or "sonos" in friendly_name.lower():
+                    integration = "sonos"
+                elif "cast" in entity_id.lower() or "chromecast" in friendly_name.lower():
+                    integration = "chromecast"
+                elif "airplay" in entity_id.lower():
+                    integration = "airplay"
+                else:
+                    integration = "native"
 
-                    # Apply filter
-                    if filter_type == "music_assistant" and integration != "music_assistant":
+                # Apply filter
+                if filter_type == "music_assistant" and integration != "music_assistant":
+                    continue
+                elif filter_type == "native" and integration == "music_assistant":
+                    continue
+
+                # Skip entities with UUID-style names (raw device IDs)
+                if filter_type == "music_assistant":
+                    # Check if entity_id looks like a UUID (8-4-4-4-12 or similar patterns)
+                    if re.match(r'^media_player\.[a-f0-9]{8}[-_][a-f0-9]+', entity_id):
                         continue
-                    elif filter_type == "native" and integration == "music_assistant":
-                        continue
 
-                    # Skip entities with UUID-style names (raw device IDs)
-                    if filter_type == "music_assistant":
-                        # Check if entity_id looks like a UUID (8-4-4-4-12 or similar patterns)
-                        if re.match(r'^media_player\.[a-f0-9]{8}[-_][a-f0-9]+', entity_id):
-                            continue
+                media_players.append({
+                    "entity_id": entity_id,
+                    "friendly_name": friendly_name,
+                    "state": state.get("state", "unknown"),
+                    "device_class": attrs.get("device_class"),
+                    "supported_features": attrs.get("supported_features", 0),
+                    "source_list": attrs.get("source_list", []),
+                    "volume_level": attrs.get("volume_level"),
+                    "integration": integration,
+                })
 
-                    media_players.append({
-                        "entity_id": entity_id,
-                        "friendly_name": friendly_name,
-                        "state": state.get("state", "unknown"),
-                        "device_class": attrs.get("device_class"),
-                        "supported_features": attrs.get("supported_features", 0),
-                        "source_list": attrs.get("source_list", []),
-                        "volume_level": attrs.get("volume_level"),
-                        "integration": integration,
-                    })
+        # Sort by friendly name
+        media_players.sort(key=lambda x: x["friendly_name"])
 
-            # Sort by friendly name
-            media_players.sort(key=lambda x: x["friendly_name"])
+        return media_players
 
-            return media_players
-
-    except httpx.ConnectError:
-        raise HTTPException(status_code=502, detail="Could not connect to Home Assistant")
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Home Assistant request timed out")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("discover_media_players_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ha_access.http_error(e)
 
 
 # ============================================================================
@@ -331,80 +312,71 @@ async def test_room_audio(
     if not config:
         raise HTTPException(status_code=404, detail="Room config not found")
 
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
+    # Get entities to test based on speaker type
+    entities_to_test = [config.primary_entity_id]
 
+    if config.speaker_type == "stereo_pair" and config.secondary_entity_id:
+        entities_to_test.append(config.secondary_entity_id)
+    elif config.speaker_type == "group" and config.group_entity_ids:
+        entities_to_test.extend(config.group_entity_ids)
+
+    # Test each entity with a TTS announcement. After Home Assistant rejects the
+    # token (or the gate withholds the request) nothing more is sent: the rest
+    # report the same closed phrase.
+    results = []
+    stopped_with: Optional[str] = None
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # Get entities to test based on speaker type
-            entities_to_test = [config.primary_entity_id]
-
-            if config.speaker_type == "stereo_pair" and config.secondary_entity_id:
-                entities_to_test.append(config.secondary_entity_id)
-            elif config.speaker_type == "group" and config.group_entity_ids:
-                entities_to_test.extend(config.group_entity_ids)
-
-            # Test each entity with a TTS announcement
-            results = []
-            for entity_id in entities_to_test:
-                try:
-                    # Call TTS service for testing
-                    response = await client.post(
-                        f"{HA_URL}/api/services/tts/speak",
-                        headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                        json={
-                            "entity_id": entity_id,
-                            "message": f"Audio test for {config.display_name or config.room_name}"
-                        }
-                    )
-
-                    results.append({
+        channel = ha_access.channel()
+        for entity_id in entities_to_test:
+            if stopped_with is not None:
+                results.append({"entity_id": entity_id, "success": False, "error": stopped_with})
+                continue
+            try:
+                response = await channel.request(
+                    "POST", "/api/services/tts/speak", timeout=15.0,
+                    json={
                         "entity_id": entity_id,
-                        "success": response.status_code == 200,
-                        "status_code": response.status_code
-                    })
-
-                except Exception as e:
-                    results.append({
-                        "entity_id": entity_id,
-                        "success": False,
-                        "error": str(e)
-                    })
-
-            # Update test status
-            all_success = all(r["success"] for r in results)
-            config.last_tested_at = datetime.utcnow()
-            config.last_test_result = "success" if all_success else "failed"
-            db.commit()
-            db.refresh(config)
-
-            logger.info(
-                "room_audio_test",
-                room=config.room_name,
-                result="success" if all_success else "failed",
-                entities_tested=len(entities_to_test)
-            )
-
-            return {
-                "success": all_success,
-                "room": config.room_name,
-                "results": results,
-                "tested_at": config.last_tested_at.isoformat()
-            }
-
-    except httpx.ConnectError:
-        config.last_tested_at = datetime.utcnow()
-        config.last_test_result = "failed"
-        db.commit()
-        raise HTTPException(status_code=502, detail="Could not connect to Home Assistant")
-    except httpx.TimeoutException:
-        config.last_tested_at = datetime.utcnow()
-        config.last_test_result = "timeout"
-        db.commit()
-        raise HTTPException(status_code=504, detail="Test timed out")
+                        "message": f"Audio test for {config.display_name or config.room_name}"
+                    }
+                )
+            except Exception as e:
+                text = ha_access.error_text(e)
+                results.append({"entity_id": entity_id, "success": False, "error": text})
+                if isinstance(e, (ha_access.HomeAssistantNotConfiguredError, ha_access.HAWithheld, ha_access.AuthInvalid)):
+                    stopped_with = text
+                continue
+            if response.status_code in (401, 403) or "athena_ha_withheld" in response.extensions:
+                stopped_with = ha_access.error_text(response)
+                results.append({"entity_id": entity_id, "success": False, "error": stopped_with})
+                continue
+            results.append({
+                "entity_id": entity_id,
+                "success": response.status_code == 200,
+                "status_code": response.status_code
+            })
     except Exception as e:
         config.last_tested_at = datetime.utcnow()
         config.last_test_result = "failed"
         db.commit()
-        logger.error("room_audio_test_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ha_access.http_error(e)
+
+    # Update test status
+    all_success = all(r["success"] for r in results)
+    config.last_tested_at = datetime.utcnow()
+    config.last_test_result = "success" if all_success else "failed"
+    db.commit()
+    db.refresh(config)
+
+    logger.info(
+        "room_audio_test",
+        room=config.room_name,
+        result="success" if all_success else "failed",
+        entities_tested=len(entities_to_test)
+    )
+
+    return {
+        "success": all_success,
+        "room": config.room_name,
+        "results": results,
+        "tested_at": config.last_tested_at.isoformat()
+    }

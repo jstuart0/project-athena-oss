@@ -20,6 +20,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VOICE_PIPELINES_JS = REPO_ROOT / "admin" / "frontend" / "voice-pipelines.js"
+STATUS_VOCAB_JS = REPO_ROOT / "admin" / "frontend" / "status-vocab.js"
 
 # A missing node is a hard failure here, never a skip (the frontend-escaping job
 # always provides it).
@@ -42,7 +43,7 @@ def _block(marker: str) -> str:
 
 
 def _run(expression: str):
-    sources = [_block("const NEUTRAL_STATUSES"), _block("function statusTone("), _block("function statusWord(")]
+    sources = [STATUS_VOCAB_JS.read_text(encoding="utf-8"), _block("function statusTone("), _block("function statusWord(")]
     script = f"""
     'use strict';
     {chr(10).join(sources)}
@@ -60,30 +61,32 @@ def _run(expression: str):
     ({"healthy": False, "status": "stale"}, "gray"),
     ({"healthy": False, "status": "disabled"}, "gray"),
     ({"healthy": False, "status": "pending"}, "gray"),
-    ({"healthy": False, "status": "unconfigured"}, "gray"),
-    ({"healthy": False, "status": "not configured"}, "gray"),
+    ({"healthy": False, "status": "unconfigured"}, "amber"),
+    ({"healthy": False, "status": "not configured"}, "amber"),
     (None, "gray"),
     ({"healthy": False, "status": "unhealthy"}, "red"),
     ({"healthy": False, "status": "timeout"}, "red"),
     ({"healthy": False, "status": "a status nobody has seen"}, "red"),
     ({"healthy": False, "status": "<img src=x>"}, "red"),
-    ({"healthy": False}, "red"),
+    ({"healthy": False}, "amber"),   # no status at all reads as not set up
 ])
 def test_status_tone(service, tone):
     assert _run(f"statusTone({json.dumps(service)})") == tone
 
 
-def test_tone_is_always_one_of_the_three_classes():
-    for status in ("stale", "x", "constructor", "__proto__", ""):
-        assert _run(f"statusTone({{healthy: false, status: {json.dumps(status)}}})") in {"green", "gray", "red"}
+def test_tone_is_always_one_of_the_four_classes():
+    for status in ("stale", "x", "constructor", "__proto__", "toString", ""):
+        assert _run(f"statusTone({{healthy: false, status: {json.dumps(status)}}})") in {"green", "gray", "amber", "red"}
 
 
 @pytest.mark.parametrize("service,word", [
-    ({"healthy": True}, "healthy"),
+    ({"healthy": True}, "Healthy"),
     ({"healthy": False, "status": "stale"}, "No recent check"),
-    ({"healthy": False, "status": "unhealthy"}, "unhealthy"),
-    ({"healthy": False}, "not configured"),
-    (None, "not configured"),
+    ({"healthy": False, "status": "unhealthy"}, "Unhealthy"),
+    ({"healthy": False, "status": "unconfigured"}, "Needs setup"),
+    ({"healthy": False, "status": "a status nobody has seen"}, "a status nobody has seen"),
+    ({"healthy": False}, "Needs setup"),
+    (None, "Needs setup"),
 ])
 def test_status_word(service, word):
     assert _run(f"statusWord({json.dumps(service)})") == word
@@ -93,4 +96,5 @@ def test_both_voice_page_renderers_use_the_tone():
     source = VOICE_PIPELINES_JS.read_text(encoding="utf-8")
     assert "const statusColor = statusTone(service);" in source
     assert "statusTone(s)" in source
+    assert "escapeHtml(statusText)" in source
     assert "s.healthy ? 'bg-green-500' : 'bg-red-500'" not in source

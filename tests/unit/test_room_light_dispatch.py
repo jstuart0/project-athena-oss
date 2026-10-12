@@ -78,7 +78,7 @@ def _written(client):
 
 
 def _manager(entities=None):
-    m = hem.HAEntityManager("http://ha.invalid:8123", "token")
+    m = hem.HAEntityManager(MagicMock())
     m._entities_cache = entities if entities is not None else _build_entities()
     m._cache_time = datetime.now()
     m._build_indexes()

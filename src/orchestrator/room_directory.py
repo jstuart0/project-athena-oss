@@ -74,7 +74,7 @@ class RoomDirectoryProvider:
         """The directory for the inputs as they are now. Starts a background
         room-group refresh when that list is older than the TTL."""
         self._maybe_refresh_groups()
-        snapshot = self._registry.current() if self._registry is not None else None
+        snapshot = self._registry.read() if self._registry is not None else None
         cfg = self._config()
         group_names: Tuple[str, ...] = ()
         if snapshot is None and self._light_group_names is not None:

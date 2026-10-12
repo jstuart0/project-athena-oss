@@ -21,9 +21,8 @@ table (``tests/fixtures/ha_link/truth_table.json``).
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import structlog
@@ -35,6 +34,7 @@ from app.utils.rag_urls import check_ssrf_safe
 
 logger = structlog.get_logger()
 
+from app.services import service_urls
 LEG_TIMEOUT_SECONDS = 2.0
 MAX_BODY_BYTES = 64 * 1024
 ORCHESTRATOR_PATH = "/admin/ha-status"
@@ -58,15 +58,12 @@ REASONS = frozenset({
     "orchestrator_outdated",
     "orchestrator_blocked",
     "not_configured",
+    "ip_banned",
 })
 
 GATEWAY_VALUES = ("ok", "refused", "unavailable", "disabled", "unknown", "not_checked")
 _GATEWAY_REPORTED = frozenset({"ok", "refused", "unavailable", "disabled"})
 
-Outcome = Literal["ok", "auth_rejected", "forbidden", "ha_error", "timeout", "unreachable", "tls_error", "error"]
-RegistryState = Literal["refused", "unavailable", "ok", "disabled"]
-FailureClass = Literal["auth", "timeout", "unreachable", "other"]
-Coverage = Literal["cluster", "replica"]
 
 
 def _nonneg_int(value: Any) -> Optional[int]:
@@ -101,19 +98,94 @@ class _Section(BaseModel):
         return value
 
 
+def _word_in(allowed: Any, value: Any) -> Any:
+    """``value`` when it is one of the shared vocabulary's words, else an error:
+    an unknown word is a payload this admin build can't read (``orchestrator_outdated``)."""
+    if value not in allowed:
+        raise ValueError("not a word of the shared vocabulary")
+    return value
+
+
+def _real_bool(value: Any) -> bool:
+    return value is True
+
+
 class _Rest(_Section):
-    last_outcome: Optional[Outcome]
+    last_outcome: Optional[str]
     last_outcome_at: Optional[str]
     last_success_at: Optional[str]
     consecutive_failures: Optional[int]
+    ban_suspected: bool = False
+
+    @field_validator("last_outcome", mode="after")
+    @classmethod
+    def _outcome(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _word_in(ha_link.OUTCOMES, value)
+
+    @field_validator("ban_suspected", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
 
 
 class _Registry(_Section):
-    state: RegistryState
+    state: str
     areas: Optional[int]
     last_success_at: Optional[str]
     last_failure_at: Optional[str]
-    last_failure_class: Optional[FailureClass]
+    last_failure_class: Optional[str]
+    ban_suspected: bool = False
+
+    @field_validator("state", mode="after")
+    @classmethod
+    def _state(cls, value: str) -> str:
+        return _word_in(ha_link.REGISTRY_STATES, value)
+
+    @field_validator("last_failure_class", mode="after")
+    @classmethod
+    def _failure_class(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _word_in(ha_link.FAILURE_CLASSES, value)
+
+    @field_validator("ban_suspected", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
+
+
+class _Auth(BaseModel):
+    """The shared sign-in state an orchestrator reports. Every field is
+    optional and a malformed one reads as absent: an older or newer orchestrator
+    must never make the card say ``orchestrator_outdated`` over it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    latched: bool = False
+    latched_at: Optional[str] = None
+    next_probe_at: Optional[str] = None
+    banned_at: Optional[str] = None
+    failures: Dict[str, int] = {}
+    budget_spent: bool = False
+    budget_spent_at: Optional[str] = None
+
+    @field_validator("latched", "budget_spent", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
+
+    @field_validator("latched_at", "next_probe_at", "banned_at", "budget_spent_at", mode="before")
+    @classmethod
+    def _time(cls, value: Any) -> Optional[str]:
+        return _iso_or_none(value)
+
+    @field_validator("failures", mode="before")
+    @classmethod
+    def _failures(cls, value: Any) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            caller: count for caller, count in value.items()
+            if caller in ha_link.CALLERS and _nonneg_int(count) is not None
+        }
 
 
 class _Payload(BaseModel):
@@ -122,6 +194,7 @@ class _Payload(BaseModel):
     configured: bool
     rest: _Rest
     registry: _Registry
+    auth: Optional[_Auth] = None
     coverage: Optional[str] = None
     replicas_reporting: Optional[int] = None
 
@@ -131,6 +204,16 @@ class _Payload(BaseModel):
         if not isinstance(value, bool):
             raise ValueError("configured must be a boolean")
         return value
+
+    @field_validator("auth", mode="before")
+    @classmethod
+    def _auth_or_none(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return None
+        try:
+            return _Auth.model_validate(value)
+        except ValidationError:
+            return None
 
     @field_validator("coverage", mode="before")
     @classmethod
@@ -156,6 +239,9 @@ class HAStatus(BaseModel):
     checked_at: str
     gateway: str = "not_checked"
     gateway_sampled: bool = True
+    token_withheld: bool = False
+    next_retry_at: Optional[str] = None
+    auth_failures: List[Dict[str, Any]] = []
 
 
 def _gateway(value: Any) -> str:
@@ -192,7 +278,16 @@ def classify(
         "rest": {**payload.rest.model_dump(), "consecutive_failures": payload.rest.consecutive_failures or 0},
         "registry": payload.registry.model_dump(),
     }
+    if payload.auth is not None:
+        view["auth"] = payload.auth.model_dump()
     state, reason = ha_link.link_state(view)
+    auth = payload.auth
+    token_withheld = bool(auth and (auth.latched or auth.budget_spent) and reason == "token_rejected")
+    next_retry_at = auth.next_probe_at if auth and not auth.budget_spent else None
+    auth_failures = (
+        [{"caller": caller, "count": auth.failures[caller]} for caller in ha_link.CALLERS if caller in auth.failures]
+        if auth else []
+    )
     success_at, failure_at, _ = ha_link.link_times(view)
     failure_is_newest = failure_at is not None and (success_at is None or failure_at > success_at)
     newest = failure_at if failure_is_newest else success_at
@@ -206,16 +301,15 @@ def classify(
         replicas_reporting=payload.replicas_reporting,
         checked_at=checked_at,
         gateway=gateway,
+        token_withheld=token_withheld,
+        next_retry_at=next_retry_at if token_withheld else None,
+        auth_failures=auth_failures,
     )
 
 
 # ---------------------------------------------------------------------------
 # The fetch: two legs, each its own client
 # ---------------------------------------------------------------------------
-
-def _base(env_name: str, default: str) -> str:
-    return os.getenv(env_name, default).rstrip("/")
-
 
 async def _read_capped(response: httpx.Response) -> Optional[bytes]:
     """The body, or None when it is longer than ``MAX_BODY_BYTES``."""
@@ -257,7 +351,7 @@ async def _get(
 
 
 async def _orchestrator_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Tuple[Any, Optional[str]]:
-    url = _base("ORCHESTRATOR_URL", "http://localhost:8001") + ORCHESTRATOR_PATH
+    url = service_urls.orchestrator_url() + ORCHESTRATOR_PATH
     allowed, _ = await check_ssrf_safe(url)
     if not allowed:
         logger.warning("ha_status_orchestrator_leg", reason="orchestrator_blocked")
@@ -283,7 +377,7 @@ async def _orchestrator_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Tu
 async def _gateway_leg(transport: Optional[httpx.AsyncBaseTransport]) -> Optional[str]:
     """The gateway's ``ha_registry`` word, or None when it couldn't be read. No
     credentials are sent."""
-    url = _base("GATEWAY_URL", "http://localhost:8000") + GATEWAY_PATH
+    url = service_urls.gateway_url() + GATEWAY_PATH
     allowed, _ = await check_ssrf_safe(url)
     if not allowed:
         return None

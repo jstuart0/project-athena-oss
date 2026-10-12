@@ -119,6 +119,12 @@ class TestNoRawHAWriteEndpointsInOrchestrator:
                     offenders.append(str(path.relative_to(REPO_ROOT)))
         assert offenders == []
 
+    def test_the_shared_channel_names_no_service_or_config_endpoint(self):
+        """HAChannel can call any API path, so it must not itself spell a service
+        call: callers do, behind the permission-enforcing client."""
+        text = (SRC / "shared" / "ha_http.py").read_text(encoding="utf-8")
+        assert "/api/services" not in text and "/api/config/automation" not in text
+
     def test_the_allowlisted_link_module_builds_no_client_and_no_request(self):
         import ast
 
@@ -525,9 +531,9 @@ def _call_service_sites(text: str, filename: str = "<planted>") -> set:
 
 
 def _ha_client_non_read_calls(text: str, filename: str = "<planted>") -> set:
-    """``func:method`` for every ``ha_client.<method>(...)`` call that is not
-    a read (``get``) or the shutdown (``aclose``): the gateway's shared Home
-    Assistant client must stay read-only."""
+    """``func:method`` for every ``gateway_ha.<method>(...)`` call that is not
+    one of its read, announce or shutdown operations: the gateway's Home
+    Assistant access is two operations and nothing else."""
     found = set()
     stack: list = []
 
@@ -539,8 +545,8 @@ def _ha_client_non_read_calls(text: str, filename: str = "<planted>") -> set:
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "ha_client"
-            and node.func.attr not in ("get", "aclose")
+            and node.func.value.id == "gateway_ha"
+            and node.func.attr not in ("read_states", "announce", "aclose")
         ):
             found.add(f"{stack[-1] if stack else '<module>'}:{node.func.attr}")
         for child in ast.iter_child_nodes(node):
@@ -556,14 +562,14 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
     """Pattern H drift guard, gateway's share. The gateway writes nothing to
     Home Assistant except one announcement: the only function under
     src/gateway/ that reaches the raw /api/services/ endpoint is
-    send_satellite_announcement (a satellite TTS announcement, not a device
+    GatewayHA.announce (a satellite TTS announcement, not a device
     write), and no ``.call_service(`` call or ``"call_service"`` frame type
     appears anywhere in the gateway. Device control goes to the orchestrator,
     which decides the room, authorizes every write and applies the fan-out
     gate (D19)."""
 
     EXPECTED_CALL_SITES = {
-        ("src/gateway/main.py", "send_satellite_announcement"),
+        ("src/gateway/gateway_ha.py", "announce"),
     }
 
     def test_gateway_simple_command_call_sites_unchanged(self):
@@ -596,7 +602,7 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
         assert _call_service_sites("def g():\n    return {'type': 'call_service'}\n") == {"g"}
         assert _call_service_sites("def h(client):\n    return client.get('/x')\n") == set()
 
-    def test_the_gateway_ha_client_only_reads(self):
+    def test_the_gateways_ha_access_is_two_operations(self):
         found = {}
         for path in sorted((SRC / "gateway").rglob("*.py")):
             sites = _ha_client_non_read_calls(path.read_text(encoding="utf-8", errors="ignore"), str(path))
@@ -604,11 +610,13 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
                 found[str(path.relative_to(REPO_ROOT))] = sorted(sites)
         assert found == {}
 
-    def test_the_ha_client_check_detects_planted_writers(self):
-        assert _ha_client_non_read_calls("async def f():\n    await ha_client.post(url, json={})\n") == {"f:post"}
-        assert _ha_client_non_read_calls("async def g():\n    await ha_client.request('PUT', url)\n") == {"g:request"}
-        assert _ha_client_non_read_calls("async def h():\n    await ha_client.delete(url)\n") == {"h:delete"}
-        assert _ha_client_non_read_calls("async def k():\n    await ha_client.get(url)\n    await ha_client.aclose()\n") == set()
+    def test_the_ha_access_check_detects_planted_writers(self):
+        assert _ha_client_non_read_calls("async def f():\n    await gateway_ha.call_service('light', 'turn_on')\n") == {"f:call_service"}
+        assert _ha_client_non_read_calls("async def g():\n    await gateway_ha.request('PUT', url)\n") == {"g:request"}
+        assert _ha_client_non_read_calls("async def h():\n    await gateway_ha.delete(url)\n") == {"h:delete"}
+        assert _ha_client_non_read_calls(
+            "async def k():\n    await gateway_ha.read_states()\n    await gateway_ha.announce({})\n    await gateway_ha.aclose()\n"
+        ) == set()
 
     def test_the_simple_command_module_cannot_write(self):
         text = (SRC / "gateway" / "simple_commands.py").read_text(encoding="utf-8")

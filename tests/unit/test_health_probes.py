@@ -297,7 +297,7 @@ def _registry_in_state(state: str):
         async def __call__(self):
             raise AssertionError("a health probe must not fetch")
 
-    registry = ha_registry.HARegistry(_Fetcher())
+    registry = ha_registry.HARegistry(_Fetcher(), configured=lambda: state != "disabled")
     registry._state = state
     return registry
 
@@ -347,15 +347,17 @@ HA_TEST_TOKEN = "sekret-token-123"
 
 @pytest.fixture
 def ha_traffic(monkeypatch):
-    """Fail-on-call transports under both orchestrator HA REST clients and in
-    place of the registry fetcher. Anything that reaches Home Assistant raises
-    AssertionError AND is appended to ``traffic``, so a handler that swallows
-    the exception still fails the test."""
+    """Fail-on-call transports under the orchestrator's real HA channel (REST
+    and the WebSocket proof) and in place of the registry fetcher. Anything that
+    reaches Home Assistant raises AssertionError AND is appended to ``traffic``,
+    so a handler that swallows the exception still fails the test."""
     import httpx as _httpx
     from orchestrator.ha_entity_manager import HAEntityManager
     from orchestrator.mode_permission import ensure_permission_enforcing
-    from shared import ha_link
+    from shared import ha_auth, ha_link
     from shared.ha_client import HomeAssistantClient
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+    from shared.ha_http import HAChannel
     from shared.ha_registry import HARegistry
 
     traffic: list = []
@@ -364,25 +366,40 @@ def ha_traffic(monkeypatch):
         traffic.append(f"{req.method} {req.url}")
         raise AssertionError(f"unexpected request to Home Assistant: {req.method} {req.url}")
 
-    monkeypatch.setattr(ha_link.httpx, "AsyncHTTPTransport", lambda **kw: _httpx.MockTransport(handler))
+    def connect(url, **kwargs):
+        traffic.append("websocket connect")
+        raise AssertionError("unexpected WebSocket connection to Home Assistant")
 
     async def fetcher():
         traffic.append("registry fetch")
         raise AssertionError("unexpected area registry fetch")
 
     monitor = ha_link.HALinkMonitor()
-    raw_client = HomeAssistantClient(url=HA_TEST_URL, token=HA_TEST_TOKEN, link_monitor=monitor)
+    credentials = resolve(
+        KeyLookup.absent(), {"HA_URL": HA_TEST_URL, "HA_TOKEN": HA_TEST_TOKEN}, previous=None, service_api_key="k",
+    )
+    resolver = StaticResolver(credentials)
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k", gate_wait=0.05)
+    channel = HAChannel(
+        resolver, latch, caller="orchestrator_rest", monitor=monitor,
+        inner=_httpx.MockTransport(handler), ws_connect=connect,
+    )
+    raw_client = HomeAssistantClient(channel)
     registry = HARegistry(fetcher)
     _monitor, link_publisher = _link_publisher(monitor, registry=registry)
 
     _runtime.set_ha_link(monitor)
     _runtime.set_ha_client(ensure_permission_enforcing(raw_client))
-    _runtime.set_entity_manager(HAEntityManager(HA_TEST_URL, HA_TEST_TOKEN, link_monitor=monitor))
+    _runtime.set_entity_manager(HAEntityManager(ensure_permission_enforcing(raw_client)))
     _runtime.set_ha_registry(registry)
+    _runtime.set_ha_credentials(resolver)
+    _runtime.set_ha_auth_latch(latch)
     _runtime.set_ha_link_publisher(link_publisher)
     _runtime.set_llm_router(_make_fake_llm())
     _runtime.set_cache_client(_HealthyCache())
-    return mock.MagicMock(traffic=traffic, raw_client=raw_client, monitor=monitor, publisher=link_publisher)
+    return mock.MagicMock(
+        traffic=traffic, raw_client=raw_client, channel=channel, monitor=monitor, publisher=link_publisher,
+    )
 
 
 PROBE_ROUTES = ["/health", "/health/ready", "/health/live", "/health/startup", "/admin/ha-status"]
@@ -395,20 +412,20 @@ def _service_key_headers():
 
 
 def test_the_fixture_can_fail_a_request_to_home_assistant_is_counted(ha_traffic):
-    """Positive control: a request through the same fixture IS recorded, so an
-    empty list below means no request, not a blind fixture."""
-    with pytest.raises(AssertionError):
-        asyncio.run(ha_traffic.raw_client.client.get("/api/states"))
-    assert ha_traffic.traffic == [f"GET {HA_TEST_URL}/api/states"]
+    """Positive control: a request through the same fixture IS recorded (the
+    channel's token proof tries the WebSocket, then a GET /api), so an empty
+    list below means no request, not a blind fixture."""
+    asyncio.run(ha_traffic.channel.request("GET", "/api/states"))
+    assert ha_traffic.traffic == ["websocket connect", f"GET {HA_TEST_URL}/api"]
 
 
 def test_the_fixture_also_catches_the_entity_manager_and_the_registry(ha_traffic):
     entity_manager = _runtime.get_entity_manager()
-    with pytest.raises(AssertionError):
-        asyncio.run(entity_manager.refresh_entities())
+    with pytest.raises(Exception):
+        asyncio.run(entity_manager.refresh_entities())  # a withheld 401 raises like a real one
     with pytest.raises(AssertionError):
         asyncio.run(_runtime.get_ha_registry()._fetcher())
-    assert len(ha_traffic.traffic) == 2
+    assert ha_traffic.traffic == ["websocket connect", f"GET {HA_TEST_URL}/api", "registry fetch"]
 
 
 def test_no_probe_route_sends_anything_to_home_assistant(ha_traffic):
@@ -455,11 +472,16 @@ def test_home_assistant_is_false_before_any_contact_and_when_not_configured():
 
 def test_an_unrelated_forbidden_response_does_not_fail_the_link_until_three_in_a_row():
     _runtime.set_llm_router(_make_fake_llm())
-    monitor = _monitor_with(200, 403)
+    from shared import ha_link
+
+    monitor = ha_link.HALinkMonitor()
+    monitor.record_response("GET", "/api/states", 200)
+    forbidden = ("POST", "/api/services/light/turn_on", 403)  # a service call, not a read any token may make
+    monitor.record_response(*forbidden)
     _runtime.set_ha_link_publisher(_link_publisher(monitor)[1])
     assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is True
-    monitor.record_response("GET", "/api/states", 403)
-    monitor.record_response("GET", "/api/states", 403)
+    monitor.record_response(*forbidden)
+    monitor.record_response(*forbidden)
     assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is False
 
 

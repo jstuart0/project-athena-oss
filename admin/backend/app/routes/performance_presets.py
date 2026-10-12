@@ -25,12 +25,14 @@ from shared.config import get_config
 import os
 from app.utils.service_auth import require_service_or_user_permission
 
+from app.services import service_urls
+
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/presets", tags=["performance-presets"])
 
 # Service URLs from environment
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+GATEWAY_URL = service_urls.gateway_url()
+ORCHESTRATOR_URL = service_urls.orchestrator_url()
 
 # Service endpoints for cache invalidation
 CACHE_INVALIDATION_ENDPOINTS = [

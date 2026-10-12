@@ -674,3 +674,71 @@ async def safe_get(url: str, **kw) -> httpx.Response:
 async def safe_post(url: str, **kw) -> httpx.Response:
     """Convenience wrapper: ``safe_request("POST", url, **kw)``."""
     return await safe_request("POST", url, **kw)
+
+
+# ---------------------------------------------------------------------------
+# Service-host rule shared by every writer and reader of a service address
+# ---------------------------------------------------------------------------
+
+
+def validate_service_host(host: str) -> str:
+    """Reject empty hosts and known SSRF-exploit targets.
+
+    Blocks cloud IMDS addresses, link-local, loopback, multicast and
+    unspecified addresses, and Kubernetes cluster-local DNS suffixes. RFC1918
+    addresses are allowed: a LAN service legitimately lives there. Returns the
+    stripped host; raises ``ValueError`` with a reason that names the host.
+    """
+    if not host:
+        raise ValueError('host is required')
+    host = host.strip()
+    if not host:
+        raise ValueError('host cannot be blank')
+
+    bare = host[:-1] if host.endswith('.') else host  # one trailing dot names the same host
+    if bare.lower().endswith(('.cluster.local', '.svc')):
+        raise ValueError(
+            f'host {host!r} resolves to a k8s cluster-internal address (forbidden)'
+        )
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host  # a hostname; the suffix check above is its rule
+
+    if host in ('169.254.169.254', '::ffff:169.254.169.254', 'fe80::1'):
+        raise ValueError(f'host {host} is a forbidden cloud metadata address')
+    if ip.is_link_local:
+        raise ValueError(f'host {host} is a link-local address (forbidden SSRF range)')
+    if ip.is_loopback:
+        raise ValueError(f'host {host} is a loopback address')
+    if ip.is_multicast:
+        raise ValueError(f'host {host} is a multicast address')
+    if ip.is_unspecified:
+        raise ValueError(f'host {host} is an unspecified address')
+    return host
+
+
+def is_local_host(hostname: str | None) -> bool:
+    """True iff hostname is loopback or RFC1918 or ULA, AND the process is not in a K8s pod.
+
+    Returns False when KUBERNETES_SERVICE_HOST is set in the environment,
+    regardless of hostname: K8s pods are never a "local dev" environment even
+    if cluster service IPs fall in RFC1918 ranges. Link-local (169.254/16,
+    fe80::/10) is intentionally excluded.
+    """
+    import os
+
+    if os.getenv("KUBERNETES_SERVICE_HOST") or os.getenv("IN_CLUSTER", "").lower() == "true":
+        return False
+    if not hostname:
+        return False
+    if hostname in ("localhost", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if ip.is_link_local:
+        return False
+    return ip.is_loopback or ip.is_private

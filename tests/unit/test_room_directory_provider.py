@@ -29,8 +29,13 @@ STUDY_DEVICE = "ab" * 16
 class Registry:
     def __init__(self, snapshot=None):
         self.snapshot = snapshot
+        self.reads = 0
 
     def current(self):
+        return self.snapshot
+
+    def read(self):
+        self.reads += 1
         return self.snapshot
 
 

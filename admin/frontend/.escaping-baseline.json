@@ -142,7 +142,7 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 436
+    "total": 437
   },
   "insert_adjacent_html": {
     "files": [
@@ -166,7 +166,7 @@
     "srcdoc": 0,
     "style": [
       "admin/frontend/analytics.js:133",
-      "admin/frontend/app.js:3797",
+      "admin/frontend/app.js:3495",
       "admin/frontend/cloud-providers.js:524",
       "admin/frontend/escalation.js:107",
       "admin/frontend/icons.js:169",
@@ -178,7 +178,7 @@
     ],
     "style_set": [
       "admin/frontend/analytics.js:133",
-      "admin/frontend/app.js:3797",
+      "admin/frontend/app.js:3495",
       "admin/frontend/cloud-providers.js:524",
       "admin/frontend/escalation.js:107",
       "admin/frontend/icons.js:169",

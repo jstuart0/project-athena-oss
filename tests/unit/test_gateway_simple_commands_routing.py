@@ -75,7 +75,18 @@ def rig(monkeypatch):
     monkeypatch.setattr(gw, "handle_simple_intent", mock.AsyncMock(return_value=None))
     monkeypatch.setattr(gw, "route_to_orchestrator", orchestrate)
     monkeypatch.setattr(gw, "device_session_mgr", sessions)
-    monkeypatch.setattr(gw, "ha_client", http)
+    class RecordingGatewayHA:
+        """Stands in for GatewayHA: any Home Assistant access is a recorded failure."""
+
+        configured = True
+
+        async def read_states(self):
+            http._record("GET", "/api/states")
+
+        async def announce(self, payload):
+            http._record("POST", "/api/services/assist_satellite/announce")
+
+    monkeypatch.setattr(gw, "gateway_ha", RecordingGatewayHA())
     monkeypatch.setattr(gw.httpx, "AsyncClient", RecordingClient)
     monkeypatch.setenv("HA_URL", "http://ha.invalid:8123")
     monkeypatch.setenv("HA_TOKEN", "token-for-tests")

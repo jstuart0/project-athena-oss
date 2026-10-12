@@ -1487,14 +1487,11 @@ class PermissionEnforcingHAClient:
 
     The read allowlist is deliberately narrow: only ``get_state``,
     ``get_states``, ``close``, and ``is_configured`` pass
-    through. Any other attribute access (``client``, ``token``, ``url``,
-    ``headers``, an unintercepted write method) raises AttributeError --
-    the raw authenticated transport is never reachable through the guard.
-    ``get_states`` (ATHENA-69 Pass H) is the bulk ``/api/states`` read used
-    by music-player-discovery callers that previously kept an unwrapped
-    ``_ha_raw`` reference specifically to reach ``.url``/``.headers`` for a
-    raw httpx call -- that exception is gone; there is no unwrapped
-    reference anywhere in ``src/orchestrator`` anymore.
+    through. Any other attribute access (``_channel``, an unintercepted write
+    method) raises AttributeError -- the authenticated channel is never
+    reachable through the guard. ``get_states`` is the bulk ``/api/states``
+    read used by the entity manager and music-player-discovery callers;
+    there is no unwrapped client reference anywhere in ``src/orchestrator``.
     """
 
     _athena_ha_guard = _GUARD_SENTINEL

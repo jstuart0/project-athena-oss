@@ -32,6 +32,7 @@ from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.services import conversation_capture, memory_vectors, telemetry
 from app.utils import exit_guard
+from app.services import core_probe, ha_access, service_urls
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -765,6 +766,10 @@ async def startup_event():
     else:
         start_health_polling(redis_client=redis_client)
 
+    # The one Home Assistant access every admin route shares: credentials, the
+    # failed sign-in gate (Redis-backed outside DEV_MODE) and the channel.
+    await ha_access.init(None if DEV_MODE else redis_client)
+
     # ATHENA-55 Phase 3: wire the Redis client into the WebSocket layer for
     # single-use jti enforcement.  DEV_MODE has no Redis client; the websocket
     # module uses an in-memory fallback when configure_redis is not called.
@@ -843,6 +848,7 @@ async def shutdown_event():
     logger.info("athena_admin_shutdown")
     await stop_background_sync()
     await stop_health_polling()
+    await ha_access.close()
     await memory_vectors.stop_vector_store_maintenance()
     await conversation_capture.stop_retention_loop()
     await telemetry.stop_telemetry()
@@ -1193,38 +1199,14 @@ async def _check_ollama_status(client: httpx.AsyncClient, db: Session) -> Servic
 
 # Gateway/Orchestrator: k8s-cluster-local services, checked directly only
 # when the registry has no row for them (same Class 2 pattern as SearXNG/
-# Ollama). Defaults match dashboard.py's _GATEWAY_BASE/_ORCHESTRATOR_BASE.
-_GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
-_ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
-
-
+# Ollama). The base URLs come from app.services.service_urls.
 async def _check_http_service_status(client: httpx.AsyncClient, name: str, base_url: str) -> ServiceStatus:
     """Generic /health probe for a cluster-local service with a fixed base
     URL (gateway, orchestrator). Only consulted when the registry has no row
-    for `name` (ATHENA-113c)."""
-    status = ServiceStatus(name=name, port=0, healthy=False, status="unknown")
-    try:
-        response = await client.get(f"{base_url}/health")
-        if response.status_code == 200:
-            status.healthy = True
-            status.status = "healthy"
-        elif response.status_code == 401:
-            # Some services return 401 for unauthenticated health checks.
-            status.healthy = True
-            status.status = "healthy (auth required)"
-        else:
-            status.status = f"error: HTTP {response.status_code}"
-            status.error = f"Unexpected status code: {response.status_code}"
-    except httpx.ConnectError:
-        status.status = "unreachable"
-        status.error = f"{name} not accessible"
-    except httpx.TimeoutException:
-        status.status = "timeout"
-        status.error = "Service did not respond within timeout"
-    except Exception as e:
-        status.status = "error"
-        status.error = str(e)
-    return status
+    for `name` (ATHENA-113c); the probe itself is app.services.core_probe."""
+    healthy, word, error = await core_probe.probe_health(client, name, base_url)
+    fields = {} if error is None else {"error": error}
+    return ServiceStatus(name=name, port=0, healthy=healthy, status=word, **fields)
 
 
 @app.get("/health")
@@ -1297,9 +1279,9 @@ async def get_system_status(
         if "ollama" not in registry_names:
             checks.append(await _check_ollama_status(client, db))
         if "gateway" not in registry_names:
-            checks.append(await _check_http_service_status(client, "gateway", _GATEWAY_BASE))
+            checks.append(await _check_http_service_status(client, "gateway", service_urls.gateway_url()))
         if "orchestrator" not in registry_names:
-            checks.append(await _check_http_service_status(client, "orchestrator", _ORCHESTRATOR_BASE))
+            checks.append(await _check_http_service_status(client, "orchestrator", service_urls.orchestrator_url()))
 
     for check in checks:
         service_statuses.append(check)

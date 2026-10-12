@@ -431,27 +431,20 @@ def test_satellite_room_map_inverts_entity_keys_only(monkeypatch):
 def test_satellite_room_map_never_sends_an_announcement_to_a_device_id(monkeypatch):
     posts = []
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
+    class FakeGatewayHA:
+        configured = True
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def post(self, url, **kwargs):
-            posts.append((url, kwargs.get("json")))
-            return mock.MagicMock(status_code=200)
+        async def announce(self, payload):
+            posts.append(payload)
+            return True
 
     monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", hr.parse_satellite_room_map(MAP_JSON))
-    monkeypatch.setattr(gw.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setenv("HA_TOKEN", "t")
+    monkeypatch.setattr(gw, "gateway_ha", FakeGatewayHA())
     assert asyncio.run(gw.send_satellite_announcement("galley", "hello")) is False
     assert posts == []
     assert asyncio.run(gw.send_satellite_announcement("study", "hello")) is True
-    assert posts[0][1]["entity_id"] == "assist_satellite.study_voice"
+    assert posts[0]["entity_id"] == "assist_satellite.study_voice"
+
 
 
 def test_satellite_room_map_invalid_keys_log_one_error_with_a_count(monkeypatch):

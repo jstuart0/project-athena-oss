@@ -413,8 +413,9 @@ def test_callee_sink_known_instances_are_found():
     # ATHENA-112 shifted it +41 lines before that via the enabled/disabled
     # dashboard-grouping rewrite of loadStatus; ATHENA-99 shifted it +22
     # lines before that; the apiRequest 422 message fix added +22 above it; the
-    # Home Assistant card and registry-row helpers added +336 above it).
-    reveal_bucket, reveal_detail = found[("app.js", 1624)]
+    # Home Assistant card and registry-row helpers added +336 above it; moving
+    # the status vocabulary and that card into status-vocab.js took 305 back out).
+    reveal_bucket, reveal_detail = found[("app.js", 1319)]
     assert reveal_bucket == "sink-escaped"
     assert reveal_detail["callee"] == "revealSecret"
 

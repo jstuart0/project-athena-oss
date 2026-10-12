@@ -16,8 +16,10 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics, RagService
 from app.utils.rag_urls import check_ssrf_safe
-from app.utils.service_state import display_status
+from app.utils.service_state import NOT_CHECKED_STATUSES, display_status
 import httpx
+
+from app.services import service_urls
 
 logger = structlog.get_logger()
 
@@ -25,8 +27,8 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 # Service URLs — configurable via env vars.
 # GATEWAY_URL and ORCHESTRATOR_URL are set by k8s deployments to cluster services.
-_GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
-_ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
+_GATEWAY_BASE = service_urls.gateway_url()
+_ORCHESTRATOR_BASE = service_urls.orchestrator_url()
 
 # Core (non-RAG) services shown on the voice-health card, keyed by their
 # service-registry row name.
@@ -34,14 +36,6 @@ _CORE_SERVICE_NAMES = {
     "gateway": "Gateway",
     "orchestrator": "Orchestrator",
 }
-
-
-# Statuses that are neither healthy nor a failure: switched off, never checked,
-# not reached by the checker recently, or reachable but not set up ("Needs
-# setup"). They are never "needs attention" and never count against the health
-# percentage. Only a live unhealthy or degraded row (or a live probe that
-# failed) needs attention.
-_NOT_CHECKED_STATUSES = frozenset({"disabled", "pending", "stale", "unconfigured"})
 
 
 def _registry_row_status(svc: RagService, now: datetime) -> str:
@@ -141,7 +135,7 @@ async def get_dashboard_data(
         # healthy nor a problem: they leave the total and the critical list,
         # and the stale ones are reported on their own.
         stale_count = sum(1 for e in service_entries if e["status"] == "stale")
-        counted = [e for e in service_entries if e["status"] not in _NOT_CHECKED_STATUSES]
+        counted = [e for e in service_entries if e["status"] not in NOT_CHECKED_STATUSES]
         healthy_count = sum(1 for e in counted if e["status"] == "healthy")
         total_count = len(counted)
         critical_services = [

@@ -7,7 +7,11 @@ let voiceServices = [];
 let voiceHealth = {};
 let haPipelines = [];
 let currentPipelineMode = 'full';
-let haConnected = false;
+// The Home Assistant link, as the Dashboard reads it. null until the status
+// request finishes or when it failed; haPipelinesLoaded is false when the
+// pipeline list couldn't be loaded.
+let haStatusPayload = null;
+let haPipelinesLoaded = false;
 
 // Running configuration from the voice host's containers
 let runningConfig = {
@@ -119,82 +123,85 @@ function updateSyncStatus() {
     }
 }
 
+async function _haFetchJson(url) {
+    const response = await fetch(url, { headers: getAuthHeaders() });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+}
+
 async function loadHAPipelineConfig() {
-    try {
-        // Load pipelines and current mode in parallel
-        const [pipelinesRes, preferredRes] = await Promise.all([
-            fetch('/api/ha-pipelines/pipelines', { headers: getAuthHeaders() }),
-            fetch('/api/ha-pipelines/pipelines/preferred', { headers: getAuthHeaders() })
-        ]);
+    // The link status and the two pipeline requests are independent: the card
+    // header reads the same status as the Dashboard even when the pipelines
+    // can't be loaded, and a failed status request doesn't hide the pipelines.
+    const [statusResult, pipelinesResult, preferredResult] = await Promise.allSettled([
+        _haFetchJson('/api/service-registry/home-assistant'),
+        _haFetchJson('/api/ha-pipelines/pipelines'),
+        _haFetchJson('/api/ha-pipelines/pipelines/preferred'),
+    ]);
 
-        if (pipelinesRes.ok) {
-            const data = await pipelinesRes.json();
-            haPipelines = data.pipelines || [];
-            haConnected = true;
-        } else {
-            haConnected = false;
-        }
+    haStatusPayload = statusResult.status === 'fulfilled' ? statusResult.value : null;
+    haPipelinesLoaded = pipelinesResult.status === 'fulfilled';
+    if (haPipelinesLoaded) haPipelines = pipelinesResult.value.pipelines || [];
+    if (preferredResult.status === 'fulfilled') currentPipelineMode = preferredResult.value.current_mode || 'full';
 
-        if (preferredRes.ok) {
-            const data = await preferredRes.json();
-            currentPipelineMode = data.current_mode || 'full';
-        }
+    renderPipelineModeSection();
+}
 
-        // Re-render to show pipeline section
-        renderPipelineModeSection();
-    } catch (error) {
-        console.error('Failed to load HA pipeline config:', error);
-        haConnected = false;
-        renderPipelineModeSection();
+/** The card header's status: the Dashboard's dot and headline, or grey "Status unavailable". */
+function _haHeaderStatus() {
+    if (haStatusPayload === null) {
+        return '<span class="w-2 h-2 rounded-full bg-gray-500" aria-hidden="true"></span><span class="text-sm font-medium text-gray-400">Status unavailable</span>';
     }
+    const summary = summarizeHomeAssistant(haStatusPayload);
+    return `<span class="w-2 h-2 rounded-full ${escapeHtml(summary.dotClass)}" aria-hidden="true"></span><span class="text-sm font-medium ${escapeHtml(summary.textClass)}">${summary.headline}</span>`;
+}
+
+/** Why the pipelines couldn't be loaded, per the link's state; always ends with Try again. */
+function _haPipelinesFailureBody() {
+    const lead = '<p class="text-sm text-gray-200">Couldn\'t load voice pipelines from Home Assistant.</p>';
+    let rest = '';
+    const state = haStatusPayload && haStatusPayload.state;
+    if (state === 'failing' || state === 'not_configured') {
+        const summary = summarizeHomeAssistant(haStatusPayload);
+        if (summary.detail) rest += `<p class="mt-1 text-sm text-gray-400">${summary.detail}</p>`;
+        if (summary.action) rest += `<div class="mt-2 text-sm text-gray-300">${summary.action}</div>`;
+    } else if (state === 'connected' || state === 'attention') {
+        rest = '<p class="mt-1 text-sm text-gray-400">Home Assistant is connected, so the problem is with its voice assistants. Check that at least one assistant is set up in Home Assistant under Settings → Voice assistants, then try again.</p>';
+    }
+    const retry = '<button type="button" onclick="loadHAPipelineConfig()" class="mt-3 min-h-[44px] px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded">Try again</button>';
+    return lead + rest + retry;
 }
 
 function renderPipelineModeSection() {
     const container = document.getElementById('pipeline-mode-section');
     if (!container) return;
 
-    if (!haConnected) {
-        container.innerHTML = `
-            <div class="pipeline-mode-card">
+    const header = `
                 <div class="config-card-header">
                     <div class="header-title">
                         <i class="fas fa-exchange-alt"></i>
                         <h3>Voice Pipeline Mode</h3>
                     </div>
-                    <div class="header-status">
-                        <span class="health-indicator health-unreachable" title="Home Assistant not reachable"></span>
-                        <span class="service-status status-inactive">Disconnected</span>
-                    </div>
-                </div>
-                <div class="config-card-body">
-                    <div class="error-message" style="margin: 0;">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        Unable to connect to Home Assistant. Check HA_TOKEN configuration.
-                    </div>
-                </div>
+                    <div class="header-status flex items-center gap-2">${_haHeaderStatus()}</div>
+                </div>`;
+
+    if (!haPipelinesLoaded) {
+        container.innerHTML = `
+            <div class="pipeline-mode-card">${header}
+                <div class="config-card-body">${_haPipelinesFailureBody()}</div>
             </div>
         `;
         return;
     }
 
     container.innerHTML = `
-        <div class="pipeline-mode-card">
-            <div class="config-card-header">
-                <div class="header-title">
-                    <i class="fas fa-exchange-alt"></i>
-                    <h3>Voice Pipeline Mode</h3>
-                </div>
-                <div class="header-status">
-                    <span class="health-indicator health-healthy" title="Home Assistant connected"></span>
-                    <span class="service-status status-active">Connected</span>
-                </div>
-            </div>
+        <div class="pipeline-mode-card">${header}
             <div class="config-card-body">
                 <div class="mode-description">
                     <p>Choose your voice pipeline mode:</p>
                 </div>
                 <div class="mode-toggle-container three-modes">
-                    <div class="mode-option ${currentPipelineMode === 'streaming_rag' ? 'active recommended' : ''}" onclick="setVoiceMode('streaming_rag')">
+                    <button type="button" class="mode-option ${currentPipelineMode === 'streaming_rag' ? 'active recommended' : ''}" onclick="setVoiceMode('streaming_rag')" aria-pressed="${escapeHtml(String(currentPipelineMode === 'streaming_rag'))}">
                         <div class="mode-icon">
                             <i class="fas fa-rocket"></i>
                         </div>
@@ -208,8 +215,8 @@ function renderPipelineModeSection() {
                             <span class="badge-recommended">Recommended</span>
                         </div>
                         ${currentPipelineMode === 'streaming_rag' ? '<span class="active-badge"><i class="fas fa-check"></i> Active</span>' : ''}
-                    </div>
-                    <div class="mode-option ${currentPipelineMode === 'full' ? 'active' : ''}" onclick="setVoiceMode('full')">
+                    </button>
+                    <button type="button" class="mode-option ${currentPipelineMode === 'full' ? 'active' : ''}" onclick="setVoiceMode('full')" aria-pressed="${escapeHtml(String(currentPipelineMode === 'full'))}">
                         <div class="mode-icon">
                             <i class="fas fa-brain"></i>
                         </div>
@@ -222,8 +229,8 @@ function renderPipelineModeSection() {
                             <span class="badge-smarter">Smart</span>
                         </div>
                         ${currentPipelineMode === 'full' ? '<span class="active-badge"><i class="fas fa-check"></i> Active</span>' : ''}
-                    </div>
-                    <div class="mode-option ${currentPipelineMode === 'simple' ? 'active' : ''}" onclick="setVoiceMode('simple')">
+                    </button>
+                    <button type="button" class="mode-option ${currentPipelineMode === 'simple' ? 'active' : ''}" onclick="setVoiceMode('simple')" aria-pressed="${escapeHtml(String(currentPipelineMode === 'simple'))}">
                         <div class="mode-icon">
                             <i class="fas fa-bolt"></i>
                         </div>
@@ -236,7 +243,7 @@ function renderPipelineModeSection() {
                             <span class="badge-basic">Basic</span>
                         </div>
                         ${currentPipelineMode === 'simple' ? '<span class="active-badge"><i class="fas fa-check"></i> Active</span>' : ''}
-                    </div>
+                    </button>
                 </div>
                 <div class="pipeline-info">
                     <h4>Available Pipelines:</h4>
@@ -679,6 +686,8 @@ function injectVoiceConfigStyles() {
 
         .config-card-header {
             display: flex;
+            flex-wrap: wrap;
+            gap: 8px 16px;
             justify-content: space-between;
             align-items: center;
             padding: 15px 20px;
@@ -982,6 +991,10 @@ function injectVoiceConfigStyles() {
         }
 
         .mode-option {
+            text-align: left;
+            width: 100%;
+            font: inherit;
+            color: inherit;
             padding: 20px;
             background: var(--option-bg, #2a2a2a);
             border: 2px solid transparent;

@@ -42,7 +42,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
-from shared import ha_link
+from shared import ha_auth, ha_link
+from shared.ha_credentials import HACredentialResolver, admin_http_source
+from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
 from orchestrator import room_choice, room_context
 from orchestrator.utterance_kind import is_indoor_temperature_question
@@ -1129,18 +1131,16 @@ async def ensure_gateway_running() -> bool:
 
 
 def _build_ha_channels(
-    ha_url: Optional[str], ha_token: Optional[str], monitor: "ha_link.HALinkMonitor"
+    resolver: HACredentialResolver, latch: "ha_auth.HAAuthLatch", monitor: "ha_link.HALinkMonitor"
 ) -> Tuple[Optional[HomeAssistantClient], Optional[HAEntityManager]]:
-    """Both Home Assistant REST clients, or ``(None, None)`` unless a URL and a
-    token both exist (the rule ``HomeAssistantClient.is_configured`` applies).
-    A token with no URL used to build an entity manager over ``base_url=None``,
-    which raises at startup."""
-    if not (ha_url and ha_token):
+    """Both Home Assistant REST holders over one channel, or ``(None, None)``
+    unless the credentials are configured (an address and a token that passed
+    the URL policy). The channel is the only place this process builds an
+    Authorization header, and it is built once, here."""
+    if not resolver.current().configured:
         return None, None
-    return (
-        HomeAssistantClient(url=ha_url, token=ha_token, link_monitor=monitor),
-        HAEntityManager(ha_url=ha_url, ha_token=ha_token, link_monitor=monitor),
-    )
+    client = HomeAssistantClient(HAChannel(resolver, latch, caller="orchestrator_rest", monitor=monitor))
+    return client, HAEntityManager(ensure_permission_enforcing(client))
 
 
 @asynccontextmanager
@@ -1169,31 +1169,25 @@ async def lifespan(app: FastAPI):
     # Initialize admin client
     admin_client = get_admin_client()
 
-    # Try to fetch HA config from Admin API
-    ha_url = None
-    ha_token = None
-    try:
-        ha_config = await admin_client.get_home_assistant_config()
-        if ha_config and ha_config.get("url") and ha_config.get("token"):
-            ha_url = ha_config["url"]
-            ha_token = ha_config["token"]
-            logger.info("ha_config_from_admin", url=ha_url)
-        else:
-            # Fallback to environment variables — HA must be configured in admin panel
-            ha_url = os.getenv("HA_URL")
-            ha_token = os.getenv("HA_TOKEN")
-            if ha_url:
-                logger.info("ha_config_from_env", url=ha_url)
-            else:
-                logger.warning("ha_config_missing", reason="Not configured in admin and HA_URL env var not set")
-    except Exception as e:
-        logger.warning("ha_config_fetch_failed", error=str(e))
-        ha_url = os.getenv("HA_URL")
-        ha_token = os.getenv("HA_TOKEN")
-        if ha_url:
-            logger.info("ha_config_from_env_fallback", url=ha_url)
-        else:
-            logger.warning("ha_config_missing", reason="Admin unreachable and HA_URL env var not set")
+    # Redis first: the Home Assistant auth gate keeps its shared state there.
+    cache_client = CacheClient()
+    _runtime.set_cache_client(cache_client)
+
+    # Home Assistant credentials: the admin key wins, the environment is the
+    # fallback, and the last admin value is kept while admin is unreachable.
+    # Local first (R2-H1); a token saved later applies within a minute.
+    ha_credentials = HACredentialResolver(admin_http_source(admin_client), service_api_key=_SERVICE_API_KEY)
+    await ha_credentials.start()
+    _runtime.set_ha_credentials(ha_credentials)
+    asyncio.create_task(ha_credentials.run())  # long-lived; cancelled by ha_credentials.close() in _runtime.close_all()
+
+    # The one failed sign-in gate every Home Assistant request in this process
+    # passes (cluster-wide state in Redis). Built once, shared by the REST
+    # channel and the area registry.
+    ha_latch = ha_auth.HAAuthLatch(
+        getattr(cache_client, "client", None), instance=ha_auth.instance_id(), service_api_key=_SERVICE_API_KEY,
+    )
+    _runtime.set_ha_auth_latch(ha_latch)
 
     # Initialize clients (ATHENA-69 D1/R2-H1: local first, then wrap, then
     # register -- ha_client_raw is never registered or handed to a holder
@@ -1201,11 +1195,11 @@ async def lifespan(app: FastAPI):
     # constructor below wrapping this same local again is a no-op).
     ha_link_monitor = ha_link.HALinkMonitor()
     _runtime.set_ha_link(ha_link_monitor)
-    ha_client_raw, entity_manager = _build_ha_channels(ha_url, ha_token, ha_link_monitor)
+    ha_client_raw, entity_manager = _build_ha_channels(ha_credentials, ha_latch, ha_link_monitor)
     ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
     if not ha_client:
-        logger.warning("ha_client_not_initialized", reason="No Home Assistant URL and token available")
+        logger.warning("ha_client_not_initialized", reason="Home Assistant is not configured")
     if not degraded_permissions()["restricted_entities"]:
         logger.warning(
             "ha_permission_fallback_disabled",
@@ -1342,19 +1336,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("entity_manager_not_initialized", reason="No Home Assistant URL and token available")
 
-    cache_client = CacheClient()
-    _runtime.set_cache_client(cache_client)
-
     # Home Assistant area registry: read-only, fetched in the background (a
-    # slow or unreachable HA never delays startup). Disabled without an HA
-    # token or with HA_AREAS=off. Built as a local first (R2-H1).
+    # slow or unreachable HA never delays startup). Disabled without Home
+    # Assistant credentials or with HA_AREAS=off; a token saved later brings it
+    # alive. Built as a local first (R2-H1), through the same gate as REST.
     ha_registry = create_registry(
-        ha_url=ha_url,
-        ha_token=ha_token,
+        credentials=ha_credentials,
+        latch=ha_latch,
+        caller="orchestrator_registry",
         mode=_shared_config.get_config().ha_areas,
-        service_api_key=_SERVICE_API_KEY,
-        redis=getattr(cache_client, "client", None),
     )
+    ha_credentials.on_change(lambda new, old: ha_registry.credentials_changed())
     _runtime.set_ha_registry(ha_registry)
     await ha_registry.start()
 
@@ -1362,7 +1354,8 @@ async def lifespan(app: FastAPI):
     # through Redis, served from memory. Local first (R2-H1). It sends nothing
     # to Home Assistant; `configured` is the HA client's own answer.
     ha_link_publisher = ha_link.create_publisher(
-        ha_link_monitor, ha_registry, getattr(cache_client, "client", None), ha_client_raw
+        ha_link_monitor, ha_registry, getattr(cache_client, "client", None), ha_client_raw,
+        latch=ha_latch, credentials=ha_credentials,
     )
     _runtime.set_ha_link_publisher(ha_link_publisher)
     if getattr(cache_client, "client", None) is not None:
@@ -9496,6 +9489,7 @@ async def ha_status():
         "configured": view["configured"],
         "rest": view["rest"],
         "registry": view["registry"],
+        "auth": view["auth"],
         "coverage": view["coverage"],
         "coverage_reason": view["coverage_reason"],
         "replicas_reporting": view["replicas_reporting"],

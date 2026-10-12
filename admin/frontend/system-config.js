@@ -116,45 +116,38 @@ async function loadConversationSettingsForConfig() {
 }
 
 /**
- * Map a GET /api/status service entry to one of the four UI status buckets
- * this page renders: 'healthy' | 'unhealthy' | 'neutral' | 'offline'.
+ * Map a GET /api/status service entry to its tone: 'good' | 'bad' | 'offline'
+ * | 'setup' | 'neutral' (status-vocab.js owns the words). A service that
+ * reports healthy=true is good whatever its text; a text that would read good
+ * while healthy is false (a proxy answering for it) is a problem, not good.
  *
- * ATHENA-113c: /api/status now derives from the service registry
- * (statuses: healthy/unhealthy/unconfigured/disabled/pending) instead of
- * probing a hardcoded host, plus the four direct-check fallbacks' own
- * strings ('not configured', 'unreachable', 'timeout', 'error[: ...]').
- * 'disabled'/'unconfigured'/'pending'/'not configured' are a deliberate
- * choice by an operator or a transient startup state -- neither is the
- * same claim as "this is down", so they render as a neutral state rather
- * than Offline.
+ * ATHENA-113c: /api/status derives from the service registry plus the direct
+ * checks' own strings. disabled/pending/stale are an operator choice or a
+ * transient state, not "down", so they stay neutral; unconfigured/not
+ * configured are "needs setup".
  */
 function mapServiceStatusToUiBucket(service) {
-    if (service.healthy) return 'healthy';
-    const status = (service.status || '').toLowerCase();
-    // stale: the health checker hasn't reached the service recently, so its
-    // state is unknown, not "down" (and not "degraded").
-    if (status === 'disabled' || status === 'unconfigured' ||
-        status === 'not configured' || status === 'pending' || status === 'stale') {
-        return 'neutral';
-    }
-    if (status === 'error' || status === 'timeout' || status === 'unreachable' ||
-        status.startsWith('error:')) {
-        return 'offline';
-    }
-    return 'unhealthy';
+    if (service.healthy) return 'good';
+    const word = service.status ? String(service.status).toLowerCase() : null;
+    const tone = statusInfo(word).tone;
+    return tone === 'good' ? 'bad' : tone;
 }
 
-/**
- * The word for a neutral card: why the service is neither up nor down.
- * 'Not Configured' stays the answer for an unconfigured or unknown status.
- */
-function neutralLabel(status) {
-    switch ((status || '').toLowerCase()) {
-        case 'stale': return 'No recent check';
-        case 'disabled': return 'Not monitored';
-        case 'pending': return 'Checking…';
-        default: return 'Not Configured';
-    }
+// Tone -> card colour, icon and pulse. Only a problem pulses, and never with
+// reduced motion on.
+const SERVICE_CARD_VIEW = {
+    good: { color: 'green', icon: '✅', pulse: '' },
+    bad: { color: 'red', icon: '❌', pulse: 'motion-safe:animate-pulse' },
+    offline: { color: 'red', icon: '❌', pulse: 'motion-safe:animate-pulse' },
+    setup: { color: 'amber', icon: '⚠️', pulse: '' },
+    neutral: { color: 'gray', icon: '➖', pulse: '' },
+};
+
+/** The words on a service card: the label of the /api/status word behind its tone. */
+function serviceCardLabel(tone, word) {
+    if (tone === 'good') return statusInfo('healthy').label;
+    if (word) return statusInfo(String(word).toLowerCase()).label;
+    return tone === 'offline' ? statusInfo('unreachable').label : statusInfo(null).label;
 }
 
 /**
@@ -275,28 +268,19 @@ function renderServiceStatus() {
             </h3>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 ${services.map(svc => {
-                    // ATHENA-113c: 'neutral' (disabled/unconfigured/pending) is
-                    // an operator choice or transient state, not a failure --
-                    // rendered gray, distinct from 'offline' (red).
-                    const statusColor = svc.status === 'healthy' ? 'green' :
-                                       svc.status === 'unhealthy' ? 'yellow' :
-                                       svc.status === 'neutral' ? 'gray' : 'red';
-                    const statusIcon = svc.status === 'healthy' ? '✅' :
-                                      svc.status === 'unhealthy' ? '⚠️' :
-                                      svc.status === 'neutral' ? '➖' : '❌';
-                    const statusText = svc.status === 'healthy' ? 'Healthy' :
-                                      svc.status === 'unhealthy' ? 'Degraded' :
-                                      svc.status === 'neutral' ? neutralLabel(svc.word) : 'Offline';
+                    const tone = Object.prototype.hasOwnProperty.call(SERVICE_CARD_VIEW, svc.status) ? svc.status : 'neutral';
+                    const view = SERVICE_CARD_VIEW[tone];
+                    const statusText = serviceCardLabel(tone, svc.word);
 
                     return `
-                        <div class="bg-dark-card border border-dark-border rounded-xl p-4 hover:border-${statusColor}-500/50 transition-all">
+                        <div class="bg-dark-card border border-dark-border rounded-xl p-4 hover:border-${view.color}-500/50 transition-all">
                             <div class="flex items-start justify-between mb-2">
-                                <h4 class="font-medium text-white">${svc.name}</h4>
-                                <span class="text-xl">${statusIcon}</span>
+                                <h4 class="font-medium text-white">${escapeHtml(svc.name)}</h4>
+                                <span class="text-xl">${view.icon}</span>
                             </div>
                             <div class="flex items-center gap-2 mb-2">
-                                <span class="w-2 h-2 rounded-full bg-${statusColor}-500 animate-pulse"></span>
-                                <span class="text-sm text-${statusColor}-400">${statusText}</span>
+                                <span class="w-2 h-2 rounded-full bg-${view.color}-500 ${view.pulse}" aria-hidden="true"></span>
+                                <span class="text-sm text-${view.color}-400">${escapeHtml(statusText)}</span>
                             </div>
                             <p class="text-xs text-gray-500">${svc.description}</p>
                             <p class="text-xs text-gray-600 mt-1">Port: ${svc.port}</p>

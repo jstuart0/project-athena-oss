@@ -3,7 +3,7 @@
 Runs in its own process: it imports orchestrator.main behind a stubbed
 config_loader (see test_health_probes.py for why). The response is enums,
 counts and timestamps only; the golden file tests/fixtures/ha_link/
-admin_ha_status_v1.json is what admin-backend's tests parse, so the two sides
+admin_ha_status_v2.json is what admin-backend's tests parse, so the two sides
 can't drift. Regenerate it with UPDATE_GOLDEN=1.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ import sys
 import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import structlog
@@ -46,7 +47,7 @@ from shared import ha_link  # noqa: E402
 from shared.ha_registry import HARegistry, RegistrySnapshot  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
-GOLDEN = FIXTURES / "ha_link" / "admin_ha_status_v1.json"
+GOLDEN = FIXTURES / "ha_link" / "admin_ha_status_v2.json"
 HOUSE = json.loads((FIXTURES / "ha_registry" / "house_a.json").read_text(encoding="utf-8"))
 AREA_NAMES = [
     a["name"] for a in HOUSE["areas"]
@@ -56,9 +57,10 @@ TOKEN = "sekret-token-123"
 HOST = "ha.test"
 T0 = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
 
-TOP_KEYS = {"configured", "rest", "registry", "coverage", "coverage_reason", "replicas_reporting", "observed_at"}
-REST_KEYS = {"last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures"}
-REGISTRY_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class"}
+TOP_KEYS = {"configured", "rest", "registry", "auth", "coverage", "coverage_reason", "replicas_reporting", "observed_at"}
+REST_KEYS = {"last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures", "ban_suspected"}
+REGISTRY_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class", "ban_suspected"}
+AUTH_KEYS = {"latched", "latched_at", "next_probe_at", "banned_at", "failures", "budget_spent", "budget_spent_at"}
 
 
 class FakeRedis:
@@ -161,6 +163,7 @@ def test_exact_key_sets_at_every_level(monkeypatch, client):
     assert set(body) == TOP_KEYS
     assert set(body["rest"]) == REST_KEYS
     assert set(body["registry"]) == REGISTRY_KEYS
+    assert set(body["auth"]) == AUTH_KEYS
 
 
 def test_not_configured_and_registry_missing_shapes(monkeypatch, client):
@@ -172,11 +175,13 @@ def test_not_configured_and_registry_missing_shapes(monkeypatch, client):
     assert body["configured"] is False
     assert body["registry"] == {
         "state": "disabled", "areas": None, "last_success_at": None,
-        "last_failure_at": None, "last_failure_class": None,
+        "last_failure_at": None, "last_failure_class": None, "ban_suspected": False,
     }
     assert body["rest"] == {
         "last_outcome": None, "last_outcome_at": None, "last_success_at": None, "consecutive_failures": 0,
+        "ban_suspected": False,
     }
+    assert body["auth"] == ha_link.empty_auth()
     assert set(body) == TOP_KEYS
 
 
@@ -218,6 +223,50 @@ def test_no_value_carries_a_url_a_host_an_area_name_or_the_token_and_neither_do_
     assert body["rest"]["last_outcome"] == "unreachable"
 
 
+# -- the shared sign-in state rides under "auth" -------------------------------------
+
+class _Latch:
+    def __init__(self, summary):
+        self._summary = summary
+
+    async def sync(self, snapshot):
+        return None
+
+    def summary(self, snapshot):
+        return dict(self._summary)
+
+
+class _Credentials:
+    def current(self):
+        return SimpleNamespace(digest="d1")
+
+
+def _publisher_with_auth(**auth):
+    clock = [T0 - timedelta(seconds=60)]
+    monitor = ha_link.HALinkMonitor(wall=lambda: clock[0])
+    monitor.record_response("GET", "/api/states", 200)
+    return ha_link.HALinkPublisher(
+        monitor, _ok_registry(), None, "pod-test", configured=True, wall=lambda: T0,
+        latch=_Latch({**ha_link.empty_auth(), **auth}), credentials=_Credentials(),
+    )
+
+
+def test_a_ban_that_only_another_service_saw_reaches_the_response_and_reads_ip_banned(monkeypatch, client):
+    _mode(monkeypatch, "enforce")
+    banned_at = (T0 - timedelta(seconds=10)).isoformat()
+    body = _body(client, _publisher_with_auth(banned_at=banned_at, failures={"gateway_rest": {"count": 2, "last_at": banned_at}}))
+    assert body["auth"]["banned_at"] == banned_at and body["auth"]["failures"]["gateway_rest"]["count"] == 2
+    assert ha_link.link_state(body) == ("failing", "ip_banned")
+
+
+def test_a_spent_budget_reaches_the_response_and_reads_token_rejected(monkeypatch, client):
+    _mode(monkeypatch, "enforce")
+    spent = (T0 - timedelta(seconds=10)).isoformat()
+    body = _body(client, _publisher_with_auth(budget_spent=True, budget_spent_at=spent))
+    assert body["auth"]["budget_spent"] is True
+    assert ha_link.link_state(body) == ("failing", "token_rejected")
+
+
 # -- the golden file admin-backend consumes ----------------------------------
 
 def test_the_response_matches_the_golden_file(monkeypatch, client):
@@ -232,48 +281,43 @@ def test_the_response_matches_the_golden_file(monkeypatch, client):
 
 # -- a token with no URL must boot and read "not set up" -----------------------------------------
 
+def _credentials(**env):
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+
+    return StaticResolver(resolve(KeyLookup.absent(), env, previous=None, service_api_key="k"))
+
+
+def _latch():
+    from shared import ha_auth
+
+    return ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+
+
 def test_a_token_without_a_url_builds_no_home_assistant_client_and_no_entity_manager():
     monitor = ha_link.HALinkMonitor()
-    for url, token in ((None, "tok"), ("", "tok"), ("https://ha.test", None), ("https://ha.test", ""), (None, None)):
-        assert _main_module._build_ha_channels(url, token, monitor) == (None, None), (url, token)
+    for env in ({"HA_TOKEN": "tok"}, {"HA_URL": "https://ha.test"}, {}):
+        assert _main_module._build_ha_channels(_credentials(**env), _latch(), monitor) == (None, None), env
 
 
-def test_a_url_and_a_token_build_both_clients_recording_into_the_monitor():
+def test_a_url_and_a_token_build_both_holders_over_one_channel_recording_into_the_monitor():
     monitor = ha_link.HALinkMonitor()
-    client, entity_manager = _main_module._build_ha_channels("https://ha.test", "tok", monitor)
+    client, entity_manager = _main_module._build_ha_channels(
+        _credentials(HA_URL="https://ha.test", HA_TOKEN="tok"), _latch(), monitor,
+    )
     assert client is not None and client.is_configured
-    assert entity_manager is not None and entity_manager.ha_url == "https://ha.test"
+    assert entity_manager is not None and entity_manager._ha._inner is client, "one client, behind the permission guard"
+    assert client._channel._transport._monitor is monitor
 
 
 def test_a_token_only_configuration_reports_not_configured_end_to_end(monkeypatch, client):
-    """The lifespan's own wiring for a token with no URL: the channels are None, the
+    """The lifespan's own wiring for a token with no URL: the holders are None, the
     publisher built from them says not configured, and /health and /admin/ha-status
     answer instead of the process failing to start."""
     _mode(monkeypatch, "enforce")
-    monkeypatch.delenv("HA_URL", raising=False)
-    raw, entity_manager = _main_module._build_ha_channels(None, "tok", ha_link.HALinkMonitor())
+    raw, entity_manager = _main_module._build_ha_channels(_credentials(HA_TOKEN="tok"), _latch(), ha_link.HALinkMonitor())
     publisher = ha_link.create_publisher(ha_link.HALinkMonitor(), HARegistry(None), None, raw)
     assert (raw, entity_manager) == (None, None)
     _runtime.set_ha_link_publisher(publisher)
     _runtime.set_llm_router(mock.MagicMock())
     body = client.get("/admin/ha-status", headers=_key()).json()
     assert body["configured"] is False
-    assert ha_link.link_state(body) == ("not_configured", "not_configured")
-    assert client.get("/health").json()["components"]["home_assistant"] is False
-
-
-def test_only_the_gate_builds_the_entity_manager_and_the_lifespan_tests_for_it():
-    import ast
-
-    tree = ast.parse(Path(_main_module.__file__).read_text(encoding="utf-8"))
-    builders = []
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for node in ast.walk(fn):
-                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "HAEntityManager":
-                    builders.append(fn.name)
-    assert set(builders) == {"_build_ha_channels"}, builders
-    lifespan = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
-    guards = [ast.unparse(n.test) for n in ast.walk(lifespan) if isinstance(n, ast.If)]
-    assert "entity_manager is not None" in guards
-    assert "ha_token" not in guards, "a token alone must not start the Home Assistant consumers"

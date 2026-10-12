@@ -624,10 +624,45 @@ through `admin/backend/app/services/memory_vectors.py`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HA_URL` | *(empty)* | Home Assistant URL |
-| `HA_TOKEN` | *(empty)* | Long-Lived Access Token |
-| `HA_WS_URL` | *(derived)* | WebSocket URL (usually auto-derived) |
+| `HA_URL` | *(empty)* | Home Assistant URL (used when no `home-assistant` External API Key is saved) |
+| `HA_TOKEN` | *(empty)* | Long-Lived Access Token (same fallback) |
+| `HA_WS_URL` | *(derived)* | WebSocket URL (usually auto-derived); applies only with environment credentials |
 | `MUSIC_ASSISTANT_URL` | *(empty)* | Music Assistant URL |
+
+#### Where Athena finds its Home Assistant address and token
+
+One module (`shared.ha_credentials`) answers this for the orchestrator, the gateway and admin-backend:
+
+- **Precedence.** The `home-assistant` External API Key (admin panel, External API Keys) wins; `HA_URL` and `HA_TOKEN` are the fallback. A saved key that is incomplete or whose address is refused is "not set up"; it does not fall back to the environment. While admin-backend can't be reached, the last value read from it stays in use.
+- **Applies within a minute.** Each service re-reads the key every 60 seconds, so a token saved in the admin panel takes effect everywhere, including the area registry, without a restart. This holds once Home Assistant is configured: enabling it from nothing (no address and token anywhere at startup) still needs a restart of the orchestrator, because its Home Assistant clients are built at startup only when credentials exist. Saving the key again also retries a stopped token (below).
+- **Address rules.** An address saved in the admin panel must be `http` or `https` with no credentials, query, fragment or path, must not be written as an odd numeric form (a host of four or fewer parts that are all decimal or `0x` numbers, such as `2852039166`, `0xa9fea9fe`, `169.254.43518` or `10.20.30.10.`; an IP literal must be in its canonical text), and a name that merely contains a number (`10.0.0.5.nip.io`, `ha.2.lan`, `3.example.com`) or ends in a dot is a name, which the DNS check judges, and must not be cloud metadata, link-local, multicast, unspecified, loopback inside a Kubernetes pod, or a cluster-internal name (`.svc`, `.cluster.local`). A hostname is also checked at use: if it resolves to such an address it is not used. Addresses taken from `HA_URL` keep working as before (an in-cluster Home Assistant is a valid setup).
+- **One key, one row.** There is a single `home-assistant` key; adding a second one, whatever its key type, is refused. The token is never handed to a tool: the admin panel refuses to attach this key to a tool, and a stored attachment is skipped.
+- **A token belongs to its address.** Changing the address (scheme, host or port) without entering the token again clears the stored token and the form says so. Enter the token again.
+- **`HA_WS_URL`** is read only together with environment credentials; with a key saved in the admin panel the WebSocket address is derived from it.
+- **jarvis-web** still reads `HA_URL` and `HA_TOKEN` itself (it has no shared code in its image) and isn't counted by the failed sign-in budget below.
+
+#### How Athena avoids getting banned
+
+Home Assistant counts every failed sign-in (a 401, or a rejected WebSocket token) per source address, never lets the count fall, and resets it only when a WebSocket sign-in succeeds. IP banning is off by default in Home Assistant, but when it's on, a rejected token that keeps being retried bans the address, and a ban is never lifted automatically. So every part of Athena sends its Home Assistant traffic through one gate (`shared.ha_auth`):
+
+- **A budget of 3.** Automatic traffic causes at most 3 failed sign-ins between two successful WebSocket sign-ins, counted across every part of Athena and every replica in one Redis counter that never expires. When the budget is spent or a token is rejected, Athena stops using that token and the Dashboard says so.
+- **One proof, then normal traffic.** A new token is proved once with a dedicated WebSocket sign-in before anything else is sent with it. A proof that is more than 10 seconds old is re-checked by one request first, cluster-wide: it takes a lease that lasts longer than the request can (the request is cut off after 8 seconds, the lease holds for 10, and the holder gives it back when the request settles), counts against the budget until it succeeds, and the other replicas wait for it. That request finishes and is recorded even if the caller that started it goes away. So after a Redis outage longer than that, a proof left over from before it admits one counted request, not a fan-out. A rejection that happened during a shorter outage but couldn't be recorded can still let other replicas send for up to those 10 seconds: that is the revoked-while-running exception below. On the process that saw a rejection, nothing more is sent with that token from the moment the 401 arrives, before the rejection has been recorded. A path that answers 401 to a valid token (it isn't allowed to call that service) is remembered and not retried.
+- **A stopped token is probed twice, then left alone:** after 2 minutes and after 6 hours, by a dedicated sign-in, never by a user request.
+- **Saving the key again reopens one attempt.** It lowers the counter to 2 when it's higher (otherwise it leaves it unchanged), so a save leaves at most one more failed sign-in before the next successful one.
+- **Rotating a token.** Save the new token in Athena, wait two minutes, then delete the old one in Home Assistant.
+- **Exceptions, with their numbers.** None of these is automatic traffic under the rule above.
+  - *Operator saves:* each save of the key leaves at most one more failed sign-in before the next successful one.
+  - *A token revoked in Home Assistant while commands are running:* sends that were already on their way fail too. Per service that is 1 when its last proof is older than 10 seconds, otherwise up to 18 (one full fan-out). This includes a send already admitted on a live proof that is cancelled after its request was written: it holds no reservation and isn't counted, so the proof stays live. Rotate in the order above to avoid it.
+  - *Redis unreachable:* a token without a live proof sends nothing; a service that holds a proof keeps sending known routes until its first rejection, then stops.
+  - *Redis not configured* (admin-backend with `DEV_MODE`, the `room_probe` tool): the same rules run in-process, so up to 3 per process.
+  - *A roll across versions:* services that haven't restarted keep their old retry behaviour.
+  - *jarvis-web:* it uses its own `HA_TOKEN`, is not counted, and adds to Home Assistant's count without Athena seeing it. A working environment token fails nothing.
+  - *Several addresses reaching Home Assistant* (for example pods on different nodes): the counter is cluster-wide, but Home Assistant resets only the address that signed in, so one address can carry up to 3 for each episode it didn't reset itself.
+- **Reservations expire.** Each reserved attempt is recorded with an expiry (2 minutes). One whose process died or timed out stops counting by itself, and saving the key drops any that are left, so a stuck counter always recovers with a save.
+- **Redis requirements.** The budget's scripts touch several keys at once, so they need a single-node Redis (or one that keeps those keys in the same hash slot). On a Redis Cluster they fail and the gate fails closed: nothing is sent that could fail a sign-in.
+- **Redis trust.** The latch and the proof are signed with `SERVICE_API_KEY`; the budget and the route sets are not. Redis write access is inside the trust boundary.
+
+The Dashboard names a block as "Address blocked", with the steps to remove it, and lists failed sign-ins per part of Athena (voice commands, room list, voice satellites, speaker room detection, admin panel, voice pipeline settings), counted since the last successful WebSocket sign-in across the cluster. `ha-auth-redis.yml` runs the gate against a real Redis in CI.
 
 #### Home Assistant status on the Dashboard
 
@@ -639,9 +674,9 @@ The Dashboard's Home Assistant card describes the connection Athena actually use
 
 *Across replicas.* Each replica publishes a small summary (enums, counts and timestamps, no names or URLs) to the Redis hash `athena:ha_link:v1` on change and every 15 s, and merges the hash in the background; requests read the merged view from memory and never wait on Redis. The payload's `coverage` is `cluster`, or `replica` with `coverage_reason` `redis_error` or `redis_unconfigured` when Athena could only see its own copy (the card says "this replica only"). The card is only as trustworthy as write access to that Redis hash: each replica reads at most 64 fields, skips any value over 4 KiB or that isn't a valid summary (and deletes it), but a writer that can reach Redis can still publish a plausible one. A replica whose clock is more than 5 s ahead is ignored, event times can't be later than when this replica first saw them, and a silent replica drops out after 15 minutes.
 
-*Routes.* `GET /api/service-registry/home-assistant` (admin-backend; the `read` permission; a service key alone is refused) returns the card's data: `state`, `reason`, `areas`, `last_outcome_at`, `last_success_at`, `coverage`, `replicas_reporting`, `checked_at`, `gateway`, `gateway_sampled`. It asks the orchestrator's `GET /admin/ha-status` (service key per request, no redirects, 64 KiB cap, through the address check that `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` extends, so the orchestrator's private address must be allowed there) and reads the gateway's `/health`. `GET /admin/ha-status` is one of the orchestrator's ingress-gated routes: `{configured, rest, registry, coverage, coverage_reason, replicas_reporting, observed_at}`, with the REST side's last outcome, last success and consecutive failures, and the registry's state, area count and last success and failure with a failure class. It is enums, counts and timestamps only. `/health` stays count-free.
+*Routes.* `GET /api/service-registry/home-assistant` (admin-backend; the `read` permission; a service key alone is refused) returns the card's data: `state`, `reason`, `areas`, `last_outcome_at`, `last_success_at`, `coverage`, `replicas_reporting`, `checked_at`, `gateway`, `gateway_sampled`, and, for a stopped token, `token_withheld`, `next_retry_at` and `auth_failures` (per-part failed sign-in counts). It asks the orchestrator's `GET /admin/ha-status` (service key per request, no redirects, 64 KiB cap, through the address check that `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` extends, so the orchestrator's private address must be allowed there) and reads the gateway's `/health`. `GET /admin/ha-status` is one of the orchestrator's ingress-gated routes: `{configured, rest, registry, coverage, coverage_reason, replicas_reporting, observed_at}`, with the REST side's last outcome, last success and consecutive failures, and the registry's state, area count and last success and failure with a failure class. It is enums, counts and timestamps only. `/health` stays count-free.
 
-*Not covered.* The orchestrator reads the area registry at startup only, so after a registry failure the card says "restart the orchestrator". The orchestrator's Home Assistant REST clients ignore `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` and don't verify Home Assistant's certificate (as before).
+*Not covered.* A registry failure clears on its own: Athena tries again the next time it needs rooms, unless the token is stopped. Athena's Home Assistant clients ignore `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` and don't verify Home Assistant's certificate (as before).
 
 ### Guest Mode
 
@@ -1595,10 +1630,10 @@ every area (a trusted owner).
 
 **When it doesn't work.** `/health` reports the registry's state
 (`ha_registry` in the gateway, `components.ha_registry` in the orchestrator):
-`ok`, `unavailable` (restart the orchestrator to retry), `refused` or `disabled`. `refused` means Home
-Assistant rejected the token; Athena stops retrying for 24 hours so it can't
-trigger Home Assistant's IP ban. Fix the token, then delete the Redis keys
-`athena:ha_registry:refused:*` (or wait 24 hours). Before a roll, the
+`ok`, `unavailable` (retries on its own), `refused` or `disabled`. `refused` means Home
+Assistant rejected the token; Athena stops using it so it can't trigger Home
+Assistant's IP ban. Save a working token under External API Keys, or save the
+key again to retry once (see "How Athena avoids getting banned"). Before a roll, the
 read-only probe `python -m orchestrator.room_probe --runs 10 [--shape]
 [--areas] [--utterances FILE]` (run in the orchestrator container) prints
 fetch times, registry counts, per-area lamp and unavailable counts, and what
@@ -1970,7 +2005,7 @@ listed were already gated and are unchanged.
 | `/api/directions-settings`, `/api/features`, `/api/gateway-config` | `/public` on each | |
 | `/api/escalation` | `/presets/public`, `/presets/active/public`, `/state/{session_id}/public`, `POST /state/internal`, `POST /events/internal`, `PUT /state/{session_id}/decrement` | `GET /metrics/prometheus` |
 | `/api/follow-me` | `/internal/config` | |
-| `/api/ha-pipelines` | | `/pipelines`, `/pipelines/preferred`, `/modes`, `/health` |
+| `/api/ha-pipelines` | | `/pipelines`, `/pipelines/preferred`, `/modes` (`POST /pipelines/set-preferred` and `/mode/set` need `write`) |
 | `/api/intent-routing` | `/routing/public`, `/providers/public`, `/strategy/configs/public`, `/strategy/configs/{intent_name}` | |
 | `/api/llm-backends` | `GET /public`, `POST /metrics` | `GET /public/mlx-applicability` |
 | `/api/mcp-security` | `GET /public`, `POST /check-domain` (`read`: it changes nothing) | |
@@ -2468,7 +2503,7 @@ The exact bytes of the last payload are shown in the Admin UI card (**Show the l
 | `llm.cloud_providers_enabled` | `openai`, `anthropic`, `google` | Enabled cloud LLM providers |
 | `features.modules_enabled` | module IDs | Enabled modules (`home_assistant`, `guest_mode`, `notifications`, `monitoring`, `jarvis_web`) |
 | `features.flags_enabled` | built-in feature flag names | Enabled feature flags (built-in names only) |
-| `home_assistant.configured` | `true`, `false` | Whether `HA_URL` and `HA_TOKEN` are both set. Home Assistant is never contacted. |
+| `home_assistant.configured` | `true`, `false` | Whether an address and token are set, under External API Keys or in `HA_URL` and `HA_TOKEN`. Home Assistant is never contacted. |
 | `voice.wyoming_devices` | count bucket | Registered Wyoming devices |
 | `voice.jetson_devices` | count bucket | Registered Jetson devices |
 | `voice.livekit_enabled` | `true`, `false` | LiveKit enabled |

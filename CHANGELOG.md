@@ -11,8 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading
 
+- **Home Assistant: roll order and what changes.** Roll the orchestrator, the gateway, admin-backend, then admin-frontend, while the Home Assistant card reads Connected. Until every service runs the new version, the old ones keep their old retry behaviour. The gateway and the admin panel now use the token saved under External API Keys (they used only the environment before). `HA_WS_URL` applies only with environment credentials. `/api/status` no longer reports `healthy (auth required)` (a 401 from the gateway or orchestrator probe reads `error: HTTP 401`). `GET /api/ha-pipelines/health` was removed, and setting the preferred voice pipeline now needs the `write` permission.
+- **Home Assistant addresses written as odd numbers are refused.** An `HA_URL` (or a saved address) whose host is a literal written with leading zeros (`010.1.1.1`), in a non-canonical form, or as a number (`2852039166`, `0xa9fea9fe`) is now refused (a leading-zero or non-canonical literal as an unparseable address, a number form as an odd numeric form) and is reported as not valid. Write the address as a hostname or as a canonical dotted quad. Hostnames such as `homeassistant.local` or `10.0.0.5.nip.io` are unaffected.
+- **Replacing a Home Assistant token.** Save the new token in Athena first, wait two minutes, then delete the old one in Home Assistant. Deleting it first lets in-flight requests fail with the old token.
 - **Home Assistant status and health checks.** The orchestrator's `/health` and `/health/ready` no longer contact Home Assistant, so the kubelet probes, the gateway's `/health` and the admin status bar stop sending Home Assistant an authenticated `GET /api/` every few seconds (about 16 a minute for an orchestrator and gateway pair), which could add up to a failed-sign-in ban. `components.home_assistant` is now the last state seen in the orchestrator's own traffic, combined across its replicas. Roll the orchestrator before admin-backend: an older orchestrator has no `/admin/ha-status`, and the Dashboard card then reads "Status unavailable".
-- **Proxy variables are ignored for Home Assistant.** The orchestrator's Home Assistant REST clients now go through a recording transport, and `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` don't apply to them. This suits a Home Assistant on the local network. If your Home Assistant is only reachable through a proxy, those requests won't use it.
+- **Proxy variables are ignored for Home Assistant.** Athena's Home Assistant REST clients now go through one shared channel, and `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` don't apply to them. This suits a Home Assistant on the local network. If your Home Assistant is only reachable through a proxy, those requests won't use it.
 - **Allow the orchestrator's address for the Dashboard card.** admin-backend asks the orchestrator for the Home Assistant status through the same address check the health poller uses. If the orchestrator's address is private, it must be listed in `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`; otherwise the card reads "Status unavailable" with that setting named.
 - **An old "Home Assistant API" registry row can be deleted.** The Dashboard card no longer needs it. Until you delete it, it reads "Not monitored" if its check is switched off. In Service Control, delete the row (an owner can).
 - **Voice response (optional).** Spoken answers are now capped (200 tokens, 600 for recipes and directions) and end on a full sentence. Tune or loosen this under Assistant settings, "Voice response". The "didn't catch that" reply for unclear speech is off until you turn it on.
@@ -50,6 +53,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The dashboard names a Home Assistant address block** and shows failed sign-ins per part of Athena (voice commands, room list, voice satellites, speaker room detection, the admin panel, voice pipeline settings), so you can see what is counting toward a ban.
 - The Dashboard shows Home Assistant's real connection in its own card: connected, needs attention (for example "Connected, rooms not loaded") or failing (token rejected, access blocked, can't reach, not responding), with when it was last seen and when it last worked, and what to do next. It comes from the traffic the orchestrator already has with Home Assistant, combined across the orchestrator's replicas, and says plainly when it can only see one replica or when the status service can't be reached. It is based on the last contact, so it can lag while the house is idle; the card says so. `GET /api/service-registry/home-assistant` (read permission) serves it.
 - Assistant settings, "Voice response": spoken-answer limits, the longer limit for step-by-step answers, and an opt-in "didn't catch that" reply for unclear speech picked up from the room (off by default).
 - `prompt_tokens` on `POST /api/llm-backends/metrics` and in `GET /api/llm-backends/metrics` (optional; older writers omit it).
@@ -73,6 +77,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Voice Config and Mission Control show the same Home Assistant status as the Dashboard.** One status vocabulary now covers every admin page, and Voice Config says why its voice pipelines couldn't load. System Config pulses only a service that has a problem, and not at all with reduced motion on.
 - Trivial voice turns (greetings, thanks, "what time is it", "what's the date", "got it", "never mind") are answered instantly with no model call, on every route; the gateway skips its pre-routing model for them. They are not answered while the assistant is waiting for an answer to a question it asked, and scene phrases ("good morning", "goodnight") and bare yes/no replies are untouched.
 - Spoken answers are length-capped and end on a complete sentence; recipes, directions and itineraries get a longer cap. Tune "Voice response" in Assistant settings. Text and chat answers are unchanged.
 - A short, finished answer ("Done.", "Yes!") is no longer retried or sent to a web search. The "Min Response Chars" field is now "Minimum length for an unfinished answer (characters)".
@@ -114,6 +119,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Athena stops using a Home Assistant token after it's rejected.** Across every part of Athena, automatic retries cause at most three failed sign-ins before Athena waits for you to save the key again, however long it waits. Home Assistant counts failed sign-ins per address and never forgets them, so a token that keeps being retried gets the address banned.
+- **A token saved under External API Keys is used everywhere within a minute,** including room lookup, without a restart. Saving the key again retries a stopped token.
 - The Home Assistant status comes from Athena's own connection, not from a registry check that could say "disabled" or "healthy" while Home Assistant was working or broken.
 - Health checks no longer send authenticated requests to Home Assistant.
 - A registry row that is switched off now reads "Not monitored" (with when it was last checked), not "disabled" or healthy, and an old error on it shows only as history in grey. A row the health checker hasn't reached recently reads "No recent check" in grey instead of a stale "healthy", on the Dashboard, Service Control, Mission Control, System Configuration and Voice Pipelines. When the checker has stopped, one banner says so. Overall health reads "unknown" when nothing has been checked recently.
@@ -142,6 +149,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Changing the Home Assistant address without re-entering the token now clears the stored token,** so the old token is never sent to a new host. Addresses that can't be a Home Assistant (cloud metadata, link-local, cluster-internal names) are refused in the admin panel.
 - Guest records, the current stay's guests, device-to-guest sessions, voice automations, pipeline transcripts, proxied debug logs and the voice-pipeline mode are no longer readable or writable without a credential. Note that `SERVICE_API_KEY` can read guest data: keep it in a Secret.
 - A guest-scoped service call sees and changes only its own stay's voice automations, never another stay's (even one with the same guest name, like every "Airbnb Guest") or the owner's. Name-based bulk archive and restore are owner-only.
 - No log line carries the start of a query, transcript, answer, response body, exception message or cache key; lengths are logged instead.

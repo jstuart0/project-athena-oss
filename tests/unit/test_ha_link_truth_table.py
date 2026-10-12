@@ -6,6 +6,7 @@ admin card can't drift apart. Every row of the plan's table has cases here.
 """
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -23,9 +24,50 @@ CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 
 
 def test_the_fixture_covers_every_row_of_the_table_and_is_not_trivially_small():
-    assert len(CASES) >= 30
-    assert {c["row"] for c in CASES} == set(range(1, 11))
+    assert len(CASES) >= 60
+    assert {c["row"] for c in CASES} == set(range(1, 11)) | {"2a"}
     assert len({c["id"] for c in CASES}) == len(CASES)
+
+
+NEW_CASE_IDS = [
+    "ban_rest_read_403_failing_at_once", "rest_services_403_without_ban_evidence_stays_attention",
+    "ban_registry_handshake_403_no_success", "ban_registry_handshake_403_after_older_success",
+    "ban_older_than_success_is_connected", "latched_newer_than_success", "latched_older_than_success_is_ignored",
+    "latched_with_nothing_else", "ban_beats_token_rejected_when_newest", "failures_counted_while_connected_stay_connected",
+    "v1_view_without_new_keys", "ban_flag_stale_but_newest_failure_is_connect_error",
+    "ban_rest_older_than_registry_other_failure", "ban_registry_flag_but_registry_state_ok", "latched_not_configured",
+    "token_rejected_beats_older_ban", "latched_at_equals_success_at", "latched_without_latched_at",
+    "ban_seen_by_gateway_only", "banned_at_older_than_success", "budget_spent_newer_than_success",
+    "budget_spent_older_than_success_is_connected", "budget_spent_without_spent_at",
+]
+
+
+def test_the_binding_case_ids_are_all_present():
+    assert set(NEW_CASE_IDS) <= {c["id"] for c in CASES}
+
+
+def _reasons_link_state_can_return():
+    tree = ast.parse((SRC / "shared" / "ha_link.py").read_text(encoding="utf-8"))
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "link_state")
+    words, via_name = set(), False
+    for node in ast.walk(function):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2:
+            reason = node.value.elts[1]
+            if isinstance(reason, ast.Constant):
+                words.add(reason.value)
+            elif isinstance(reason, ast.Name):
+                via_name = True
+    assert via_name
+    for node in ast.walk(function):  # the variable ``reason``: assigned a literal, a choice of literals or a table lookup
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "reason" for t in node.targets):
+            words |= {n.value for n in ast.walk(node.value) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    table = next(n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_REST_FAILURE_REASON")
+    words |= {v.value for v in table.value.values}
+    return words
+
+
+def test_every_reason_in_the_fixture_is_one_link_state_can_return_and_the_reverse():
+    assert {c["reason"] for c in CASES} == _reasons_link_state_can_return()
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])

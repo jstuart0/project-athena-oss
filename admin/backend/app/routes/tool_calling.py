@@ -19,6 +19,9 @@ from app.auth.oidc import get_current_user
 from app.models import User, ToolRegistry, ToolCallingSetting, ToolCallingTrigger, ToolUsageMetric, ToolApiKeyRequirement, ExternalAPIKey
 from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 
+from app.services import service_urls
+from shared.ha_credentials import NON_INJECTABLE_KEY_SERVICES, NOT_INJECTABLE_REFUSAL
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/tool-calling", tags=["tool-calling"])
@@ -1035,6 +1038,9 @@ async def add_tool_api_key_requirement(
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
+    if requirement.api_key_service in NON_INJECTABLE_KEY_SERVICES:
+        raise HTTPException(status_code=422, detail=NOT_INJECTABLE_REFUSAL)
+
     # Verify API key service exists
     api_key = db.query(ExternalAPIKey).filter(
         ExternalAPIKey.service_name == requirement.api_key_service
@@ -1497,7 +1503,7 @@ async def refresh_tool_registry(
     import time
     import os
 
-    orchestrator_url = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+    orchestrator_url = service_urls.orchestrator_url()
 
     logger.info("refresh_tool_registry_started",
                orchestrator_url=orchestrator_url,

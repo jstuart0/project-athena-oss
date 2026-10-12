@@ -297,6 +297,7 @@ def test_the_route_returns_the_classified_status(owner_client, monkeypatch):
     assert set(body) == {
         "state", "reason", "areas", "last_outcome_at", "last_success_at", "coverage",
         "replicas_reporting", "checked_at", "gateway", "gateway_sampled",
+        "token_withheld", "next_retry_at", "auth_failures",
     }
     assert (body["state"], body["reason"]) == ("connected", "ok")
 

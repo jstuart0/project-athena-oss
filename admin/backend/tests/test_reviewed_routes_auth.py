@@ -118,6 +118,7 @@ _QUERY = {
     ("GET", "/api/cloud-llm-usage/summary/range"): {"start_date": "2026-01-01", "end_date": "2026-01-31"},
 }
 _BODY = {
+    ("POST", "/api/ha-pipelines/pipelines/set-preferred"): {"pipeline_id": "p-simple"},
     ("POST", "/api/alerts/public/create"): {
         "alert_type": "stuck_sensor", "title": "Stuck sensor", "message": "No change for a day",
         "entity_id": "binary_sensor.zz_motion", "dedup_key": "stuck_sensor_zz",
@@ -551,6 +552,13 @@ class Write:
         return api.request(method, url, headers=headers, **kwargs)
 
 
+def _preferred_pipeline_sets(db, api, seeded):
+    """How many set_preferred commands reached Home Assistant (the route's
+    command function is the fixture's mock)."""
+    command = _served_globals("/api/ha-pipelines/pipelines")["ha_websocket_command"]
+    return sum(1 for call in command.await_args_list if call.args[0]["type"].endswith("set_preferred"))
+
+
 def _real_module_id():
     """A module with a component that has a health endpoint, so a refresh
     really probes."""
@@ -581,11 +589,12 @@ WRITES = [
     Write(("POST", "/api/modules/refresh-all"), lambda db, api, seeded: api.probe.calls, credential="operator"),
     Write(("POST", "/api/modules/{module_id}/refresh"), lambda db, api, seeded: api.probe.calls,
           path_params=lambda seeded: {"module_id": _real_module_id()}, credential="operator"),
+    Write(("POST", "/api/ha-pipelines/pipelines/set-preferred"), _preferred_pipeline_sets, credential="operator"),
 ]
 
 
 def test_write_population():
-    assert len(WRITES) == 11
+    assert len(WRITES) == 12
     assert ("POST", "/api/tool-proposals") in {w.op for w in WRITES}
     non_get = {op for op in REVIEWED if op[0] != "GET"}
     assert {w.op for w in WRITES} == non_get - {("POST", "/api/mcp-security/check-domain")}
@@ -660,7 +669,7 @@ def test_writing_get_population():
     assert ("GET", "/api/escalation/state/{session_id}/public") in {g.op for g in WRITING_GETS}
     assert len(REJECTED_GETS) == 7
     assert {g.op for g in WRITING_GETS} == set(_PRECONDITION)
-    assert len(WRITES) + len(WRITING_GETS) == 16
+    assert len(WRITES) + len(WRITING_GETS) == 17
 
 
 def _seed_get(get, db, owner):

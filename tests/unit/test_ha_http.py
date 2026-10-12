@@ -1,0 +1,722 @@
+"""HAChannel and HATransport: the one authenticated REST path.
+
+The strict-reduction test runs through a factory, so the same assertion runs
+against the base ``HomeAssistantClient`` (11 REST 401s reach Home Assistant)
+and against the channel (one failed sign-in, the gate's proof).
+"""
+from __future__ import annotations
+
+import ast
+import asyncio
+import pathlib
+
+import httpx
+import pytest
+
+from .ha_auth_fakes import Clock, FakeHA, FlakyRedis, TOKEN, URL, make_stack
+
+try:
+    from shared import ha_auth, ha_http
+except ImportError:  # the base tree: only the old client exists
+    ha_auth = ha_http = None
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+class _OldClient:
+    """The base ``HomeAssistantClient`` over the fake Home Assistant."""
+
+    def __init__(self, fake: FakeHA, token: str = TOKEN):
+        from shared.ha_client import HomeAssistantClient
+
+        self._client = HomeAssistantClient(URL, token)
+        self._client.client = httpx.AsyncClient(
+            base_url=URL, headers=self._client.headers, transport=fake.rest_transport(),
+        )
+
+    async def get_states_status(self) -> int:
+        try:
+            await self._client.get_states()
+            return 200
+        except httpx.HTTPStatusError as exc:
+            return exc.response.status_code
+
+    async def close(self):
+        await self._client.close()
+
+
+class _Channel:
+    def __init__(self, fake: FakeHA, token: str = TOKEN):
+        self.stack = make_stack(fake=fake, token=token)
+        self.channel = self.stack.channel
+        self.responses = []
+
+    async def get_states_status(self) -> int:
+        response = await self.channel.request("GET", "/api/states")
+        self.responses.append(response)
+        return response.status_code
+
+    async def close(self):
+        await self.channel.aclose()
+
+
+@pytest.fixture
+def make_client():
+    """The factory: the channel when it exists, the base client otherwise."""
+    def build(fake: FakeHA, token: str = TOKEN):
+        return _Channel(fake, token) if ha_http is not None else _OldClient(fake, token)
+    return build
+
+
+# -- the strict reduction -------------------------------------------------------------
+
+
+def test_a_rejected_token_is_sent_once_then_withheld(make_client):
+    async def scenario():
+        fake = FakeHA(valid=(), threshold=None)  # rejects the token on REST and on the WebSocket
+        client = make_client(fake)
+        statuses = [await client.get_states_status() for _ in range(11)]
+        await client.close()
+        return fake, client, statuses
+
+    fake, client, statuses = run(scenario())
+    ha_failed_auths = fake.failed_total
+    assert ha_failed_auths == 1, f"{ha_failed_auths} failed sign-ins reached Home Assistant"
+    assert fake.rest_sent == [], "no REST request is sent for a rejected token"
+    assert statuses == [401] * 11
+    assert all(r.extensions.get(ha_http.WITHHELD_EXTENSION) == "latched" for r in client.responses)
+
+
+# -- path validation ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [
+    "/api/../config", "/api/states/%2e%2e", "/api/states/light.a\\b", "/api/states?x=1", "/apix",
+    "/api/services/light/turn_on/extra", "/api/services/light", "/api/states/light.a\n", "/api/states/Light.A",
+    "/api/states/light", "/api/./states", "/api/states/light.a#x", "/api/st ates", "/api/states/\x00", "/", "",
+    "http://elsewhere/api/states", "//elsewhere/api", "/api/services/light/turn%5Fon", "/api/services/li ght/turn_on",
+    "/api/services/light/Turn_On", "/api/config/automation/config/..", "/api//states",
+])
+def test_a_path_that_cannot_name_an_api_resource_is_refused_before_any_send(path):
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        with pytest.raises(ValueError):
+            await stack.channel.request("GET", path)
+        await stack.channel.aclose()
+        return fake
+
+    fake = run(scenario())
+    assert fake.rest_sent == [] and fake.ws_connects == []
+
+
+@pytest.mark.parametrize("path", [
+    "/api", "/api/states", "/api/states/light.living_room_1", "/api/services/light/turn_on", "/api/services",
+    "/api/config/automation/config/abc_123", "/api/config/automation/config/a-b.c",
+])
+def test_a_clean_api_path_is_accepted(path):
+    assert ha_http.validate_path(path) == path
+
+
+# -- what the request carries ------------------------------------------------------------------
+
+
+def test_the_request_carries_a_digest_and_never_the_token():
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        built = []
+        original = stack.channel._client.send
+
+        async def spy(request, **kw):
+            built.append((repr(request), repr(request.extensions), dict(request.headers), dict(request.extensions)))
+            return await original(request, **kw)
+
+        stack.channel._client.send = spy
+        response = await stack.channel.request("GET", "/api/states")
+        await stack.channel.aclose()
+        return stack, built, response
+
+    stack, built, response = run(scenario())
+    assert response.status_code == 200
+    shown, extensions_shown, headers, extensions = built[0]
+    assert extensions["athena_ha_digest"] == stack.creds.digest
+    assert TOKEN not in shown and TOKEN not in extensions_shown and TOKEN not in repr(headers)
+    assert "authorization" not in headers, "the header is set by the transport at send time"
+
+
+def test_an_unknown_digest_is_refused_before_any_send():
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        request = stack.channel._client.build_request(
+            "GET", URL + "/api/states", extensions={"athena_ha_digest": "not-a-digest"},
+        )
+        with pytest.raises(RuntimeError):
+            await stack.channel._client.send(request)
+        request = stack.channel._client.build_request("GET", URL + "/api/states")
+        with pytest.raises(RuntimeError):
+            await stack.channel._client.send(request)
+        await stack.channel.aclose()
+        return fake
+
+    fake = run(scenario())
+    assert fake.rest_sent == [] and fake.ws_connects == []
+
+
+def test_not_configured_raises_before_any_send():
+    from shared.ha_credentials import HACredentials, StaticResolver
+    from shared.ha_http import HAChannel, HomeAssistantNotConfiguredError
+
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        channel = HAChannel(StaticResolver(HACredentials()), stack.latch, caller="orchestrator_rest", inner=fake.rest_transport())
+        assert channel.configured is False
+        with pytest.raises(HomeAssistantNotConfiguredError):
+            await channel.request("GET", "/api/states")
+        await channel.aclose()
+        return fake
+
+    assert run(scenario()).rest_sent == []
+
+
+def test_a_token_change_applies_on_the_next_request():
+    from shared.ha_credentials import StaticResolver
+
+    async def scenario():
+        fake = FakeHA(valid=("new-token",))
+        stack = make_stack(fake=fake, token="new-token")
+        status = (await stack.channel.request("GET", "/api/states")).status_code
+        await stack.channel.aclose()
+        return status
+
+    assert run(scenario()) == 200
+
+
+def test_the_proxy_environment_is_ignored(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:3128")
+
+    async def scenario():
+        from shared.ha_credentials import StaticResolver
+        from shared.ha_http import HAChannel
+
+        stack = make_stack()
+        channel = HAChannel(stack.resolver, stack.latch, caller="orchestrator_rest")
+        proxied = [m for m in channel._client._mounts]
+        await channel.aclose()
+        return proxied
+
+    assert run(scenario()) == [], "an explicit transport means httpx reads no *_PROXY variable"
+
+
+# -- the gate in front of a proven token -----------------------------------------------------
+
+
+def test_a_proven_token_goes_through_and_a_first_use_goes_out_as_a_reserved_canary():
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        kinds = []
+        original = stack.latch.admit
+
+        async def spy(*a, **kw):
+            admission = await original(*a, **kw)
+            kinds.append(admission.kind)
+            return admission
+
+        stack.latch.admit = spy
+        first = await stack.channel.request("GET", "/api/states")
+        call = await stack.channel.request("POST", "/api/services/light/turn_on", json={"entity_id": "light.a"})
+        await stack.channel.aclose()
+        return fake, kinds, first, call
+
+    fake, kinds, first, call = run(scenario())
+    assert (first.status_code, call.status_code) == (200, 200)
+    assert kinds == [ha_auth.PROVE, ha_auth.OPEN, ha_auth.CANARY], kinds
+    assert fake.failed_total == 0 and fake.ws_auth_frames == 1, "one proof, then plain requests"
+
+
+def test_a_cancelled_send_is_observed_once_as_unreachable_sent_and_gives_its_slot_back():
+    async def scenario():
+        fake = FakeHA(delay=0.2)
+        stack = make_stack(fake=fake)
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append(kw["result"])
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        await stack.channel.request("GET", "/api/states")  # prove first
+        observed.clear()
+        task = asyncio.ensure_future(stack.channel.request("GET", "/api/states"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await stack.channel.aclose()
+        return observed, stack.latch._slots._value
+
+    observed, slots = run(scenario())
+    assert observed == ["unreachable_sent"], "the header was attached: the request may have been counted"
+    assert slots == ha_auth.INFLIGHT_CAP
+
+
+def test_a_gated_response_is_not_recorded_or_observed():
+    from shared import ha_link
+
+    async def scenario():
+        clock = Clock()
+        redis = FlakyRedis(ha_auth.MemoryRedis(clock=clock))
+        redis.down = True
+        monitor = ha_link.HALinkMonitor()
+        stack = make_stack(redis=redis, clock=clock, monitor=monitor, gate_wait=0.05)
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(*a, **kw):
+            observed.append(kw["result"])
+            return await original(*a, **kw)
+
+        stack.latch.observe = spy
+        response = await stack.channel.request("GET", "/api/states")
+        await stack.channel.aclose()
+        return response, observed, monitor, stack.fake
+
+    response, observed, monitor, fake = run(scenario())
+    assert response.status_code == 503 and response.extensions["athena_ha_withheld"] == "gated"
+    assert observed == [] and monitor.summary()["last_outcome"] is None
+    assert fake.rest_sent == [] and fake.ws_connects == []
+
+
+def test_a_withheld_response_reads_like_a_real_401_and_a_gated_one_like_a_real_5xx():
+    from orchestrator.model_safe_errors import PHRASES, model_safe_error
+
+    async def scenario():
+        fake = FakeHA(valid=())
+        stack = make_stack(fake=fake)
+        rejected = await stack.channel.request("GET", "/api/states")
+        clock = Clock()
+        down = FlakyRedis(ha_auth.MemoryRedis(clock=clock))
+        down.down = True
+        gated = await make_stack(redis=down, clock=clock, gate_wait=0.05).channel.request("GET", "/api/states")
+        return rejected, gated
+
+    rejected, gated = run(scenario())
+    for response in (rejected, gated):
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            response.raise_for_status()
+        phrase = model_safe_error(caught.value)
+        assert phrase == (PHRASES["not_configured"] if response is rejected else PHRASES["unavailable"])
+
+
+def test_a_withheld_request_asks_the_resolver_to_look_again_once_after_a_send():
+    class Resolver:
+        def __init__(self, inner):
+            self._inner, self.refreshes = inner, 0
+
+        def current(self):
+            return self._inner.current()
+
+        def snapshot_for(self, digest):
+            return self._inner.snapshot_for(digest)
+
+        async def refresh(self, force=False):
+            assert force is True
+            self.refreshes += 1
+
+    async def scenario():
+        from shared.ha_http import HAChannel
+
+        fake = FakeHA(valid=())
+        stack = make_stack(fake=fake)
+        resolver = Resolver(stack.resolver)
+        channel = HAChannel(resolver, stack.latch, caller="orchestrator_rest", inner=fake.rest_transport(), ws_connect=fake.ws_connect())
+        channel._transport._sent_since_withheld = True  # a request went out earlier
+        for _ in range(5):
+            await channel.request("GET", "/api/states")
+            await asyncio.sleep(0)
+        await channel.aclose()
+        return resolver.refreshes
+
+    assert run(scenario()) == 1, "one refresh after a send, not one per withheld request"
+
+
+def test_aclose_cancels_background_refresh_tasks_and_no_run_resolution_exists():
+    class SlowResolver:
+        def __init__(self, inner):
+            self._inner, self.cancelled = inner, False
+
+        def current(self):
+            return self._inner.current()
+
+        def snapshot_for(self, digest):
+            return self._inner.snapshot_for(digest)
+
+        async def refresh(self, force=False):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    async def scenario():
+        from shared.ha_http import HAChannel
+
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        resolver = SlowResolver(stack.resolver)
+        channel = HAChannel(resolver, stack.latch, caller="orchestrator_rest", inner=fake.rest_transport(), ws_connect=fake.ws_connect())
+        await channel.request("GET", "/api/states")
+        channel._transport._sent_since_withheld = True
+        channel._transport._refresh_in_background()
+        await asyncio.sleep(0)
+        await channel.aclose()
+        return resolver.cancelled, channel._transport._tasks
+
+    cancelled, tasks = run(scenario())
+    assert cancelled and not tasks
+    source = (ROOT / "src" / "shared" / "ha_http.py").read_text()
+    assert "_run_resolution" not in source
+
+
+def test_the_authorization_header_is_built_in_one_function():
+    tree = ast.parse((ROOT / "src" / "shared" / "ha_http.py").read_text())
+    holders = []
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        for fn in [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            if any(isinstance(n, ast.Constant) and n.value == "Authorization" for n in ast.walk(fn)):
+                holders.append(f"{cls.name}.{fn.name}")
+    assert holders == ["HATransport.handle_async_request", "HATransport._send_admitted"]
+    source = (ROOT / "src" / "shared" / "ha_http.py").read_text()
+    assert source.count('request.headers["Authorization"] = _bearer(snapshot, request)') == 2, "both sets go through the origin check"
+    assert source.count("Bearer ") == 1 or source.count('f"Bearer ') == 1
+    assert "/api/services" not in (ROOT / "src" / "shared" / "ha_http.py").read_text(), "ha_http names no service endpoint"
+
+
+# -- an error after the request was sent; the origin the token is sent to ---------------------------------
+
+
+class RaisingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, error):
+        self.error = error
+        self.sent = []
+
+    async def handle_async_request(self, request):
+        self.sent.append(request)
+        raise self.error
+
+
+def _canary_world(error):
+    """A proven token, then a first use of a new route through a transport that raises ``error``."""
+    from shared import ha_auth
+
+    async def scenario():
+        stack = make_stack(gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")  # prove first
+        raising = RaisingTransport(error)
+        stack.channel._transport._inner = raising
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append((admission.reserved, kw["result"]))
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        budget = lambda: ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {})  # noqa: E731
+        before = int(budget().get("n", 0))
+        with pytest.raises(type(error)):
+            await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return observed, int(budget().get("n", 0)) - before, len(raising.sent)
+
+    return run(scenario())
+
+
+def test_a_reserved_canary_that_fails_after_the_request_was_sent_stays_counted():
+    for error in (httpx.ReadTimeout("slow"), httpx.ReadError("reset"), httpx.RemoteProtocolError("closed")):
+        observed, counted, sent = _canary_world(error)
+        assert observed == [(True, "unreachable_sent")], error
+        assert counted == 1 and sent == 1, "the reservation stays spent: Home Assistant may have counted it"
+
+
+def test_a_reserved_canary_that_never_connected_gives_its_reservation_back():
+    for error in (httpx.ConnectError("refused"), httpx.ConnectTimeout("no route")):
+        observed, counted, sent = _canary_world(error)
+        assert observed == [(True, "other")], error
+        assert counted == 0 and sent == 1
+
+
+def test_the_token_is_sent_only_to_the_origin_the_credentials_belong_to():
+    async def scenario(url):
+        stack = make_stack(gate_wait=0.1)
+        digest = stack.creds.digest
+        request = httpx.Request("GET", url, extensions={"athena_ha_digest": digest})
+        recording = RaisingTransport(RuntimeError("must not be sent"))
+        stack.channel._transport._inner = recording
+        try:
+            await stack.channel._transport.handle_async_request(request)
+        except RuntimeError as exc:
+            return str(exc), recording.sent, request.headers.get("authorization")
+        return None, recording.sent, request.headers.get("authorization")
+
+    for url in ("https://other-host.example.invalid/api/states", "http://ha-fixture.invalid/api/states",
+                "https://ha-fixture.invalid:9443/api/states", "https://ha-fixture.invalid.attacker.invalid/api/states"):
+        message, sent, authorization = run(scenario(url))
+        assert "not addressed to the Home Assistant" in message, url
+        assert sent == [] and authorization is None, url
+
+
+def test_the_proof_request_is_held_to_the_same_origin():
+    async def scenario():
+        stack = make_stack()
+        request = httpx.Request("GET", "https://other-host.example.invalid/api", extensions={
+            "athena_ha_digest": stack.creds.digest, "athena_ha_proof": True,
+        })
+        stack.channel._transport._inner = RaisingTransport(RuntimeError("must not be sent"))
+        with pytest.raises(RuntimeError, match="not addressed"):
+            await stack.channel._transport.handle_async_request(request)
+        return request.headers.get("authorization")
+
+    assert run(scenario()) is None
+
+
+def test_a_request_to_the_right_origin_still_carries_the_token():
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        response = await stack.channel.request("GET", "/api/states")
+        await stack.channel.aclose()
+        return response.status_code
+
+    assert run(scenario()) == 200
+
+
+def _budget_n(stack):
+    from shared import ha_auth
+
+    return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("n", 0))
+
+
+def _budget_r(stack):
+    from shared import ha_auth
+
+    return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("r", 0))
+
+
+def _proven_raw(stack):
+    return stack.redis._raw_get(stack.latch._k("proven:v2", stack.creds.digest))
+
+
+async def _cancel_midway(stack, method, path, body):
+    task = asyncio.ensure_future(stack.channel.request(method, path, json=body))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_a_cancelled_caller_of_a_valid_token_canary_leaves_n_unchanged_and_the_proof_refreshed():
+    """A5.3: the canary finishes and settles even though its caller went away."""
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")  # prove first
+        stack.clock.advance(5)
+        before_n, before_proof = _budget_n(stack), _proven_raw(stack)
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.5)  # the shielded canary finishes on its own
+        tasks_left = len(stack.channel._transport._tasks)
+        sent = [m for _, m, p in fake.rest_sent if p == "/api/services/cover/open"]
+        after = (_budget_n(stack), _proven_raw(stack), stack.latch._pending, stack.latch._unsettled)
+        r = _budget_r(stack)
+        await stack.channel.aclose()
+        return before_n, before_proof, after, tasks_left, sent, r
+
+    before_n, before_proof, (n, proof, pending, unsettled), tasks_left, sent, r = run(scenario())
+    assert n == before_n, "a valid token's canary is not counted, cancelled caller or not"
+    assert proof != before_proof, "the pass refreshed the proof"
+    assert r == 0 and not pending and not unsettled and tasks_left == 0
+    assert sent == ["POST"]
+
+
+def test_a_cancelled_caller_of_a_rejected_token_canary_counts_exactly_once():
+    async def scenario():
+        fake = FakeHA(threshold=None)
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        before = _budget_n(stack)
+        fake.revoke(TOKEN)
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.5)
+        counted, failed = _budget_n(stack) - before, fake.failed_total
+        again = await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return counted, failed, again.status_code, fake.failed_total, stack.latch._unsettled
+
+    counted, failed, again, failed_after, unsettled = run(scenario())
+    assert counted == 1 and failed == 1, "one 401 at Home Assistant, one count in the budget"
+    assert again == 401 and failed_after == 1, "the next request is withheld, not sent"
+    assert not unsettled
+
+
+def test_a_canary_that_times_out_after_the_header_stays_counted(monkeypatch):
+    from shared import ha_auth
+
+    async def scenario():
+        monkeypatch.setattr(ha_auth, "CANARY_TIMEOUT", 0.2)
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        stack.channel._transport._inner = HangingTransport()
+        before = _budget_n(stack)
+        with pytest.raises(httpx.ReadTimeout):
+            await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        counted = _budget_n(stack) - before
+        await stack.channel.aclose()
+        return counted
+
+    assert run(scenario()) == 1, "cut off after the header: it may have been counted"
+
+
+class HangingTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request):
+        await asyncio.sleep(60)
+
+
+class RecordingTransport(httpx.AsyncBaseTransport):
+    """Answers 200 after ``delay``; records the timeouts it was handed and whether the body was closed."""
+
+    def __init__(self, delay=0.0):
+        self.delay = delay
+        self.timeouts = []
+        self.closed = []
+
+    async def handle_async_request(self, request):
+        self.timeouts.append(dict(request.extensions.get("timeout") or {}))
+        await asyncio.sleep(self.delay)
+        owner = self
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"[]"
+
+            async def aclose(self):
+                owner.closed.append(True)
+
+        return httpx.Response(200, stream=Body(), request=request)
+
+
+def test_a_canary_is_given_a_connect_timeout_inside_its_own_bound():
+    from shared import ha_auth
+
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1, timeout=30.0)
+        await stack.channel.request("GET", "/api/states")
+        inner = RecordingTransport()
+        stack.channel._transport._inner = inner
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # canary
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # open
+        await stack.channel.aclose()
+        return inner.timeouts
+
+    canary, plain = run(scenario())
+    assert canary["connect"] <= ha_auth.CANARY_TIMEOUT / 2
+    assert plain["connect"] == 30.0, "an ordinary request keeps the channel's timeout"
+
+
+def test_the_response_of_a_canary_whose_caller_went_away_is_closed():
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        inner = RecordingTransport(delay=0.3)
+        stack.channel._transport._inner = inner
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.6)
+        closed = list(inner.closed)
+        await stack.channel.aclose()
+        return closed
+
+    assert run(scenario()) == [True]
+
+
+def test_closing_the_channel_stops_an_in_flight_canary_and_still_settles_it():
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        stack.channel._transport._inner = HangingTransport()
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append(kw["result"])
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        caller = asyncio.ensure_future(stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"}))
+        await asyncio.sleep(0.1)
+        await asyncio.wait_for(stack.channel.aclose(), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        return observed, len(stack.channel._transport._tasks)
+
+    observed, tasks_left = run(scenario())
+    assert observed == ["unreachable_sent"] and tasks_left == 0, "it was cut short after the header, so it counts"
+
+
+def test_an_open_send_cancelled_after_the_header_is_exception_b_and_leaves_the_proof_live():
+    """A5.4: an OPEN send holds no reservation. Cancelling it after the header leaves n and the
+    proof as they were: this is revocation in flight, inside exception (b), and it is pinned here."""
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # the route's canary
+        before_n, before_proof = _budget_n(stack), _proven_raw(stack)
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append((admission.kind, admission.reserved, kw["result"]))
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        fake.delay = 0.0
+        after = (_budget_n(stack), _proven_raw(stack))
+        cancelled_only = list(observed)
+        follow_up = await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return before_n, before_proof, after, cancelled_only, follow_up.status_code
+
+    before_n, before_proof, after, observed, follow_up = run(scenario())
+    assert observed == [("open", False, "unreachable_sent")]
+    assert after == (before_n, before_proof), "nothing counted, and the proof is as live as before"
+    assert follow_up == 200
+
+
+def test_a_refused_origin_gives_a_reserved_canary_back():
+    """A4: only something before the Authorization header is attached refunds."""
+    async def refused_origin():
+        stack = make_stack(gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        before = _budget_n(stack)
+        request = httpx.Request("POST", "https://other-host.example.invalid/api/services/cover/open", json={"entity_id": "cover.a"},
+                                extensions={"athena_ha_digest": stack.creds.digest})
+        with pytest.raises(RuntimeError, match="not addressed"):
+            await stack.channel._transport.handle_async_request(request)
+        await stack.channel.aclose()
+        return _budget_n(stack) - before
+
+    assert run(refused_origin()) == 0, "refused before the header: given back"

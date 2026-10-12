@@ -173,10 +173,10 @@ REVIEWED_BY_FILE = {
         ("GET", "/api/gateway-config/public"): ("service_or_user", "read"),
     },
     "ha_pipelines.py": {
-        ("GET", "/api/ha-pipelines/health"): ("user", "read"),
         ("GET", "/api/ha-pipelines/modes"): ("user", "read"),
         ("GET", "/api/ha-pipelines/pipelines"): ("user", "read"),
         ("GET", "/api/ha-pipelines/pipelines/preferred"): ("user", "read"),
+        ("POST", "/api/ha-pipelines/pipelines/set-preferred"): ("user", "write"),
     },
     "intent_routing.py": {
         ("GET", "/api/intent-routing/providers/public"): ("service_or_user", "read"),
@@ -467,7 +467,7 @@ def test_gated_named_members():
 def test_reviewed_table_totals():
     pins = list(REVIEWED.values())
     assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 43, "service": 1}
-    assert collections.Counter(perm for _, perm in pins) == {"read": 82, "read:alerts": 1, "write": 10, None: 1}
+    assert collections.Counter(perm for _, perm in pins) == {"read": 81, "read:alerts": 1, "write": 11, None: 1}
     grouped = [name for files in REVIEWED_GROUPS.values() for name in files]
     assert sorted(grouped) == sorted(REVIEWED_BY_FILE), "every file is in exactly one group"
     assert tuple(
@@ -481,7 +481,7 @@ NON_MUTATING_POSTS = {("POST", "/api/mcp-security/check-domain")}
 
 def test_reviewed_writes_need_write():
     non_get = {op: pin for op, pin in REVIEWED.items() if op[0] != "GET"}
-    assert len(non_get) == 12, sorted(non_get)
+    assert len(non_get) == 13, sorted(non_get)
     lenient = {op for op, pin in non_get.items() if pin != ("service", None) and pin[1] != "write"}
     assert lenient == NON_MUTATING_POSTS
 

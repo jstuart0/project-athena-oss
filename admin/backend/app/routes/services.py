@@ -180,10 +180,11 @@ def create_audit_log(
 # Quick Health Check Endpoints (for status bar)
 # =============================================================================
 
+from app.services import service_urls
 # Environment variable fallbacks (used when service not in database)
 ENV_FALLBACKS = {
-    "gateway": os.getenv("GATEWAY_URL", "http://localhost:8000"),
-    "orchestrator": os.getenv("ORCHESTRATOR_URL", "http://localhost:8001"),
+    "gateway": service_urls.gateway_url(),
+    "orchestrator": service_urls.orchestrator_url(),
     "ollama": get_config().ollama_url,
     "redis": f"redis://{os.getenv('REDIS_SERVICE_HOST', 'redis')}:{os.getenv('REDIS_SERVICE_PORT', '6379')}",
     "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),

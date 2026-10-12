@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import unicodedata
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 import structlog.testing
@@ -134,7 +135,7 @@ def _isolated_config(monkeypatch):
 
 @pytest.fixture
 def manager():
-    m = hem.HAEntityManager("http://ha.invalid:8123", "token")
+    m = hem.HAEntityManager(MagicMock())
     m._entities_cache = _build_entities()
     m._cache_time = datetime.now()
     m._build_indexes()

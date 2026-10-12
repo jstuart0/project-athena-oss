@@ -1,82 +1,50 @@
-"""Home Assistant API client for Project Athena"""
+"""Home Assistant API client for Project Athena.
 
-import os
-import httpx
+A thin typed layer over ``shared.ha_http.HAChannel``: the channel owns the
+credentials, the failed-sign-in gate and the transport, so this client holds no
+URL, no token and no HTTP client of its own.
+"""
+
 import logging
 from typing import List, Optional, Dict, Any
 
-from shared.ha_link import HALinkMonitor, recording_transport
+from shared.ha_http import HAChannel, HomeAssistantNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
-
-class HomeAssistantNotConfiguredError(Exception):
-    """Raised when Home Assistant is not configured but a method is called."""
-    pass
+__all__ = ["HomeAssistantClient", "HomeAssistantNotConfiguredError"]
 
 
 class HomeAssistantClient:
     """Client for interacting with Home Assistant API.
 
-    This client supports graceful degradation - if HA_URL and HA_TOKEN are not
-    provided, the client will be marked as disabled and methods will raise
-    HomeAssistantNotConfiguredError with a helpful message.
+    This client supports graceful degradation: when Home Assistant is not
+    configured (no address and token under External API Keys or in
+    ``HA_URL``/``HA_TOKEN``), ``is_configured`` is false and each method raises
+    ``HomeAssistantNotConfiguredError`` with a helpful message.
     """
 
-    def __init__(
-        self,
-        url: Optional[str] = None,
-        token: Optional[str] = None,
-        *,
-        link_monitor: Optional[HALinkMonitor] = None,
-    ):
-        # Get URL from parameter, env var, or leave empty (no hardcoded default)
-        self.url = url or os.getenv("HA_URL", "")
-        self.token = token or os.getenv("HA_TOKEN", "")
-
-        # Determine if HA is configured
-        self._disabled = not (self.url and self.token)
-
-        if self._disabled:
-            logger.warning(
-                "ha_not_configured",
-                extra={"detail": "HomeAssistantClient will not function. Set HA_URL and HA_TOKEN to enable."}
-            )
-            self.headers = {}
-            self.client = None
-        else:
-            self.headers = {
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-            }
-            self.client = httpx.AsyncClient(
-                base_url=self.url,
-                headers=self.headers,
-                verify=False,  # Self-signed cert
-                timeout=30.0,
-                # With a monitor, every response and transport failure is
-                # recorded for the HA link status (shared.ha_link).
-                transport=recording_transport(link_monitor) if link_monitor is not None else None,
-            )
+    def __init__(self, channel: HAChannel):
+        self._channel = channel
 
     def _check_configured(self) -> None:
         """Check if HA is configured and raise helpful error if not."""
-        if self._disabled:
+        if not self._channel.configured:
             raise HomeAssistantNotConfiguredError(
                 "Home Assistant is not configured. "
-                "Set HA_URL and HA_TOKEN environment variables, or disable the Home Assistant module "
-                "by setting MODULE_HOME_ASSISTANT=false."
+                "Save its address and a long-lived access token under External API Keys "
+                "(home-assistant), or set the HA_URL and HA_TOKEN environment variables."
             )
 
     @property
     def is_configured(self) -> bool:
         """Check if Home Assistant is configured."""
-        return not self._disabled
-    
+        return self._channel.configured
+
     async def get_state(self, entity_id: str) -> Dict[str, Any]:
         """Get the state of an entity."""
         self._check_configured()
-        response = await self.client.get(f"/api/states/{entity_id}")
+        response = await self._channel.request("GET", f"/api/states/{entity_id}")
         response.raise_for_status()
         return response.json()
 
@@ -86,10 +54,10 @@ class HomeAssistantClient:
         allowlist so bulk-state callers never need the raw, unwrapped
         client)."""
         self._check_configured()
-        response = await self.client.get("/api/states")
+        response = await self._channel.request("GET", "/api/states")
         response.raise_for_status()
         return response.json()
-    
+
     async def call_service(
         self,
         domain: str,
@@ -101,17 +69,17 @@ class HomeAssistantClient:
         import structlog
         slog = structlog.get_logger()
 
-        url = f"/api/services/{domain}/{service}"
+        path = f"/api/services/{domain}/{service}"
         slog.info(
             "ha_call_service_request",
             domain=domain,
             service=service,
-            service_data=service_data,
-            url=f"{self.url}{url}"
+            data_keys=sorted((service_data or {}).keys()),
+            path=path
         )
 
         try:
-            response = await self.client.post(url, json=service_data or {})
+            response = await self._channel.request("POST", path, json=service_data or {})
             slog.info(
                 "ha_call_service_response",
                 domain=domain,
@@ -126,10 +94,11 @@ class HomeAssistantClient:
                 "ha_call_service_error",
                 domain=domain,
                 service=service,
-                error=str(e)
+                error_class=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
             )
             raise
-    
+
     async def create_automation(
         self,
         automation_id: str,
@@ -156,15 +125,15 @@ class HomeAssistantClient:
             config_with_id = {**config, "id": automation_id}
 
             # HA's config/automation/config endpoint
-            url = f"/api/config/automation/config/{automation_id}"
+            path = f"/api/config/automation/config/{automation_id}"
 
             slog.debug(
                 "ha_create_automation_request",
                 automation_id=automation_id,
-                config=config_with_id
+                config_keys=sorted(config_with_id.keys()),
             )
 
-            response = await self.client.post(url, json=config_with_id)
+            response = await self._channel.request("POST", path, json=config_with_id)
 
             if response.status_code in (200, 201):
                 # Reload automations to make the new one active
@@ -183,7 +152,8 @@ class HomeAssistantClient:
             slog.error(
                 "ha_create_automation_exception",
                 automation_id=automation_id,
-                error=str(e)
+                error_class=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
             )
             return False
 
@@ -199,8 +169,8 @@ class HomeAssistantClient:
         """
         self._check_configured()
         try:
-            url = f"/api/config/automation/config/{automation_id}"
-            response = await self.client.delete(url)
+            path = f"/api/config/automation/config/{automation_id}"
+            response = await self._channel.request("DELETE", path)
 
             if response.status_code in (200, 204):
                 await self.call_service("automation", "reload")
@@ -230,6 +200,5 @@ class HomeAssistantClient:
             return False
 
     async def close(self):
-        """Close the HTTP client."""
-        if self.client:
-            await self.client.aclose()
+        """Close the channel (its HTTP client and any background refresh)."""
+        await self._channel.aclose()

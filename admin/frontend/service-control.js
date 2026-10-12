@@ -223,64 +223,16 @@ function groupServiceControlRows(rows) {
 }
 
 /**
- * The words for a row's display status. app.js keeps an equal copy for the
- * Dashboard (a Node test pins the two equal on these six codes); both pages
- * speak one language.
- */
-function statusLabel(status) {
-    const labels = {
-        healthy: 'Healthy',
-        unhealthy: 'Unhealthy',
-        unconfigured: 'Needs setup',
-        pending: 'Checking…',
-        stale: 'No recent check',
-        disabled: 'Not monitored',
-    };
-    return Object.prototype.hasOwnProperty.call(labels, status) ? labels[status] : String(status);
-}
-
-const _SC_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const _SC_MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-/**
- * Age of an ISO time as words: '12m ago', '3h ago', or at 24 h and more an
- * absolute '27 Sep' (year added when it isn't this year). spoken=true spells
- * it out for screen readers ('12 minutes ago', '27 September'). null when the
- * time can't be read; a future time reads 'just now'.
- */
-function _scAgeWords(iso, nowMs, spoken) {
-    const at = Date.parse(iso);
-    if (Number.isNaN(at)) return null;
-    const ageMs = nowMs - at;
-    if (ageMs < 60 * 1000) return 'just now';
-    const minutes = Math.floor(ageMs / 60000);
-    if (minutes < 60) return spoken ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago` : `${minutes}m ago`;
-    const hours = Math.floor(ageMs / 3600000);
-    if (hours < 24) return spoken ? `${hours} ${hours === 1 ? 'hour' : 'hours'} ago` : `${hours}h ago`;
-    const when = new Date(at);
-    const year = when.getFullYear() === new Date(nowMs).getFullYear() ? '' : ` ${when.getFullYear()}`;
-    return `${when.getDate()} ${(spoken ? _SC_MONTHS_LONG : _SC_MONTHS)[when.getMonth()]}${year}`;
-}
-
-/**
  * Pure: the one page-level warning when the health checker has stopped (every
  * enabled row is stale), as HTML; '' otherwise. Said once here rather than
- * once per row.
+ * once per row. The wording is status-vocab.js's.
  */
 function servicePollerBanner(services, nowMs) {
     const enabled = (services || []).filter((row) => row.enabled !== false);
     if (enabled.length === 0 || !enabled.every((row) => row.monitoring === 'stale')) return '';
     const checked = enabled.map((row) => Date.parse(row.last_health_check)).filter((ms) => !Number.isNaN(ms));
-    let sentence = "Health checks haven't run yet.";
-    if (checked.length) {
-        const newest = new Date(Math.max(...checked));
-        const sameDay = nowMs - newest.getTime() < 24 * 60 * 60 * 1000;
-        const when = sameDay
-            ? `${String(newest.getHours()).padStart(2, '0')}:${String(newest.getMinutes()).padStart(2, '0')}`
-            : _scAgeWords(newest.toISOString(), nowMs, false);
-        sentence = `Health checks haven't run since ${escapeHtml(when)}.`;
-    }
-    return `<div class="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4" role="status"><p class="text-yellow-200">${sentence} The statuses below may be out of date.</p></div>`;
+    const newest = checked.length ? new Date(Math.max(...checked)).toISOString() : null;
+    return stalePollerBanner(newest, nowMs, {});
 }
 
 const RUN_STATE_BADGES = {
@@ -307,35 +259,13 @@ function _isNativelyRunning(row) {
 }
 
 /**
- * One health vocabulary for every group (core/infra/RAG) -- Healthy /
- * Unhealthy / Needs setup / Checking… -- so the page stops speaking two
- * different status languages (ruby H2 knock-on).
+ * One health vocabulary for every group (core/infra/RAG), from status-vocab.js.
+ * A word outside the registry's own set shows no line.
  */
 function _healthLine(row) {
     if (row.run_state === 'disabled') return null;
-    switch (row.health_status) {
-        case 'healthy':
-            return { text: 'Healthy', cls: 'text-green-400' };
-        case 'unconfigured':
-            return { text: 'Needs setup', cls: 'text-amber-400' };
-        case 'unhealthy':
-        case 'degraded':
-            return { text: 'Unhealthy', cls: 'text-red-400' };
-        case 'stale':
-            return { text: 'No recent check', cls: 'text-gray-400' };
-        case 'pending':
-        case null:
-        case undefined:
-            return { text: 'Checking…', cls: 'text-gray-400' };
-        default:
-            return null;
-    }
-}
-
-/** "Not monitored · last checked 27 Sep" / "Not monitored · never checked". */
-function _notMonitoredText(lastHealthCheck, nowMs) {
-    const age = lastHealthCheck ? _scAgeWords(lastHealthCheck, nowMs, false) : null;
-    return age ? `Not monitored · last checked ${age}` : 'Not monitored · never checked';
+    const info = registryHealthInfo(row.health_status);
+    return info ? { text: info.label, cls: TONE_TEXT[info.tone] } : null;
 }
 
 /**
@@ -363,7 +293,7 @@ function renderStatusCell(row) {
     // and show its old error only as history (grey, dated), never as a live fault.
     const isOff = row.monitoring === 'off';
     const offLine = isOff
-        ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(_notMonitoredText(row.last_health_check, Date.now()))}</div>`
+        ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(notMonitoredText(row.last_health_check, Date.now()))}</div>`
         : '';
     const errorDetail = row.last_error
         ? (isOff
@@ -589,12 +519,10 @@ function renderRagServicesTable(ragRows) {
     }
     if (flips.length > 0 && window.Athena?.components?.Toast) {
         const Toast = window.Athena.components.Toast;
-        const typeFor = (to) => (to === 'healthy' || to === 'running' || to === 'online')
-            ? 'success'
-            : (to === 'error' || to === 'unreachable' || to === 'down') ? 'error' : 'warning';
         if (flips.length <= 3) {
             for (const f of flips) {
-                Toast[typeFor(f.to)](`${f.name}: ${f.from} → ${f.to}`, { duration: 6000 });
+                const to = statusInfo(f.to);
+                Toast[TONE_TOAST[to.tone]](`${f.name}: ${statusInfo(f.from).label} → ${to.label}`, { duration: 6000 });
             }
         } else {
             Toast.warning(`${flips.length} services changed status`, { duration: 8000 });
@@ -636,13 +564,13 @@ function _freshnessChip(service, nowMs) {
     if (Number.isNaN(at) || now - at < 60 * 1000) return null;
     if (monitoring === 'stale') {
         return {
-            text: `last checked ${_scAgeWords(service.last_health_check, now, false)}`,
+            text: `last checked ${ageWords(service.last_health_check, now, false)}`,
             colorClass: 'text-gray-500',
             title: "Athena's background checker hasn't reached this service recently.",
         };
     }
     return {
-        text: `checked ${_scAgeWords(service.last_health_check, now, false).replace(' ago', '')} ago`,
+        text: `checked ${ageWords(service.last_health_check, now, false).replace(' ago', '')} ago`,
         colorClass: 'text-gray-500',
         title: 'How long ago the last health check ran.',
     };
@@ -657,12 +585,12 @@ function _freshnessChip(service, nowMs) {
  */
 function _buildStatusAriaLabel(displayName, healthStatus, lastHealthCheck, responseTimeMs, monitoring, nowMs) {
     const now = nowMs === undefined ? Date.now() : nowMs;
-    const age = lastHealthCheck ? _scAgeWords(lastHealthCheck, now, true) : null;
+    const age = lastHealthCheck ? ageWords(lastHealthCheck, now, true) : null;
     let parts;
     if (monitoring === 'off') {
-        parts = [`${displayName}: not monitored`, age ? `last checked ${age}` : 'never checked'];
+        parts = [`${displayName}: ${statusInfo('disabled').label.toLowerCase()}`, age ? `last checked ${age}` : 'never checked'];
     } else if (monitoring === 'stale') {
-        parts = [`${displayName}: no recent check`, age ? `last checked ${age}` : 'never checked'];
+        parts = [`${displayName}: ${statusInfo('stale').label.toLowerCase()}`, age ? `last checked ${age}` : 'never checked'];
     } else {
         parts = [`${displayName}: ${healthStatus || 'unknown'}`];
         if (age) parts.push(`checked ${age}`);
@@ -892,7 +820,7 @@ async function toggleRagService(serviceName) {
 
 /**
  * Per-row on-demand health check.
- * Disables the Refresh button and shows "Checking…" in the status cell until
+ * Disables the Refresh button and shows the pending label in the status cell until
  * the response returns, then reloads the row.  (ruby r1 / plan Phase 4 E)
  *
  * @param {string} serviceName - service name from data model
@@ -903,10 +831,10 @@ async function checkRagServiceHealth(serviceName, btn) {
     const statusCell = document.querySelector(`[data-status-item="${CSS.escape(serviceName)}"]`);
     if (btn) {
         btn.disabled = true;
-        btn.textContent = 'Checking…';
+        btn.textContent = statusInfo('pending').label;
     }
     if (statusCell) {
-        statusCell.innerHTML = '<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300">Checking…</span>';
+        statusCell.innerHTML = `<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300">${escapeHtml(statusInfo('pending').label)}</span>`;
     }
 
     try {
