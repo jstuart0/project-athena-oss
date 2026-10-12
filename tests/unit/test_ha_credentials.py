@@ -193,10 +193,6 @@ def test_without_a_service_key_the_digest_is_per_process_and_unshared():
 def test_legacy_marker_digest_is_the_registrys_old_token_marker():
     assert hc.legacy_marker_digest(TOKEN, KEY) == hmac.new(KEY.encode(), TOKEN.encode(), hashlib.sha256).hexdigest()[:16]
     assert hc.legacy_marker_digest(TOKEN, None) is None and hc.legacy_marker_digest("", KEY) is None
-    from shared import ha_registry
-
-    assert ha_registry.token_marker_key is hc.legacy_marker_digest
-    assert ha_registry.websocket_url is hc.websocket_url
 
 
 # -- the token never prints ---------------------------------------------------------------------------------------------
@@ -521,3 +517,70 @@ def test_a_static_resolver_serves_one_snapshot():
     static = hc.StaticResolver(c)
     assert static.current() is c and static.snapshot_for(c.digest) is c and static.snapshot_for("x") is None
     run(static.refresh(force=True))
+
+
+# -- the HTTP adapter orchestrator and gateway use ---------------------------------------------------------------
+
+
+class AdminReply:
+    """The admin client's key lookup, answering with a fixed (status, data)."""
+
+    def __init__(self, status, data=None):
+        self.status, self.data, self.asked = status, data, []
+
+    async def lookup_external_api_key(self, service):
+        self.asked.append(service)
+        return self.status, self.data
+
+
+@pytest.mark.parametrize("status,data,expected", [
+    ("found", {"endpoint_url": URL, "api_key": TOKEN}, ("found", URL, TOKEN)),
+    ("found", {"endpoint_url": URL, "api_key": ""}, ("found", URL, "")),
+    ("found", {"endpoint_url": None, "api_key": TOKEN}, ("found", "", TOKEN)),
+    ("found", {"endpoint_url": 5, "api_key": TOKEN}, ("unavailable", "", "")),
+    ("found", {"endpoint_url": URL, "api_key": ["x"]}, ("unavailable", "", "")),
+    ("found", "not a dict", ("unavailable", "", "")),
+    ("found", None, ("unavailable", "", "")),
+    ("absent", None, ("absent", "", "")),
+    ("unavailable", None, ("unavailable", "", "")),
+    ("anything else", None, ("unavailable", "", "")),
+])
+def test_the_http_adapter_maps_the_admin_answer_to_a_lookup(status, data, expected):
+    reply = AdminReply(status, data)
+    lookup = run(hc.admin_http_source(reply)())
+    assert (lookup.status, lookup.url, lookup.token) == expected
+    assert reply.asked == [hc.HA_KEY_SERVICE]
+
+
+def test_the_admin_clients_lookup_says_found_absent_or_unavailable_and_get_external_api_key_agrees():
+    from shared.admin_config import AdminConfigClient
+
+    def client_for(handler):
+        client = AdminConfigClient(admin_url="http://admin.invalid", api_key="service-key-for-tests")
+        client.client = __import__("httpx").AsyncClient(transport=__import__("httpx").MockTransport(handler))
+        return client
+
+    httpx = __import__("httpx")
+    cases = {
+        "found": (lambda r: httpx.Response(200, json={"api_key": "k", "endpoint_url": "https://x.example.invalid"}), "found"),
+        "absent": (lambda r: httpx.Response(404, json={"detail": "no"}), "absent"),
+        "refused": (lambda r: httpx.Response(401, json={"detail": "no"}), "unavailable"),
+        "error": (lambda r: httpx.Response(500, json={}), "unavailable"),
+    }
+    for name, (handler, expected) in cases.items():
+        client = client_for(handler)
+        status, data = run(client.lookup_external_api_key("home-assistant"))
+        assert status == expected, name
+        assert (data is not None) == (expected == "found")
+        assert (run(client.get_external_api_key("home-assistant")) is not None) == (expected == "found")
+
+    def broken(request):
+        raise httpx.ConnectError("down")
+
+    assert run(client_for(broken).lookup_external_api_key("home-assistant")) == ("unavailable", None)
+
+
+def test_the_old_home_assistant_config_getter_and_its_third_source_are_gone():
+    source = (ROOT / "src" / "shared" / "admin_config.py").read_text()
+    assert "get_home_assistant_config" not in source
+    assert '__name__ == "__main__"' not in source and "ha_token[:" not in source

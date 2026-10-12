@@ -2,7 +2,7 @@
 
 The status is passive. Nothing here sends a request to Home Assistant: each
 orchestrator replica records the outcome of the HA traffic it already makes
-(``RecordingTransport`` under the REST clients) and publishes it, with its area
+(``HATransport`` under the REST channel feeds the monitor) and publishes it, with its area
 registry state, to one Redis hash. A background loop merges the hash into a
 cluster view that handlers read from memory. A health or probe handler asks
 ``HALinkPublisher.view()`` and never touches Home Assistant or Redis.
@@ -12,7 +12,6 @@ Layout:
 - ``evidence`` / ``exception_outcome``: which responses and exceptions count,
   as a closed set of outcome words. No exception text or object is kept.
 - ``HALinkMonitor``: the REST side. Synchronous, no I/O.
-- ``RecordingTransport``: an httpx transport wrapper feeding the monitor.
 - ``merge``: pure. Combines the replicas' entries under clock-skew rules.
 - ``link_state``: pure. The one truth table (``tests/fixtures/ha_link``).
 - ``HALinkPublisher``: the Redis loop and the cached view, with a local
@@ -228,43 +227,6 @@ class HALinkMonitor:
             "consecutive_failures": self._consecutive_failures,
             "ban_suspected": self._ban_suspected,
         }
-
-
-class RecordingTransport(httpx.AsyncBaseTransport):
-    """Hands every request to ``inner`` unchanged and records the outcome.
-
-    The identical response object is returned and the identical exception is
-    re-raised. The outcome comes from the status line; a body-read failure
-    later on is not recorded again. Cancellation records nothing.
-    """
-
-    def __init__(self, inner: httpx.AsyncBaseTransport, monitor: HALinkMonitor):
-        self._inner = inner
-        self._monitor = monitor
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        try:
-            response = await self._inner.handle_async_request(request)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._monitor.record_exception(exc)
-            raise
-        self._monitor.record_response(request.method, request.url.path, response.status_code)
-        return response
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
-
-def recording_transport(monitor: HALinkMonitor) -> RecordingTransport:
-    """The transport an HA REST client passes to ``httpx.AsyncClient``.
-
-    ``verify=False`` is the same self-signed-certificate setting the clients
-    have always used. Passing ``transport=`` also means httpx ignores the
-    ``*_PROXY`` environment variables for these clients.
-    """
-    return RecordingTransport(httpx.AsyncHTTPTransport(verify=False), monitor)
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,12 @@ class RuntimeContext:
     # fed by the HA REST clients; the publisher serves the merged view.
     ha_link: Optional[Any] = None
     ha_link_publisher: Optional[Any] = None
+    # Where this process's Home Assistant address and token come from
+    # (shared.ha_credentials.HACredentialResolver) and the failed sign-in gate
+    # every request to it passes (shared.ha_auth.HAAuthLatch). Optional: an
+    # install with no Home Assistant still builds both.
+    ha_credentials: Optional[Any] = None
+    ha_auth_latch: Optional[Any] = None
     # The room vocabulary (orchestrator.room_directory.RoomDirectoryProvider);
     # optional: readers fall back to the generic room words without it
     room_directory: Optional[Any] = None
@@ -261,6 +267,20 @@ def get_ha_link() -> Optional[Any]:
     return _ctx.ha_link
 
 
+def set_ha_credentials(c: Any) -> None:
+    _ctx.ha_credentials = c
+
+def get_ha_credentials() -> Optional[Any]:
+    return _ctx.ha_credentials
+
+
+def set_ha_auth_latch(c: Any) -> None:
+    _ctx.ha_auth_latch = c
+
+def get_ha_auth_latch() -> Optional[Any]:
+    return _ctx.ha_auth_latch
+
+
 def set_ha_link_publisher(c: Any) -> None:
     _ctx.ha_link_publisher = c
 
@@ -402,6 +422,7 @@ async def close_all() -> None:
                                             an in-flight room-group fetch)
       - ha_registry.close()                (shared.ha_registry: cancels an
                                             in-flight registry fetch)
+      - ha_credentials.close()             (shared.ha_credentials: stops the refresh loop)
       - ha_link_publisher.close()          (shared.ha_link: stops the Redis publish loop)
       - cache_client.close()               (shared.cache)
       - session_manager.close()            (orchestrator.session_manager)
@@ -411,10 +432,8 @@ async def close_all() -> None:
       - llm_router.close()                 (shared.llm_router: drains pending metric
                                             tasks for up to 2 s, then closes its HTTP client)
 
-    Clients in the close_order that have NO close method (silently skipped):
-      - ha_client  — HomeAssistantClient has no close(); its underlying
-                     httpx.AsyncClient is leaked at shutdown (pre-existing
-                     OSS behavior; tracked separately).
+      - ha_client.close()                  (shared.ha_client: closes its HAChannel, and the
+                                            channel's HTTP client and background refresh)
     """
     await drain_background()
     close_order = (
@@ -422,6 +441,7 @@ async def close_all() -> None:
         "ha_registry",
         "ha_client",
         "llm_router",
+        "ha_credentials",
         "ha_link_publisher",
         "cache_client",
         "session_manager",

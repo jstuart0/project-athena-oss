@@ -141,6 +141,24 @@ class KeyLookup:
 AdminKeySource = Callable[[], Awaitable[KeyLookup]]
 
 
+def admin_http_source(admin_client: Any) -> AdminKeySource:
+    """The admin key as an orchestrator or gateway reads it: over the admin
+    backend's service-key route (``AdminConfigClient.lookup_external_api_key``)."""
+
+    async def source() -> KeyLookup:
+        status, data = await admin_client.lookup_external_api_key(HA_KEY_SERVICE)
+        if status == "absent":
+            return KeyLookup.absent()
+        if status != "found" or not isinstance(data, dict):
+            return KeyLookup.unavailable()
+        url, token = data.get("endpoint_url"), data.get("api_key")
+        if not (isinstance(url, str) or url is None) or not (isinstance(token, str) or token is None):
+            return KeyLookup.unavailable()
+        return KeyLookup.found(url, token)
+
+    return source
+
+
 @dataclass(frozen=True)
 class HACredentials:
     """One immutable view of the credentials. ``configured`` is a URL and a
@@ -432,6 +450,7 @@ class HACredentialResolver:
         self._lock = asyncio.Lock()
         self._last_forced: Optional[float] = None
         self._closed = False
+        self._task: Optional["asyncio.Task[Any]"] = None
         self._logged_unshared = False
         self._dns_logged: Optional[str] = None
         self._announced: Optional[Tuple[Any, ...]] = None
@@ -560,9 +579,18 @@ class HACredentialResolver:
         await self.refresh()
 
     async def run(self) -> None:
+        self._task = asyncio.current_task()
         while not self._closed:
             await self._sleep(self._interval)
             await self.refresh()
 
     async def close(self) -> None:
         self._closed = True
+        task = self._task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+        self._task = None

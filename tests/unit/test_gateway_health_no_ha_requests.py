@@ -1,7 +1,7 @@
 """The gateway's health routes send nothing to Home Assistant.
 
-Fail-on-call transports sit under the gateway's shared Home Assistant client
-and in place of its area registry fetcher; the orchestrator client answers 200
+Fail-on-call transports sit under the gateway's Home Assistant channel (REST and
+the WebSocket token proof) and in place of its area registry fetcher; the orchestrator client answers 200
 over a MockTransport. A positive control proves the fixture can fail. The gateway
 reaches the orchestrator only over HTTP, so the full chain is this test
 composed with tests/unit/test_health_probes.py (which covers the orchestrator
@@ -25,6 +25,10 @@ sys.modules.setdefault("prometheus_client", mock.MagicMock())
 
 import gateway.main as gw  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from gateway.gateway_ha import GatewayHA  # noqa: E402
+from shared import ha_auth  # noqa: E402
+from shared.ha_credentials import KeyLookup, StaticResolver, resolve  # noqa: E402
+from shared.ha_http import HAChannel  # noqa: E402
 from shared.ha_registry import HARegistry  # noqa: E402
 
 HA_URL = "https://ha.test"
@@ -39,6 +43,10 @@ def traffic(monkeypatch):
         seen.append(f"{req.method} {req.url}")
         raise AssertionError(f"unexpected request to Home Assistant: {req.method} {req.url}")
 
+    def ws_connect(url, **kwargs):
+        seen.append("websocket connect")
+        raise AssertionError("unexpected WebSocket connection to Home Assistant")
+
     async def registry_fetcher():
         seen.append("registry fetch")
         raise AssertionError("unexpected area registry fetch")
@@ -46,7 +54,13 @@ def traffic(monkeypatch):
     def orchestrator_handler(req):
         return httpx.Response(200, json={"status": "healthy"})
 
-    monkeypatch.setattr(gw, "ha_client", httpx.AsyncClient(transport=httpx.MockTransport(ha_handler)))
+    credentials = resolve(KeyLookup.absent(), {"HA_URL": HA_URL, "HA_TOKEN": "sekret-token-123"}, previous=None, service_api_key="k")
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k", gate_wait=0.05)
+    channel = HAChannel(
+        StaticResolver(credentials), latch, caller="gateway_rest",
+        inner=httpx.MockTransport(ha_handler), ws_connect=ws_connect,
+    )
+    monkeypatch.setattr(gw, "gateway_ha", GatewayHA(channel))
     monkeypatch.setattr(gw, "ha_registry", HARegistry(registry_fetcher))
     monkeypatch.setattr(
         gw, "orchestrator_client",
@@ -58,11 +72,11 @@ def traffic(monkeypatch):
     return seen
 
 
-def test_the_fixture_can_fail_a_request_through_the_gateways_ha_client_is_counted(traffic):
-    """Positive control: an empty list below means no request, not a blind fixture."""
-    with pytest.raises(AssertionError):
-        asyncio.run(gw.ha_client.get(f"{HA_URL}/api/states"))
-    assert traffic == [f"GET {HA_URL}/api/states"]
+def test_the_fixture_can_fail_a_request_through_the_gateways_ha_access_is_counted(traffic):
+    """Positive control: an empty list below means no request, not a blind fixture
+    (a read tries the WebSocket proof, then GET /api, and is answered as withheld)."""
+    assert asyncio.run(gw.gateway_ha.read_states()) == []
+    assert traffic == ["websocket connect", f"GET {HA_URL}/api"]
 
 
 def test_the_fixture_also_catches_a_registry_fetch(traffic):

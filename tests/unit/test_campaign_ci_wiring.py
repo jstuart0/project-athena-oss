@@ -60,6 +60,10 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_ha_secret_hygiene.py",
     "tests/unit/test_campaign_ci_wiring.py",
     "tests/integration/test_ha_auth_real_redis.py",
+    "tests/unit/test_ha_consolidation_drift.py",
+    "tests/unit/test_room_directory_refresh.py",
+    "tests/unit/test_gateway_ha_channel.py",
+    "tests/unit/test_ha_client_over_the_channel.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.
@@ -78,6 +82,10 @@ PREEXISTING_UNWIRED: Dict[str, str] = {
 PREEXISTING_SHARED_STATE: Dict[str, str] = {
     "tests/unit/test_ha_permission_guard.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_ha_permission_wiring.py": "stubs langgraph and prometheus_client only when absent",
+    "tests/unit/test_gateway_speaker_room.py": "stubs prometheus_client only when absent",
+    "tests/unit/test_gateway_simple_commands_routing.py": "setdefault for SERVICE_API_KEY and ADMIN_API_URL, and a prometheus_client stub only when absent; shared a step at the base",
+    "tests/unit/test_room_light_area_tier.py": "stubs langgraph and prometheus_client only when absent",
+    "tests/unit/test_room_light_dispatch.py": "stubs langgraph and prometheus_client only when absent",
 }
 
 NAMED_MEMBERS = (

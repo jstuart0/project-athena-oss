@@ -118,7 +118,18 @@ def serve(mode="ok"):
 
 
 def new_registry(server, token=TOKEN, **kwargs):
-    return hr.HARegistry(hr.websocket_fetcher(server.url, token), **kwargs)
+    return registry_for(server.url, token, **kwargs)
+
+
+def registry_for(url, token=TOKEN, **kwargs):
+    """The real fetcher (an ha_ws_session with the registry-read profile) over
+    the loopback server, behind a real latch with in-process state."""
+    from shared import ha_auth
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+
+    credentials = resolve(KeyLookup.absent(), {"HA_URL": url, "HA_TOKEN": token}, previous=None, service_api_key="k")
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+    return hr.HARegistry(hr.snapshot_fetcher(StaticResolver(credentials), latch, caller="orchestrator_registry"), **kwargs)
 
 
 def test_the_happy_path_reads_the_three_registries_into_a_snapshot():
@@ -187,7 +198,9 @@ def test_a_responder_slower_than_the_fetch_timeout_reads_unavailable_within_the_
 
 
 def test_an_oversize_frame_reads_unavailable(monkeypatch):
-    monkeypatch.setattr(hr, "WS_MAX_SIZE", 64 * 1024)
+    from shared import ha_ws
+
+    monkeypatch.setattr(ha_ws, "WS_MAX_SIZE", 64 * 1024)
 
     @serve("oversize")
     async def outcome(server):
@@ -200,7 +213,7 @@ def test_an_oversize_frame_reads_unavailable(monkeypatch):
 
 def test_a_refused_connection_reads_unavailable():
     async def go():
-        reg = hr.HARegistry(hr.websocket_fetcher("http://127.0.0.1:1", TOKEN))
+        reg = registry_for("http://127.0.0.1:1")
         await reg.ensure(5)
         return reg.state
 

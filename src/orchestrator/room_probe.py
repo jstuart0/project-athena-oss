@@ -2,9 +2,9 @@
 
     cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--utterances FILE]
 
-Reads ``HA_URL`` and ``HA_TOKEN`` from the environment, fetches the three
-registry lists ``--runs`` times over the same read-only WebSocket client the
-orchestrator uses, and prints:
+Reads ``HA_URL`` and ``HA_TOKEN`` from the environment (through the one
+credential resolver), fetches the three registry lists ``--runs`` times over the
+same read-only WebSocket session the orchestrator uses, and prints:
 
 * fetch time (p50, p95), payload size, area / device / entity counts, and the
   area-key collision and unmatchable-room counts;
@@ -31,7 +31,10 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TextI
 from orchestrator import room_context
 from orchestrator.room_directory import RoomDirectoryProvider
 from orchestrator.ha_entity_manager import _room_light_exclude_patterns, area_lamp_targets
-from shared.ha_registry import RegistrySnapshot, websocket_fetcher
+from shared.ha_auth import HAAuthLatch
+from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+from shared.ha_http import HAChannel
+from shared.ha_registry import RegistrySnapshot, snapshot_fetcher
 
 UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
 
@@ -49,6 +52,9 @@ class _Snapshot:
         self._snapshot = snapshot
 
     def current(self) -> RegistrySnapshot:
+        return self._snapshot
+
+    def read(self) -> RegistrySnapshot:
         return self._snapshot
 
 
@@ -152,14 +158,14 @@ def _read_utterances(path: Optional[str]) -> List[str]:
         return [line.strip() for line in handle if line.strip()]
 
 
-async def _live_states(ha_url: str, token: str) -> Mapping[str, Any]:
-    import httpx
-
-    async with httpx.AsyncClient(base_url=ha_url, headers={"Authorization": f"Bearer {token}"}, timeout=5.0,
-                                 verify=False) as client:
-        response = await client.get("/api/states")
+async def _live_states(resolver: StaticResolver, latch: HAAuthLatch) -> Mapping[str, Any]:
+    channel = HAChannel(resolver, latch, caller="orchestrator_rest", timeout=5.0)
+    try:
+        response = await channel.request("GET", "/api/states")
         response.raise_for_status()
         return {item["entity_id"]: item for item in response.json()}
+    finally:
+        await channel.aclose()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -169,17 +175,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--areas", action="store_true", help="print area keys instead of numbering them")
     parser.add_argument("--utterances", metavar="FILE")
     args = parser.parse_args(argv)
-    ha_url, token = os.getenv("HA_URL"), os.getenv("HA_TOKEN")
-    if not ha_url or not token:
-        print("HA_URL and HA_TOKEN must be set", file=sys.stderr)
+    service_key = os.environ.get("SERVICE_API_KEY")
+    credentials = resolve(KeyLookup.absent(), os.environ, previous=None, service_api_key=service_key)
+    if not credentials.configured:
+        print("HA_URL and HA_TOKEN must be set (and valid)", file=sys.stderr)
         return 2
     if args.runs < 1:
         print("--runs must be at least 1", file=sys.stderr)
         return 2
+    resolver = StaticResolver(credentials)
+    latch = HAAuthLatch(None, instance="room-probe", service_api_key=service_key)
     try:
         return asyncio.run(run(
-            websocket_fetcher(ha_url, token),
-            lambda: _live_states(ha_url, token),
+            snapshot_fetcher(resolver, latch, caller="orchestrator_registry"),
+            lambda: _live_states(resolver, latch),
             runs=args.runs, shape=args.shape, show_names=args.areas,
             utterances=_read_utterances(args.utterances), exclude=_room_light_exclude_patterns(),
         ))

@@ -19,7 +19,7 @@ from typing import Any, Mapping, Optional
 import httpx
 import pytest
 
-from shared import ha_link, ha_registry
+from shared import ha_auth, ha_link
 
 from . import ha_auth_scenarios as scenarios
 from .ha_auth_fakes import Clock as WallClock, credentials, make_latch
@@ -238,7 +238,7 @@ def test_the_marker_the_old_registry_reads_exists_exactly_while_the_new_latch_is
         redis = ha_auth.MemoryRedis(clock=clock)
         snap = credentials()
         latch = make_latch(redis, clock=clock)
-        old_marker = ha_registry._MARKER_PREFIX + v1_marker_key(snap.token.reveal(), "service-key-for-tests")
+        old_marker = ha_auth.LEGACY_MARKER_PREFIX + v1_marker_key(snap.token.reveal(), "service-key-for-tests")
         admission = await latch.admit(snap, **scenarios.READ)
         before = await redis.exists(old_marker)
         await scenarios.settle(latch, snap, admission, "auth_rejected")
@@ -251,7 +251,7 @@ def test_the_marker_the_old_registry_reads_exists_exactly_while_the_new_latch_is
     before, during, after = run(scenario())
     assert before == 0 and after == 0
     exists, value, ttl = during
-    assert exists == 1 and value == "1" and 0 < ttl <= ha_registry.REFUSED_MARKER_TTL_SECONDS
+    assert exists == 1 and value == "1" and 0 < ttl <= 86400
 
 
 def test_the_new_code_reads_a_marker_an_old_registry_wrote_as_a_latch():
@@ -261,7 +261,7 @@ def test_the_new_code_reads_a_marker_an_old_registry_wrote_as_a_latch():
 
         redis = ha_auth.MemoryRedis(clock=clock)
         snap = credentials()
-        await redis.set(ha_registry._MARKER_PREFIX + v1_marker_key(snap.token.reveal(), "service-key-for-tests"), "1", ex=ha_registry.REFUSED_MARKER_TTL_SECONDS)
+        await redis.set(ha_auth.LEGACY_MARKER_PREFIX + v1_marker_key(snap.token.reveal(), "service-key-for-tests"), "1", ex=86400)
         return await make_latch(redis, clock=clock).admit(snap, **scenarios.READ)
 
     admission = run(scenario())

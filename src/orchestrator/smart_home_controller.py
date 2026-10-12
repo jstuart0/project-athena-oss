@@ -2068,7 +2068,7 @@ Return ONLY valid JSON."""
         not fetched yet)."""
         from orchestrator.nodes import _runtime
         registry = _runtime.get_ha_registry()
-        return registry.current() if registry is not None else None
+        return registry.read() if registry is not None else None
 
     def _area_entities(self, room: Optional[str], domain: str, all_entities: Dict) -> Optional[List[str]]:
         """The ids of one domain in the room's registry area that Home

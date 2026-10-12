@@ -275,8 +275,23 @@ def test_cancellation_records_nothing():
 
 
 # ---------------------------------------------------------------------------
-# RecordingTransport
+# The transport under the REST channel records what it sees
 # ---------------------------------------------------------------------------
+
+def _channel(inner, monitor, *, token=TOKEN, ws_connect=None):
+    """A real HAChannel over ``inner``, with a fake Home Assistant WebSocket that
+    accepts the token (so the gate's first proof passes)."""
+    from shared import ha_auth
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+    from shared.ha_http import HAChannel
+
+    from .ha_auth_fakes import FakeHA
+
+    credentials = resolve(KeyLookup.absent(), {"HA_URL": f"https://{HOST}", "HA_TOKEN": token}, previous=None, service_api_key="k")
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+    connect = ws_connect or FakeHA(valid=(token,)).ws_connect()
+    return HAChannel(StaticResolver(credentials), latch, caller="orchestrator_rest", monitor=monitor, inner=inner, ws_connect=connect)
+
 
 def test_the_transport_returns_the_identical_response_and_records_it():
     monitor, _ = monitor_at()
@@ -286,8 +301,7 @@ def test_the_transport_returns_the_identical_response_and_records_it():
         async def handle_async_request(self, req):
             return response
 
-    transport = ha_link.RecordingTransport(Inner(), monitor)
-    assert run(transport.handle_async_request(request())) is response
+    assert run(_channel(Inner(), monitor).request("GET", "/api/states")) is response
     assert monitor.summary()["last_outcome"] == "ok"
 
 
@@ -299,9 +313,8 @@ def test_the_transport_reraises_the_identical_exception_and_records_it():
         async def handle_async_request(self, req):
             raise boom
 
-    transport = ha_link.RecordingTransport(Inner(), monitor)
     with pytest.raises(httpx.ConnectError) as caught:
-        run(transport.handle_async_request(request()))
+        run(_channel(Inner(), monitor).request("GET", "/api/states"))
     assert caught.value is boom
     assert monitor.summary()["last_outcome"] == "unreachable"
 
@@ -313,9 +326,8 @@ def test_a_cancelled_request_records_nothing_and_propagates():
         async def handle_async_request(self, req):
             raise asyncio.CancelledError()
 
-    transport = ha_link.RecordingTransport(Inner(), monitor)
     with pytest.raises(asyncio.CancelledError):
-        run(transport.handle_async_request(request()))
+        run(_channel(Inner(), monitor).request("GET", "/api/states"))
     assert monitor.summary()["last_outcome"] is None
 
 
@@ -332,22 +344,40 @@ def test_a_body_read_failure_after_the_status_line_is_not_recorded_again():
             return httpx.Response(200, stream=Body())
 
     async def go():
-        async with httpx.AsyncClient(transport=ha_link.RecordingTransport(Inner(), monitor)) as client:
-            with pytest.raises(httpx.ReadError):
-                await client.get(f"https://{HOST}/api/states")
+        channel = _channel(Inner(), monitor)
+        with pytest.raises(httpx.ReadError):
+            response = await channel.request("GET", "/api/states")
+            await response.aread()
 
     run(go())
     s = monitor.summary()
     assert (s["last_outcome"], s["consecutive_failures"]) == ("ok", 0)
 
 
+def test_a_withheld_request_is_not_recorded_as_a_new_outcome():
+    monitor, _ = monitor_at()
+
+    class Inner(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            raise AssertionError("nothing may be sent")
+
+    from .ha_auth_fakes import FakeHA
+
+    async def go():
+        channel = _channel(Inner(), monitor, token="rejected-token", ws_connect=FakeHA(valid=()).ws_connect())
+        return [(await channel.request("GET", "/api/states")).status_code for _ in range(3)]
+
+    assert run(go()) == [401, 401, 401]
+    assert monitor.summary()["last_outcome"] is None
+
+
 # ---------------------------------------------------------------------------
-# The real clients, over a mock inner transport
+# The real holders, over a mock inner transport
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def inner_mock(monkeypatch):
-    """Replace the real network transport under both HA clients with a
+    """Replace the real network transport under the channel with a
     MockTransport whose responses a test queues. Records the verify flag."""
     state = {"responses": [], "requests": [], "verify": []}
 
@@ -367,13 +397,13 @@ def inner_mock(monkeypatch):
 
 
 def _ha_client(monitor):
-    return HomeAssistantClient(url=f"https://{HOST}", token=TOKEN, link_monitor=monitor)
+    return HomeAssistantClient(_channel(None, monitor))
 
 
 def _entity_manager(monitor):
     from orchestrator.ha_entity_manager import HAEntityManager
 
-    return HAEntityManager(f"https://{HOST}", TOKEN, link_monitor=monitor)
+    return HAEntityManager(HomeAssistantClient(_channel(None, monitor)))
 
 
 @pytest.mark.parametrize(
@@ -384,56 +414,59 @@ def _entity_manager(monitor):
     ],
     ids=["HomeAssistantClient.get_states", "HAEntityManager.refresh_entities"],
 )
-def test_a_real_client_records_a_401_then_a_success(inner_mock, build, call):
+def test_a_real_holder_records_a_failure_then_a_success(inner_mock, build, call):
     monitor, clock = monitor_at()
     client = build(monitor)
-    inner_mock["responses"] += [401, 200]
+    inner_mock["responses"] += [500, 200]
 
     async def go():
         with pytest.raises(httpx.HTTPStatusError):
             await call(client)
-        after_401 = monitor.summary()
+        after_500 = monitor.summary()
         clock.advance(1)
         await call(client)
-        return after_401, monitor.summary()
+        return after_500, monitor.summary()
 
-    after_401, after_200 = run(go())
-    assert after_401["last_outcome"] == "auth_rejected"
-    assert after_401["last_success_at"] is None
+    after_500, after_200 = run(go())
+    assert after_500["last_outcome"] == "ha_error"
+    assert after_500["last_success_at"] is None
     assert (after_200["last_outcome"], after_200["consecutive_failures"]) == ("ok", 0)
     assert after_200["last_success_at"] is not None
     assert inner_mock["verify"] == [False]
 
 
 @pytest.mark.parametrize("build", [_ha_client, _entity_manager], ids=["HomeAssistantClient", "HAEntityManager"])
-def test_the_proxy_environment_variables_are_ignored_by_the_ha_clients(monkeypatch, inner_mock, build):
+def test_the_proxy_environment_variables_are_ignored_by_the_ha_holders(monkeypatch, inner_mock, build):
     for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
         monkeypatch.setenv(name, "http://proxy.invalid:3128")
     monitor, _ = monitor_at()
     client = build(monitor)
     inner_mock["responses"].append(200)
-    run(client.client.get("/api/states"))
+    run(client.get_states() if hasattr(client, "get_states") else client.refresh_entities())
     assert len(inner_mock["requests"]) == 1
     assert inner_mock["requests"][0].url.host == HOST
 
 
-def test_a_client_without_a_monitor_is_unchanged(monkeypatch):
-    monkeypatch.setattr(ha_link.httpx, "AsyncHTTPTransport", lambda **kw: pytest.fail("no recording transport expected"))
-    client = HomeAssistantClient(url=f"https://{HOST}", token=TOKEN)
-    assert client.client is not None
+def test_a_channel_without_a_monitor_still_works(inner_mock):
+    inner_mock["responses"].append(200)
+    assert run(_channel(None, None).request("GET", "/api/states")).status_code == 200
 
 
 @pytest.mark.parametrize(
-    "url,token,expected",
-    [(None, TOKEN, False), (f"https://{HOST}", None, False), (f"https://{HOST}", TOKEN, True)],
+    "env,expected",
+    [({"HA_TOKEN": TOKEN}, False), ({"HA_URL": f"https://{HOST}"}, False), ({"HA_URL": f"https://{HOST}", "HA_TOKEN": TOKEN}, True)],
     ids=["token-only", "url-only", "both"],
 )
-def test_configured_is_the_clients_own_url_and_token_rule(monkeypatch, url, token, expected):
-    monkeypatch.delenv("HA_URL", raising=False)
-    monkeypatch.delenv("HA_TOKEN", raising=False)
+def test_configured_is_the_credentials_own_url_and_token_rule(env, expected):
+    from shared import ha_auth
+    from shared.ha_credentials import KeyLookup, StaticResolver, resolve
+    from shared.ha_http import HAChannel
+
     monitor, clock = monitor_at()
-    # main.py builds the client only when a token exists; mirror that.
-    client = HomeAssistantClient(url=url, token=token, link_monitor=monitor) if token else None
+    credentials = resolve(KeyLookup.absent(), env, previous=None, service_api_key="k")
+    latch = ha_auth.HAAuthLatch(None, instance="t", service_api_key="k")
+    client = HomeAssistantClient(HAChannel(StaticResolver(credentials), latch, caller="orchestrator_rest"))
+    assert client.is_configured is expected
     pub = ha_link.create_publisher(monitor, HARegistry(None), None, client, replica_id="pod-a")
     assert pub.view()["configured"] is expected
     wanted = "not_configured" if not expected else "unknown"
@@ -753,7 +786,7 @@ def test_an_unconfigured_install_with_a_disabled_registry_reads_not_configured()
 
 def test_ha_areas_off_with_a_configured_client_and_a_rest_success_is_connected():
     monitor, clock = monitor_at()
-    registry = create_registry(ha_url=f"https://{HOST}", ha_token=TOKEN, mode="off")
+    registry = create_registry(credentials=None, latch=None, caller="orchestrator_registry", mode="off")
     pub = publisher(monitor, None, clock=clock, registry=registry, configured=True)
     monitor.record_response("GET", "/api/states", 200)
     assert pub.view()["registry"]["state"] == "disabled"
@@ -776,124 +809,6 @@ def test_one_configured_replica_makes_the_merged_view_configured():
     assert pa.view()["configured"] is True
 
 
-# ---------------------------------------------------------------------------
-# Every HA REST channel in src/ records into the monitor
-# ---------------------------------------------------------------------------
-
-_HA_NAMES = {"ha_url", "HA_URL"}
-
-
-def _functions(tree):
-    def walk(node, quals):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                yield ".".join(quals + [child.name]), child
-                yield from walk(child, quals + [child.name])
-            elif isinstance(child, ast.ClassDef):
-                yield from walk(child, quals + [child.name])
-            else:
-                yield from walk(child, quals)
-
-    yield from walk(tree, [])
-
-
-def _holds_bearer(fn) -> bool:
-    for node in ast.walk(fn):
-        if isinstance(node, ast.JoinedStr):
-            for part in node.values:
-                if isinstance(part, ast.Constant) and isinstance(part.value, str) and "Bearer" in part.value:
-                    return True
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("Bearer "):
-            return True
-    return False
-
-
-def _names_ha_url(fn) -> bool:
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Name) and node.id in _HA_NAMES:
-            return True
-        if (isinstance(node, ast.Attribute) and node.attr == "url"
-                and isinstance(node.value, ast.Name) and node.value.id == "self"):
-            return True
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "HA_URL" in node.value:
-            return True
-    return False
-
-
-def _is_httpx_client(node) -> bool:
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "AsyncClient"
-            and isinstance(node.func.value, ast.Name) and node.func.value.id == "httpx")
-
-
-def ha_client_sites(source: str, relpath: str):
-    """``(relpath, qualified function, passes transport=)`` for every function
-    that builds an httpx.AsyncClient with a Bearer header and names the HA URL."""
-    sites = set()
-    for qualified, fn in _functions(ast.parse(source)):
-        clients = [n for n in ast.walk(fn) if _is_httpx_client(n)]
-        if clients and _holds_bearer(fn) and _names_ha_url(fn):
-            recorded = any(kw.arg == "transport" for c in clients for kw in c.keywords)
-            sites.add((relpath, qualified, recorded))
-    return sites
-
-
-EXPECTED_HA_CLIENT_SITES = {
-    ("shared/ha_client.py", "HomeAssistantClient.__init__"),
-    ("orchestrator/ha_entity_manager.py", "HAEntityManager.__init__"),
-    ("orchestrator/room_probe.py", "_live_states"),
-    ("gateway/main.py", "_fetch_assist_satellite_states"),
-    ("gateway/main.py", "send_satellite_announcement"),
-}
-RECORDED_SITES = {
-    ("shared/ha_client.py", "HomeAssistantClient.__init__"),
-    ("orchestrator/ha_entity_manager.py", "HAEntityManager.__init__"),
-}
-
-
-class TestHALinkChannels:
-    @staticmethod
-    def _scan():
-        found = set()
-        for path in sorted(SRC.rglob("*.py")):
-            try:
-                text = path.read_text(encoding="utf-8")
-                found |= ha_client_sites(text, path.relative_to(SRC).as_posix())
-            except SyntaxError:  # src/jetson/athena_lite_llm.py has never parsed; unrelated to HA
-                continue
-        return found
-
-    def test_the_population_of_ha_rest_channels_is_exactly_the_known_five(self):
-        found = self._scan()
-        assert len(found) >= 5
-        assert {(p, q) for p, q, _ in found} == EXPECTED_HA_CLIENT_SITES, (
-            "a new httpx client holding the HA bearer token appeared (or one moved); "
-            "the orchestrator's must pass transport=recording_transport(...)"
-        )
-
-    def test_both_orchestrator_channels_pass_a_recording_transport(self):
-        recorded = {(p, q) for p, q, passes in self._scan() if passes}
-        assert recorded == RECORDED_SITES
-
-    def test_an_extra_unrecorded_ha_client_is_detected(self):
-        synthetic = (
-            "import httpx\n"
-            "class Sneaky:\n"
-            "    def __init__(self, ha_url, token):\n"
-            "        self.c = httpx.AsyncClient(base_url=ha_url, headers={'Authorization': f'Bearer {token}'})\n"
-        )
-        sites = ha_client_sites(synthetic, "orchestrator/sneaky.py")
-        assert sites == {("orchestrator/sneaky.py", "Sneaky.__init__", False)}
-
-    def test_an_unrelated_bearer_client_is_not_flagged(self):
-        other = (
-            "import httpx\n"
-            "def search(api_key):\n"
-            "    return httpx.AsyncClient(headers={'Authorization': f'Bearer {api_key}'})\n"
-        )
-        assert ha_client_sites(other, "orchestrator/search.py") == set()
-
-
 def test_lifespan_builds_the_publisher_from_the_raw_ha_client():
     """main.py's `configured` must come from the HA client's own answer (a URL and a token), not from
     whether a client object exists."""
@@ -904,6 +819,39 @@ def test_lifespan_builds_the_publisher_from_the_raw_ha_client():
     ]
     assert len(calls) == 1
     assert any(isinstance(a, ast.Name) and a.id == "ha_client_raw" for a in calls[0].args)
+
+
+def _lifespan():
+    tree = ast.parse((SRC / "orchestrator" / "main.py").read_text(encoding="utf-8"))
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+
+
+def _first_call_line(function, name):
+    lines = [
+        n.lineno for n in ast.walk(function)
+        if isinstance(n, ast.Call) and (getattr(n.func, "id", None) == name or getattr(n.func, "attr", None) == name)
+    ]
+    return min(lines) if lines else None
+
+
+def test_lifespan_builds_the_redis_client_before_the_home_assistant_channels():
+    lifespan = _lifespan()
+    assert _first_call_line(lifespan, "CacheClient") < _first_call_line(lifespan, "_build_ha_channels")
+
+
+def test_lifespan_builds_one_latch_and_gives_the_same_one_to_the_channels_the_registry_and_the_publisher():
+    lifespan = _lifespan()
+    calls = [n for n in ast.walk(lifespan) if isinstance(n, ast.Call)]
+
+    def named(call):
+        return getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+
+    assert [named(c) for c in calls].count("HAAuthLatch") == 1
+    keyword = lambda call, key: next((k.value.id for k in call.keywords if k.arg == key and isinstance(k.value, ast.Name)), None)
+    channels = next(c for c in calls if named(c) == "_build_ha_channels")
+    assert isinstance(channels.args[1], ast.Name) and channels.args[1].id == "ha_latch"
+    assert keyword(next(c for c in calls if named(c) == "create_registry"), "latch") == "ha_latch"
+    assert keyword(next(c for c in calls if named(c) == "create_publisher"), "latch") == "ha_latch"
 
 
 # ---------------------------------------------------------------------------

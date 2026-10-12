@@ -12,11 +12,14 @@ Layout:
 - ``RegistrySnapshot``: pure. Area resolution (entity, device, parent
   devices), area membership, satellite devices, and which lights are not
   lamps. No I/O.
-- ``HARegistry``: owns the cache, the single in-flight fetch, rate limiting
-  and the auth-refusal latch. It never raises and never blocks ``current()``.
-- ``websocket_fetcher``: the real adapter. It can only send the frames in
-  ``_ALLOWED_TYPES``, asserted before every send, so this module stays a
-  read-only channel beside the permission-enforcing HA client (ATHENA-69).
+- ``HARegistry``: owns the cache, the single in-flight fetch and rate limiting.
+  It never raises and never blocks ``current()``; ``read()`` is ``current()``
+  plus a background refresh when the snapshot is stale.
+- ``snapshot_fetcher``: the real adapter. It reads the three lists over one
+  ``ha_ws_session`` with the ``REGISTRY_READ`` profile, which can send only
+  those list commands, so this module stays a read-only channel beside the
+  permission-enforcing HA client (ATHENA-69). The shared latch decides whether
+  a refused token may be tried again; this module keeps no refusal marker.
 
 No token or URL appears in any log line or exception text here; failures log
 the exception class and counts only.
@@ -26,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import ssl
 import time
 import unicodedata
 from datetime import datetime, timezone
@@ -35,7 +37,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 import structlog
 
-from shared.ha_credentials import legacy_marker_digest, websocket_url
+from shared.ha_ws import (  # ForbiddenFrameType is re-exported for callers that import it from here
+    AuthInvalid, ForbiddenFrameType, HABanned, HAWithheld, HomeAssistantNotConfiguredError, REGISTRY_READ,
+    RegistryFetchError, ha_ws_session,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -369,86 +374,23 @@ _LIST_TYPES = (
 )
 _ALLOWED_TYPES = frozenset({"auth"} | {frame_type for _, frame_type in _LIST_TYPES})
 
-WS_OPEN_TIMEOUT = 3
-WS_CLOSE_TIMEOUT = 2
-WS_MAX_SIZE = 32 * 1024 * 1024
 DEFAULT_FETCH_TIMEOUT = 5.0
-
-
-class AuthInvalid(Exception):
-    """Home Assistant answered ``auth_invalid`` to the token."""
-
-
-class RegistryFetchError(Exception):
-    """A protocol-level failure (unexpected frame, ``success: false``)."""
-
-
-class ForbiddenFrameType(Exception):
-    """An attempt to send a frame type outside the read-only allowlist."""
-
 
 RegistryFetcher = Callable[[], Awaitable[Mapping[str, Any]]]
 
 
-async def _send(ws: Any, payload: Dict[str, Any]) -> None:
-    if payload.get("type") not in _ALLOWED_TYPES:
-        raise ForbiddenFrameType(str(payload.get("type"))[:40])
-    await ws.send(json.dumps(payload))
-
-
-def _silent_logger():
-    import logging
-
-    quiet = logging.getLogger("athena.ha_registry.websocket")
-    quiet.disabled = True
-    quiet.propagate = False
-    return quiet
-
-
-def websocket_fetcher(ha_url: str, token: str) -> RegistryFetcher:
-    """A fetcher that reads the three registry lists over one WebSocket
-    connection. TLS verification is off for ``wss://``, as for every other
-    Home Assistant client here. The library's own frame logging is silenced:
-    the auth frame carries the token."""
-    url = websocket_url(ha_url)
+def snapshot_fetcher(credentials: Any, latch: Any, *, caller: str, connect: Optional[Callable[..., Any]] = None) -> RegistryFetcher:
+    """A fetcher that reads the three registry lists over one WebSocket session
+    (``ha_ws_session`` with ``REGISTRY_READ``), from the credentials as they
+    are when it runs. Public so a tool (``room_probe``) uses the same path."""
 
     async def fetch() -> Mapping[str, Any]:
-        import websockets
-
-        ssl_context: Optional[ssl.SSLContext] = None
-        if url.startswith("wss://"):
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        async with websockets.connect(
-            url,
-            ssl=ssl_context,
-            open_timeout=WS_OPEN_TIMEOUT,
-            close_timeout=WS_CLOSE_TIMEOUT,
-            max_size=WS_MAX_SIZE,
-            ping_interval=None,
-            logger=_silent_logger(),
-        ) as ws:
-            first = json.loads(await ws.recv())
-            if first.get("type") != "auth_required":
-                raise RegistryFetchError("unexpected first frame")
-            await _send(ws, {"type": "auth", "access_token": token})
-            verdict = json.loads(await ws.recv()).get("type")
-            if verdict == "auth_invalid":
-                raise AuthInvalid()
-            if verdict != "auth_ok":
-                raise RegistryFetchError("unexpected auth reply")
-            for index, (_, frame_type) in enumerate(_LIST_TYPES, start=1):
-                await _send(ws, {"id": index, "type": frame_type})
-            results: Dict[int, Any] = {}
-            while len(results) < len(_LIST_TYPES):
-                frame = json.loads(await ws.recv())
-                if frame.get("type") != "result" or frame.get("id") not in (1, 2, 3):
-                    continue
-                if not frame.get("success"):
-                    raise RegistryFetchError("list command failed")
-                results[frame["id"]] = frame.get("result")
-            return {name: results[index] for index, (name, _) in enumerate(_LIST_TYPES, start=1)}
+        snapshot = credentials.current()
+        async with ha_ws_session(snapshot, latch, caller=caller, profile=REGISTRY_READ, connect=connect) as ws:
+            frames = await ws.commands([{"type": frame_type} for _, frame_type in _LIST_TYPES])
+            if not all(frame.get("success") for frame in frames):
+                raise RegistryFetchError("list command failed")
+            return {name: frame.get("result") for (name, _), frame in zip(_LIST_TYPES, frames)}
 
     return fetch
 
@@ -457,17 +399,17 @@ def websocket_fetcher(ha_url: str, token: str) -> RegistryFetcher:
 # The cache
 # ---------------------------------------------------------------------------
 
-REFUSED_MARKER_TTL_SECONDS = 24 * 60 * 60
 FORCED_REFRESH_MIN_INTERVAL = 5.0
-_MARKER_PREFIX = "athena:ha_registry:refused:"
 
 STATE_DISABLED = "disabled"
 STATE_REFUSED = "refused"
 STATE_UNAVAILABLE = "unavailable"
 STATE_OK = "ok"
 
-
-token_marker_key = legacy_marker_digest
+# Why the shared latch would not let a fetch go out: the token was rejected, or
+# the failed sign-in budget is spent. ``gated`` (Redis unreadable, a wait that
+# timed out) is not a verdict on the token.
+_REFUSAL_REASONS = frozenset({"latched", "admin_only", "budget"})
 
 
 def _failure_class(exc: BaseException) -> str:
@@ -483,20 +425,22 @@ def _failure_class(exc: BaseException) -> str:
 class HARegistry:
     """The cached registry snapshot and the one fetch that refreshes it.
 
-    ``current()`` is synchronous and never touches the network. A refresh
-    runs as a background task, one at a time, at most once per
-    ``min_refresh_interval``. A failed refresh keeps the last good snapshot
-    and reports ``unavailable``. ``auth_invalid`` latches ``refused`` for the
-    process and, with Redis and a marker key, for 24 hours across restarts.
-    Nothing here raises to a caller.
+    ``current()`` is synchronous and never touches the network; ``read()`` is
+    ``current()`` that also asks for a background refresh when the snapshot is
+    stale. A refresh runs as a background task, one at a time, at most once per
+    ``min_refresh_interval``. A failed refresh keeps the last good snapshot and
+    reports ``unavailable``. ``auth_invalid`` (or the shared latch withholding
+    the fetch) reports ``refused``, and the registry tries again at the normal
+    interval: the latch decides whether anything is sent, so a registry refused
+    while REST already works recovers by itself. Nothing here raises to a
+    caller.
     """
 
     def __init__(
         self,
         fetcher: Optional[RegistryFetcher],
         *,
-        token_marker_key: Optional[str] = None,
-        redis: Any = None,
+        configured: Callable[[], bool] = lambda: True,
         ttl: float = 300,
         min_refresh_interval: float = 60,
         fetch_timeout: float = DEFAULT_FETCH_TIMEOUT,
@@ -504,8 +448,7 @@ class HARegistry:
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self._fetcher = fetcher
-        self._marker = f"{_MARKER_PREFIX}{token_marker_key}" if token_marker_key else None
-        self._redis = redis
+        self._configured = configured
         self._ttl = ttl
         self._min_refresh_interval = min_refresh_interval
         self._fetch_timeout = fetch_timeout
@@ -523,17 +466,35 @@ class HARegistry:
 
     # -- reads ------------------------------------------------------------
 
+    def _apply_enabled(self) -> None:
+        """Disabled while Home Assistant isn't configured; unavailable (and
+        fetching) once it is."""
+        if self._fetcher is None:
+            return
+        if not self._configured():
+            self._state = STATE_DISABLED
+        elif self._state == STATE_DISABLED:
+            self._state = STATE_UNAVAILABLE
+
     @property
     def state(self) -> str:
+        self._apply_enabled()
         return self._state
 
     def current(self) -> Optional[RegistrySnapshot]:
+        return self._snapshot
+
+    def read(self) -> Optional[RegistrySnapshot]:
+        """The snapshot, and a background refresh when it is stale. Does no I/O
+        itself and never raises."""
+        self.request_refresh()
         return self._snapshot
 
     def link_summary(self) -> Dict[str, Any]:
         """Closed-vocabulary facts for the Home Assistant link status: the
         state, the area count, and when (wall-clock UTC) a fetch last worked
         or failed and what class of failure it was. No names, no text."""
+        self._apply_enabled()
         snap = self._snapshot
         return {
             "state": self._state,
@@ -556,7 +517,8 @@ class HARegistry:
     # -- refreshing -------------------------------------------------------
 
     def _may_fetch(self) -> bool:
-        return self._fetcher is not None and self._state not in (STATE_DISABLED, STATE_REFUSED)
+        self._apply_enabled()
+        return self._fetcher is not None and self._state != STATE_DISABLED
 
     def _start_fetch(self, *, forced: bool = False) -> None:
         """Start the background fetch. ``forced`` (a caller that must see new
@@ -585,6 +547,14 @@ class HARegistry:
         if force or self.stale:
             self._start_fetch()
 
+    def credentials_changed(self) -> None:
+        """The token or address was replaced: a refused registry gets a fresh
+        try now (the latch keys its stop on the old credentials)."""
+        if self._state == STATE_REFUSED:
+            self._state = STATE_UNAVAILABLE
+        self._last_attempt = None
+        self._start_fetch(forced=True)
+
     async def ensure(self, timeout: float, *, refresh: bool = False) -> Optional[RegistrySnapshot]:
         """Wait up to ``timeout`` seconds for a usable snapshot. Returns the
         current snapshot (possibly stale, possibly None) either way; the fetch
@@ -605,8 +575,21 @@ class HARegistry:
             snapshot = RegistrySnapshot.from_raw(raw, fetched_at=self._monotonic())
         except asyncio.CancelledError:
             raise
+        except HAWithheld as exc:
+            self._withheld(exc.reason)
+            return
         except AuthInvalid:
-            await self._latch_refused()
+            self._refuse()
+            logger.error("ha_registry_auth_refused")
+            return
+        except HABanned:
+            self._state = STATE_UNAVAILABLE
+            self._ban_suspected = True
+            self._note_failure("other")
+            logger.warning("ha_registry_address_blocked")
+            return
+        except HomeAssistantNotConfiguredError:
+            self._apply_enabled()
             return
         except Exception as exc:
             self._state = STATE_UNAVAILABLE
@@ -615,39 +598,32 @@ class HARegistry:
             return
         self._snapshot = snapshot
         self._state = STATE_OK
+        self._ban_suspected = False
         self._last_success_at = self._wall()
         logger.info("ha_registry_refreshed", **snapshot.counts())
         for key, area_ids in snapshot.collisions:
             logger.warning("ha_registry_area_name_collision", area_count=len(area_ids))
 
-    async def _latch_refused(self) -> None:
+    def _refuse(self) -> None:
         self._state = STATE_REFUSED
         self._note_failure("auth")
-        logger.error("ha_registry_auth_refused")
-        if self._redis is not None and self._marker:
-            try:
-                await self._redis.set(self._marker, "1", ex=REFUSED_MARKER_TTL_SECONDS)
-            except Exception as exc:
-                logger.warning("ha_registry_marker_write_failed", error_class=type(exc).__name__)
+
+    def _withheld(self, reason: str) -> None:
+        """The shared latch sent nothing. A rejected token or a spent budget is
+        ``refused``; anything else is a transient ``unavailable``."""
+        if reason in _REFUSAL_REASONS:
+            if self._state != STATE_REFUSED:
+                logger.warning("ha_registry_withheld", reason=reason)
+            self._refuse()
+        else:
+            self._state = STATE_UNAVAILABLE
+            self._note_failure("other")
 
     # -- lifecycle --------------------------------------------------------
 
     async def start(self) -> None:
-        """Check the refusal marker, then begin the first fetch in the
-        background (startup doesn't wait for Home Assistant)."""
-        if not self._may_fetch():
-            return
-        if self._redis is not None and self._marker:
-            try:
-                present = await self._redis.exists(self._marker)
-            except Exception as exc:
-                present = False
-                logger.warning("ha_registry_marker_read_failed", error_class=type(exc).__name__)
-            if present:
-                self._state = STATE_REFUSED
-                self._note_failure("auth")
-                logger.error("ha_registry_auth_refused_marker_present")
-                return
+        """Begin the first fetch in the background (startup doesn't wait for
+        Home Assistant)."""
         self._start_fetch()
 
     async def close(self) -> None:
@@ -663,18 +639,18 @@ class HARegistry:
 
 def create_registry(
     *,
-    ha_url: Optional[str],
-    ha_token: Optional[str],
+    credentials: Any,
+    latch: Any,
+    caller: str,
     mode: str,
-    service_api_key: Optional[str] = None,
-    redis: Any = None,
+    connect: Optional[Callable[..., Any]] = None,
 ) -> HARegistry:
-    """The registry a service builds in its lifespan: disabled when
-    ``mode`` isn't ``"auto"`` or the URL or token is missing."""
-    if mode != "auto" or not ha_url or not ha_token:
+    """The registry a service builds in its lifespan: disabled when ``mode``
+    isn't ``"auto"``, and otherwise enabled whenever the credentials are
+    configured (checked on each use, so a token saved later brings it alive)."""
+    if mode != "auto":
         return HARegistry(None)
     return HARegistry(
-        websocket_fetcher(ha_url, ha_token),
-        token_marker_key=token_marker_key(ha_token, service_api_key),
-        redis=redis,
+        snapshot_fetcher(credentials, latch, caller=caller, connect=connect),
+        configured=lambda: credentials.current().configured,
     )

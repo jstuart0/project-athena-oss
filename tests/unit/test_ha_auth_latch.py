@@ -30,6 +30,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def until(condition, timeout=5.0):
+    """Wait (on the real clock) until ``condition()``; a loaded machine gets time."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "the condition never became true"
+        await asyncio.sleep(0.005)
+
+
 def env_for(*, bytes_client=False):
     clock = Clock()
     memory = ha_auth.MemoryRedis(clock=clock)
@@ -91,7 +99,7 @@ def test_ten_concurrent_admits_on_an_unproven_digest_give_one_proof_and_the_rest
         snap = credentials()
         latch = env.latch(gate_wait=3.0)
         calls = [asyncio.ensure_future(latch.admit(snap, **READ)) for _ in range(10)]
-        await asyncio.sleep(0.05)
+        await until(lambda: any(c.done() for c in calls))
         prover = next(c.result() for c in calls if c.done())
         assert prover.kind == ha_auth.PROVE
         await scenarios.settle(latch, snap, prover, result)
@@ -158,6 +166,8 @@ def test_a_stale_proof_sends_one_canary_and_the_rest_wait_for_it():
         await scenarios.prove_ok(latch, snap)
         env.clock.advance(age)
         calls = [asyncio.ensure_future(latch.admit(snap, **READ)) for _ in range(18)]
+        # every request has read and decided: one canary done, or all open
+        await until(lambda: sum(c.done() for c in calls) >= (1 if age > 10 else 18))
         await asyncio.sleep(0.05)
         done = [c.result() for c in calls if c.done()]
         if result is None:

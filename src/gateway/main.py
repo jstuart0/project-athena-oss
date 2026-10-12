@@ -31,6 +31,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
+from shared import ha_auth
+from shared.ha_credentials import HACredentialResolver, admin_http_source
+from shared.ha_http import HAChannel
 from shared.ha_registry import HARegistry, create_registry
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
@@ -45,6 +48,7 @@ from shared.errors import (
 )
 from gateway.device_session_manager import get_device_session_manager, DeviceSessionManager
 from gateway import speaker_room
+from gateway.gateway_ha import GatewayHA
 from gateway.simple_commands import detect_simple_command, execute_simple_command
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
@@ -149,7 +153,7 @@ ollama_client: Optional[OllamaClient] = None
 device_session_mgr: Optional[DeviceSessionManager] = None
 admin_client = None  # Admin API client for configuration
 metric_client: Optional[httpx.AsyncClient] = None  # Shared client for metric logging
-ha_client: Optional[httpx.AsyncClient] = None  # Shared client for Home Assistant API
+gateway_ha: Optional[GatewayHA] = None  # The gateway's only Home Assistant REST access (gateway.gateway_ha)
 ha_registry: Optional[HARegistry] = None  # Read-only Home Assistant area registry (shared.ha_registry)
 orchestrator_timeout: float = 120.0  # Resolved at startup from DB config; audit bob:5
 
@@ -417,7 +421,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     global orchestrator_client, ollama_client, device_session_mgr, admin_client, gateway_config
     global orchestrator_circuit_breaker, global_rate_limiter
-    global metric_client, ha_client, ha_registry
+    global metric_client, gateway_ha, ha_registry
     global orchestrator_timeout
     global new_conversation_limiter, new_conversation_limiter_redis_client
 
@@ -432,8 +436,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize shared HTTP clients for reuse (performance optimization)
     metric_client = httpx.AsyncClient(timeout=5.0)  # For metric logging
-    ha_client = httpx.AsyncClient(timeout=3.0, verify=False)  # For HA API calls
-    logger.info("Shared HTTP clients initialized (metric_client, ha_client)")
+    logger.info("Shared HTTP clients initialized (metric_client)")
 
     # Initialize admin config client for database-driven configuration
     admin_client = get_admin_client()
@@ -542,18 +545,38 @@ async def lifespan(app: FastAPI):
             backend="in-memory",
         )
 
+    # Home Assistant: the address and token come from the same resolver every
+    # service uses (the admin key wins over HA_URL/HA_TOKEN, applied within a
+    # minute), and every request passes the same cluster-wide failed sign-in gate.
+    # The resolver, the latch and the channel are locals of this function:
+    # GatewayHA (two operations) is the only thing the rest of the gateway holds.
+    ha_config = _get_athena_config()
+    ha_credentials = HACredentialResolver(admin_http_source(admin_client), service_api_key=ha_config.service_api_key)
+    await ha_credentials.start()
+    asyncio.create_task(ha_credentials.run())  # long-lived; cancelled by ha_credentials.close() below
+    ha_redis = new_conversation_limiter_redis_client
+    ha_redis_owned = False
+    if ha_redis is None and ha_config.redis_url:
+        # No ping: the gate fails closed while Redis is down and recovers with it.
+        import redis.asyncio as redis_asyncio
+        ha_redis = redis_asyncio.from_url(ha_config.redis_url, decode_responses=True)
+        ha_redis_owned = True
+    ha_latch = ha_auth.HAAuthLatch(ha_redis, instance=ha_auth.instance_id(), service_api_key=ha_config.service_api_key)
+    local_gateway_ha = GatewayHA(HAChannel(ha_credentials, ha_latch, caller="gateway_rest", timeout=5.0))
+
     # Home Assistant area registry: read-only, fetched in the background so a
-    # slow or unreachable HA never delays startup. Disabled without an HA token
-    # or with HA_AREAS=off. Built as a local, then assigned.
+    # slow or unreachable HA never delays startup. Disabled with HA_AREAS=off;
+    # idle until Home Assistant is configured. Built as a local, then assigned.
     local_registry = create_registry(
-        ha_url=os.getenv("HA_URL"),
-        ha_token=os.getenv("HA_TOKEN"),
-        mode=_get_athena_config().ha_areas,
-        service_api_key=_get_athena_config().service_api_key,
-        redis=new_conversation_limiter_redis_client,
+        credentials=ha_credentials,
+        latch=ha_latch,
+        caller="gateway_registry",
+        mode=ha_config.ha_areas,
     )
+    ha_credentials.on_change(lambda new, old: local_registry.credentials_changed())
     await local_registry.start()
     ha_registry = local_registry
+    gateway_ha = local_gateway_ha
 
     # Check orchestrator health
     try:
@@ -596,6 +619,11 @@ async def lifespan(app: FastAPI):
 
     if ha_registry:
         await ha_registry.close()
+    gateway_ha = None
+    await local_gateway_ha.aclose()
+    await ha_credentials.close()
+    if ha_redis_owned:
+        await ha_redis.aclose()
     if new_conversation_limiter_redis_client:
         await new_conversation_limiter_redis_client.aclose()
     if device_session_mgr:
@@ -608,8 +636,6 @@ async def lifespan(app: FastAPI):
         await admin_client.close()
     if metric_client:
         await metric_client.aclose()
-    if ha_client:
-        await ha_client.aclose()
 
 
 # HA_SATELLITE_ROOM_MAP: {"<assist_satellite entity id or 32-hex device id>":
@@ -658,19 +684,10 @@ async def _read_assist_satellite_states() -> List[Dict[str, Any]]:
 
 
 async def _fetch_assist_satellite_states() -> List[Dict[str, Any]]:
-    ha_url = os.getenv("HA_URL", "http://localhost:8123")
-    ha_token = os.getenv("HA_TOKEN")
-    if not ha_token:
+    if gateway_ha is None:
         return []
-    headers = {"Authorization": f"Bearer {ha_token}"}
-    if ha_client:
-        resp = await ha_client.get(f"{ha_url}/api/states", headers=headers)
-    else:
-        async with httpx.AsyncClient(timeout=3.0, verify=False) as client:
-            resp = await client.get(f"{ha_url}/api/states", headers=headers)
-    if resp.status_code != 200:
-        return []
-    return [s for s in resp.json() if str(s.get("entity_id", "")).startswith("assist_satellite.")]
+    states = await gateway_ha.read_states()
+    return [s for s in states if str(s.get("entity_id", "")).startswith("assist_satellite.")]
 
 
 def _is_trusted_voice(raw_request: Request) -> bool:
@@ -727,11 +744,8 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    ha_url = os.getenv("HA_URL", "http://localhost:8123")
-    ha_token = os.getenv("HA_TOKEN")
-
-    if not ha_token:
-        logger.warning("HA_TOKEN not set, cannot send satellite announcement")
+    if gateway_ha is None or not gateway_ha.configured:
+        logger.warning("ha_not_configured", detail="cannot send a satellite announcement")
         return False
 
     # Map room to satellite entity
@@ -741,33 +755,19 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
         return False
 
     try:
-        headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
         payload = {
             "entity_id": satellite_entity,
             "message": message,
             "preannounce": False  # Don't play chime before acknowledgment
         }
-
-        url = f"{ha_url}/api/services/assist_satellite/announce"
-        logger.info(f"Satellite announcement: calling {url} with entity {satellite_entity}")
-
-        # Fire and forget - don't wait for completion
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            resp = await client.post(
-                f"{ha_url}/api/services/assist_satellite/announce",
-                headers=headers,
-                json=payload
-            )
-
-            if resp.status_code == 200:
-                logger.info(f"Satellite announcement sent to {satellite_entity}: message_len={len(message)}")
-                return True
-            else:
-                logger.warning(f"Satellite announcement failed: {resp.status_code}")
-                return False
+        if await gateway_ha.announce(payload):
+            logger.info("satellite_announcement_sent", message_len=len(message))
+            return True
+        logger.warning("satellite_announcement_failed")
+        return False
 
     except Exception as e:
-        logger.warning(f"Failed to send satellite announcement: {e}")
+        logger.warning("satellite_announcement_error", error_class=type(e).__name__)
         return False
 
 

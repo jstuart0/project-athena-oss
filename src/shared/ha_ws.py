@@ -23,7 +23,7 @@ import json
 import logging
 import ssl
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional
 
 import httpx
 
@@ -177,18 +177,29 @@ class HAWebSocket:
         if "id" in payload:
             raise ForbiddenFrameType("frame ids are assigned by the session")
 
+    async def commands(self, payloads: List[Dict[str, Any]], *, timeout: float = COMMAND_TIMEOUT) -> List[Dict[str, Any]]:
+        """Send several commands back to back and return their ``result``
+        frames in order (one round trip, not one each). Every payload is checked
+        before any is sent."""
+        for payload in payloads:
+            self._check(payload)
+        ids = []
+        for payload in payloads:
+            self._next_id += 1
+            ids.append(self._next_id)
+            await self._ws.send(json.dumps({**payload, "id": self._next_id}))
+        results: Dict[int, Dict[str, Any]] = {}
+        async with asyncio.timeout(timeout):
+            while len(results) < len(ids):
+                frame = json.loads(await self._ws.recv())
+                if frame.get("type") == "result" and frame.get("id") in ids:
+                    results[frame["id"]] = frame
+        return [results[i] for i in ids]
+
     async def command(self, payload: Dict[str, Any], *, timeout: float = COMMAND_TIMEOUT) -> Dict[str, Any]:
         """Send one command and return its ``result`` frame. Raises
         ``ForbiddenFrameType`` before any send for a frame outside the profile."""
-        self._check(payload)
-        self._next_id += 1
-        frame_id = self._next_id
-        await self._ws.send(json.dumps({**payload, "id": frame_id}))
-        async with asyncio.timeout(timeout):
-            while True:
-                frame = json.loads(await self._ws.recv())
-                if frame.get("type") == "result" and frame.get("id") == frame_id:
-                    return frame
+        return (await self.commands([payload], timeout=timeout))[0]
 
 
 async def _recv(ws: Any, timeout: float) -> Dict[str, Any]:

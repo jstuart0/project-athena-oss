@@ -102,7 +102,7 @@ def test_main_failure_names_the_class_only(monkeypatch, capsys):
     def boom(*a, **k):
         raise ConnectionError("http://ha.invalid:8123 refused super-secret-token")
 
-    monkeypatch.setattr(room_probe, "websocket_fetcher", lambda url, token: boom)
+    monkeypatch.setattr(room_probe, "snapshot_fetcher", lambda resolver, latch, caller: boom)
     assert room_probe.main(["--runs", "1"]) == 1
     err = capsys.readouterr().err
     assert err.strip() == "probe failed: ConnectionError"
@@ -113,3 +113,36 @@ def test_main_refuses_zero_runs(monkeypatch, capsys):
     monkeypatch.setenv("HA_TOKEN", "t")
     assert room_probe.main(["--runs", "0"]) == 2
     assert "at least 1" in capsys.readouterr().err
+
+
+def test_snapshot_serves_the_same_snapshot_through_read_and_current():
+    snapshot = object()
+    assert room_probe._Snapshot(snapshot).read() is snapshot and room_probe._Snapshot(snapshot).current() is snapshot
+
+
+def test_main_reads_its_credentials_through_the_resolver_and_no_other_way(monkeypatch, capsys):
+    """The environment is read inside shared.ha_credentials.resolve, never by the
+    probe: with os.getenv failing, a configured environment still reaches the fetcher."""
+    import os
+
+    seen = {}
+
+    def fetcher(resolver, latch, caller):
+        seen["url"] = resolver.current().url
+        seen["configured"] = resolver.current().configured
+        raise ConnectionError("stop here")
+
+    monkeypatch.setenv("HA_URL", "http://ha.invalid:8123")
+    monkeypatch.setenv("HA_TOKEN", "super-secret-token")
+    monkeypatch.setattr(os, "getenv", lambda *a, **k: pytest.fail("room_probe must not read the environment itself"))
+    monkeypatch.setattr(room_probe, "snapshot_fetcher", fetcher)
+    assert room_probe.main(["--runs", "1"]) == 1
+    assert seen == {"url": "http://ha.invalid:8123", "configured": True}
+    assert "super-secret-token" not in capsys.readouterr().err
+
+
+def test_main_refuses_an_address_the_policy_rejects(monkeypatch, capsys):
+    monkeypatch.setenv("HA_URL", "http://169.254.169.254/")
+    monkeypatch.setenv("HA_TOKEN", "t")
+    assert room_probe.main(["--runs", "1"]) == 2
+    assert "HA_URL and HA_TOKEN" in capsys.readouterr().err

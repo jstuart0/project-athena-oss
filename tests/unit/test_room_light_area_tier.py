@@ -113,6 +113,9 @@ class FakeRegistry:
     def current(self):
         return self._snapshot
 
+    def read(self):
+        return self._snapshot
+
 
 class Clock:
     now = 10_000.0
@@ -155,7 +158,7 @@ class Rig:
         shared.config._clear_cache_for_tests()
         hem._clear_room_light_exclude_cache()
 
-        self.manager = hem.HAEntityManager("http://ha.invalid:8123", "token")
+        self.manager = hem.HAEntityManager(MagicMock())
         self.manager._entities_cache = state_map
         self.manager._cache_time = datetime.now()
         self.manager._build_indexes()

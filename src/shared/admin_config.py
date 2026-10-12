@@ -8,7 +8,7 @@ import re
 import time
 import urllib.parse
 import httpx
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List, Literal, Tuple
 import structlog
 from shared.admin_url import get_admin_url, path_segment
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
@@ -532,16 +532,13 @@ class AdminConfigClient:
         flags = await self.get_feature_flags()
         return flags.get(feature_name)
 
-    async def get_external_api_key(self, service_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetch external API key from Admin API (decrypted).
-
-        Args:
-            service_name: Service identifier (e.g., "brave-search", "api-football")
-
-        Returns:
-            Dict with api_key, endpoint_url, rate_limit_per_minute, or None if not found
-        """
+    async def lookup_external_api_key(self, service_name: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Fetch an enabled external API key from the Admin API (decrypted), and
+        say what happened: ``("found", data)``, ``("absent", None)`` for a 404
+        (no enabled key by that name), or ``("unavailable", None)`` for every
+        other outcome (admin down, a refusal, a bad body). A caller that must
+        tell "not set up" from "couldn't ask" uses this; ``get_external_api_key``
+        is the same call for those that don't."""
         try:
             url = f"{self.admin_url}/api/external-api-keys/public/{path_segment(service_name)}/key"
             headers = self._service_key_headers()
@@ -552,7 +549,7 @@ class AdminConfigClient:
                     "external_api_key_not_found",
                     service_name=service_name
                 )
-                return None
+                return "absent", None
 
             response.raise_for_status()
             data = response.json()
@@ -562,7 +559,7 @@ class AdminConfigClient:
                 service_name=service_name,
                 has_endpoint_url=bool(data.get("endpoint_url")),
             )
-            return data
+            return "found", data
 
         except httpx.HTTPStatusError as e:
             logger.warning(
@@ -571,31 +568,27 @@ class AdminConfigClient:
                 status_code=e.response.status_code,
                 error_type=type(e).__name__
             )
-            return None
+            return "unavailable", None
         except Exception as e:
             logger.warning(
                 "external_api_key_connection_failed",
                 service_name=service_name,
                 error_type=type(e).__name__
             )
-            return None
+            return "unavailable", None
 
-    async def get_home_assistant_config(self) -> Optional[Dict[str, str]]:
+    async def get_external_api_key(self, service_name: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch Home Assistant configuration from Admin API.
+        Fetch external API key from Admin API (decrypted).
 
-        Looks for service name "home-assistant" in external_api_keys.
+        Args:
+            service_name: Service identifier (e.g., "brave-search", "api-football")
 
         Returns:
-            Dict with 'url' and 'token' keys, or None if not configured
+            Dict with api_key, endpoint_url, rate_limit_per_minute, or None if not found
         """
-        config = await self.get_external_api_key("home-assistant")
-        if config:
-            return {
-                "url": config.get("endpoint_url"),
-                "token": config.get("api_key")
-            }
-        return None
+        status, data = await self.lookup_external_api_key(service_name)
+        return data if status == "found" else None
 
     async def get_tool_api_key_requirements(self, tool_name: str) -> List[Dict[str, Any]]:
         """
@@ -2282,26 +2275,3 @@ async def get_config(key: str, default: Any = None) -> Any:
     """
     client = get_admin_client()
     return await client.get_config(key, default)
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        """Test the admin configuration client."""
-        client = AdminConfigClient()
-
-        # Test fetching a secret
-        print("Testing secret fetch...")
-        try:
-            ha_token = await client.get_secret("home-assistant")
-            if ha_token:
-                print(f"✓ Home Assistant token: {ha_token[:20]}...")
-            else:
-                print("✗ Home Assistant token not found")
-        except Exception as e:
-            print(f"✗ Error fetching secret: {e}")
-
-        await client.close()
-
-    asyncio.run(test())
