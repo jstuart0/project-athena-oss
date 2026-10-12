@@ -396,4 +396,106 @@ def test_the_authorization_header_is_built_in_one_function():
             if any(isinstance(n, ast.Constant) and n.value == "Authorization" for n in ast.walk(fn)):
                 holders.append(f"{cls.name}.{fn.name}")
     assert holders == ["HATransport.handle_async_request"]
+    source = (ROOT / "src" / "shared" / "ha_http.py").read_text()
+    assert source.count('request.headers["Authorization"] = _bearer(snapshot, request)') == 2, "both sets go through the origin check"
+    assert source.count("Bearer ") == 1 or source.count('f"Bearer ') == 1
     assert "/api/services" not in (ROOT / "src" / "shared" / "ha_http.py").read_text(), "ha_http names no service endpoint"
+
+
+# -- an error after the request was sent; the origin the token is sent to ---------------------------------
+
+
+class RaisingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, error):
+        self.error = error
+        self.sent = []
+
+    async def handle_async_request(self, request):
+        self.sent.append(request)
+        raise self.error
+
+
+def _canary_world(error):
+    """A proven token, then a first use of a new route through a transport that raises ``error``."""
+    from shared import ha_auth
+
+    async def scenario():
+        stack = make_stack(gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")  # prove first
+        raising = RaisingTransport(error)
+        stack.channel._transport._inner = raising
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append((admission.reserved, kw["result"]))
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        budget = lambda: ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {})  # noqa: E731
+        before = int(budget().get("n", 0))
+        with pytest.raises(type(error)):
+            await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return observed, int(budget().get("n", 0)) - before, len(raising.sent)
+
+    return run(scenario())
+
+
+def test_a_reserved_canary_that_fails_after_the_request_was_sent_stays_counted():
+    for error in (httpx.ReadTimeout("slow"), httpx.ReadError("reset"), httpx.RemoteProtocolError("closed")):
+        observed, counted, sent = _canary_world(error)
+        assert observed == [(True, "unreachable_sent")], error
+        assert counted == 1 and sent == 1, "the reservation stays spent: Home Assistant may have counted it"
+
+
+def test_a_reserved_canary_that_never_connected_gives_its_reservation_back():
+    for error in (httpx.ConnectError("refused"), httpx.ConnectTimeout("no route")):
+        observed, counted, sent = _canary_world(error)
+        assert observed == [(True, "other")], error
+        assert counted == 0 and sent == 1
+
+
+def test_the_token_is_sent_only_to_the_origin_the_credentials_belong_to():
+    async def scenario(url):
+        stack = make_stack(gate_wait=0.1)
+        digest = stack.creds.digest
+        request = httpx.Request("GET", url, extensions={"athena_ha_digest": digest})
+        recording = RaisingTransport(RuntimeError("must not be sent"))
+        stack.channel._transport._inner = recording
+        try:
+            await stack.channel._transport.handle_async_request(request)
+        except RuntimeError as exc:
+            return str(exc), recording.sent, request.headers.get("authorization")
+        return None, recording.sent, request.headers.get("authorization")
+
+    for url in ("https://other-host.example.invalid/api/states", "http://ha-fixture.invalid/api/states",
+                "https://ha-fixture.invalid:9443/api/states", "https://ha-fixture.invalid.attacker.invalid/api/states"):
+        message, sent, authorization = run(scenario(url))
+        assert "not addressed to the Home Assistant" in message, url
+        assert sent == [] and authorization is None, url
+
+
+def test_the_proof_request_is_held_to_the_same_origin():
+    async def scenario():
+        stack = make_stack()
+        request = httpx.Request("GET", "https://other-host.example.invalid/api", extensions={
+            "athena_ha_digest": stack.creds.digest, "athena_ha_proof": True,
+        })
+        stack.channel._transport._inner = RaisingTransport(RuntimeError("must not be sent"))
+        with pytest.raises(RuntimeError, match="not addressed"):
+            await stack.channel._transport.handle_async_request(request)
+        return request.headers.get("authorization")
+
+    assert run(scenario()) is None
+
+
+def test_a_request_to_the_right_origin_still_carries_the_token():
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake)
+        response = await stack.channel.request("GET", "/api/states")
+        await stack.channel.aclose()
+        return response.status_code
+
+    assert run(scenario()) == 200

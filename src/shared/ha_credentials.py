@@ -47,6 +47,14 @@ logger = structlog.get_logger(__name__)
 
 HA_KEY_SERVICE = "home-assistant"
 
+# External API Key services whose value must never be handed to a tool, a workflow
+# or any other consumer that puts it in front of a model or a third party. The
+# Home Assistant token controls the house; only shared.ha_credentials' readers
+# may hold it. Every place that injects a stored key honours this set
+# (tests/unit/test_ha_consolidation_drift.py: TestNonInjectableKeys).
+NON_INJECTABLE_KEY_SERVICES = frozenset({HA_KEY_SERVICE})
+NOT_INJECTABLE_REFUSAL = "This API key can't be attached to a tool."
+
 SOURCE_ADMIN = "admin"
 SOURCE_ENV = "env"
 SOURCE_NONE = "none"
@@ -73,7 +81,7 @@ _NOTE_EVENTS = {
 PROBLEM_WORDS = frozenset({
     "empty", "unsafe_character", "too_long", "unparseable", "bad_scheme", "query",
     "fragment", "path", "host", "port", "blocked_address", "host_not_allowed",
-    "incomplete", "dns_unavailable",
+    "incomplete", "dns_unavailable", "host_form",
 })
 
 
@@ -233,6 +241,24 @@ def always_blocked(ip) -> bool:
     )
 
 
+_DECIMAL_LABEL = re.compile(r"[0-9]+")
+_HEX_LABEL = re.compile(r"0x[0-9a-f]*")
+
+
+def _odd_host_form(host: str) -> bool:
+    """A host written in a form some resolvers read as an address: all digits
+    (``2852039166``), a ``0x`` hex form, a dotted name with a purely numeric
+    label that isn't a canonical dotted quad (``169.254.43518``, ``010.1.1.1``),
+    or a trailing dot. A canonical IPv4 or IPv6 literal is not odd; the DNS check
+    at use stays as the second layer for names."""
+    if _literal_ip(host) is not None:
+        return False
+    if host.endswith("."):
+        return True
+    labels = host.lower().split(".")
+    return any(_DECIMAL_LABEL.fullmatch(label) or _HEX_LABEL.fullmatch(label) for label in labels)
+
+
 def _inspect(url: Any, source: str) -> Tuple[Optional[str], Optional[_Parsed]]:
     """``(problem word, parsed parts)``; exactly one of them is None."""
     if not isinstance(url, str) or not url:
@@ -256,6 +282,8 @@ def _inspect(url: Any, source: str) -> Tuple[Optional[str], Optional[_Parsed]]:
     host = parsed.host
     if not host:
         return "host", None
+    if _odd_host_form(host):
+        return "host_form", None
     explicit = parsed.port
     if explicit is not None and not 1 <= explicit <= 65535:
         return "port", None
@@ -280,10 +308,12 @@ def ha_url_problem(url: Any, *, source: str) -> Optional[str]:
     Every source: no backslash, ``@``, whitespace or control character; at
     most 2048 characters; parsed by ``httpx.URL`` (the parser that sends the
     request); http or https; no query or fragment; the path empty or ``/``; a
-    valid port; and a host that isn't cloud metadata, link-local, multicast or
-    unspecified (an IPv4-mapped IPv6 literal is judged as its IPv4 address). A
-    host that isn't a canonical IP literal is a name; numeric forms such as
-    ``2852039166`` are names too, and the resolver judges what they resolve to.
+    valid port; a host that isn't written as an odd numeric form (all digits, a
+    ``0x`` form, a dotted name with a purely numeric label that isn't a canonical
+    dotted quad, or a trailing dot: ``host_form``); and a host that isn't cloud
+    metadata, link-local, multicast or unspecified (an IPv4-mapped IPv6 literal is
+    judged as its IPv4 address). Any other host that isn't a canonical IP literal
+    is a name, and the resolver judges what it resolves to.
 
     An admin-supplied URL must also pass the shared service-host rule (no
     loopback, ``.svc`` or ``.cluster.local``), with loopback allowed outside a

@@ -1012,7 +1012,7 @@ async function loadStatus() {
         const data = registryResult.value;
         const summary = summarizeServices(data);
         const checkedMs = Number.isNaN(Date.parse(data.checked_at)) ? Date.now() : Date.parse(data.checked_at);
-        errorContainer.innerHTML = pollerBanner(data);
+        errorContainer.innerHTML = pollerBanner(data, checkedMs);
 
         // Update stats
         document.getElementById('stat-healthy').textContent = summary.healthyText;

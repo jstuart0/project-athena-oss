@@ -20,6 +20,7 @@ from app.models import User, ToolRegistry, ToolCallingSetting, ToolCallingTrigge
 from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 
 from app.services import service_urls
+from shared.ha_credentials import NON_INJECTABLE_KEY_SERVICES, NOT_INJECTABLE_REFUSAL
 
 logger = structlog.get_logger()
 
@@ -1036,6 +1037,9 @@ async def add_tool_api_key_requirement(
     tool = db.query(ToolRegistry).filter(ToolRegistry.id == tool_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
+
+    if requirement.api_key_service in NON_INJECTABLE_KEY_SERVICES:
+        raise HTTPException(status_code=422, detail=NOT_INJECTABLE_REFUSAL)
 
     # Verify API key service exists
     api_key = db.query(ExternalAPIKey).filter(

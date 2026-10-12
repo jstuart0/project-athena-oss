@@ -67,6 +67,8 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_gateway_ha_channel.py",
     "tests/unit/test_ha_client_over_the_channel.py",
     "tests/unit/test_ha_docs_match_constants.py",
+    "tests/unit/test_ha_admin_config_tool_keys.py",
+    "admin/backend/tests/test_ha_key_not_injectable.py",
     "tests/unit/test_admin_frontend_status_vocab.py",
     "tests/unit/test_admin_frontend_script_order.py",
     "tests/unit/test_admin_frontend_voice_config_ha.py",

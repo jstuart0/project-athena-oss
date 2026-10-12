@@ -393,11 +393,34 @@ def test_any_blocked_address_among_several_rejects_the_name():
     assert run(scenario()) == "blocked_address"
 
 
-@pytest.mark.parametrize("url", ["http://2852039166/", "http://0xa9fea9fe/", "http://169.254.43518/"])
-def test_numeric_hosts_are_names_the_resolver_judges_by_what_they_resolve_to(url):
+@pytest.mark.parametrize("url", [
+    "http://2852039166/", "http://0xa9fea9fe/", "http://169.254.43518/", "http://12345/", "http://0X7f000001/",
+    "http://1.2.3/", "http://ha.0x10.example.invalid/", "http://ha.1.example.invalid/",
+    "http://ha.example.invalid./", "http://10.20.30.10./",
+])
+def test_odd_numeric_host_forms_are_refused_at_save_and_never_looked_up(url):
+    assert hc.ha_url_problem(url, source="admin") == "host_form"
+    assert hc.ha_url_problem(url, source="env") == "host_form"
+
+    async def scenario():
+        dns = public_dns(("10.20.30.7",))
+        r = resolver(Source(KeyLookup.found(url, TOKEN)), dns=dns)
+        await r.start()
+        return r.current(), dns.calls
+
+    c, calls = run(scenario())
+    assert (c.configured, c.problem) == (False, "host_form") and calls == [], "refused before any DNS lookup"
+
+
+@pytest.mark.parametrize("url", ["http://10.20.30.10/", "http://ha.example.invalid/", "http://ha-1.example.invalid/", "http://[2001:db8::1]/", "http://ha2.example.invalid/", "http://x0x.example.invalid/"])
+def test_ordinary_hosts_are_not_odd(url):
+    assert hc.ha_url_problem(url, source="admin") is None
+
+
+def test_the_dns_check_stays_the_second_layer_for_a_name_that_resolves_to_a_blocked_address():
     async def scenario(address):
         dns = public_dns((address,))
-        r = resolver(Source(KeyLookup.found(url, TOKEN)), dns=dns)
+        r = resolver(Source(KeyLookup.found("http://ha.example.invalid/", TOKEN)), dns=dns)
         await r.start()
         return r.current(), dns.calls
 

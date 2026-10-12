@@ -22,6 +22,7 @@ from app.utils.encryption import decrypt_value
 from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 from app.services import service_urls
+from shared.ha_credentials import NON_INJECTABLE_KEY_SERVICES
 
 logger = structlog.get_logger()
 
@@ -262,6 +263,9 @@ async def inject_api_keys(workflow_def: dict, db: Session) -> dict:
     matches = re.findall(pattern, workflow_str)
 
     for service_name in set(matches):
+        if service_name in NON_INJECTABLE_KEY_SERVICES:
+            logger.warning("api_key_not_injectable", service=service_name)
+            continue
         try:
             key_record = db.query(ExternalAPIKey).filter(
                 ExternalAPIKey.service_name == service_name,

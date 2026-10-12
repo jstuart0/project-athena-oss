@@ -186,7 +186,8 @@ async def rest_proof_does_not_reset_the_count(env: Env) -> None:
 async def reopen_lowers_to_one_attempt(env: Env) -> None:
     snap = credentials()
     latch = env.latch()
-    for before, reserved, after in ((3, 0, 2), (1, 0, 1), (3, 3, 3), (0, 0, 0)):
+    # (3, 3) is a leaked reservation count with no live reservation behind it: a save recovers.
+    for before, reserved, after in ((3, 0, 2), (1, 0, 1), (3, 3, 2), (0, 0, 0)):
         await env.redis.delete(BUDGET_KEY)
         await env.set_budget(n=before, r=reserved)
         await latch.clear_and_reopen(snap)
@@ -274,11 +275,11 @@ async def reply_types_decode(env: Env) -> None:
     bytes client."""
     snap = credentials()
     latch = env.latch(gate_wait=0.2)
-    reply = await latch._call("reserve_proof", [BUDGET_KEY, key("gate:v1", snap), key("latch:v1", snap), key("proven:v2", snap)], ["h", 1000, ha_auth.BUDGET, "t", "", ""])
+    reply = await latch._call("reserve_proof", [BUDGET_KEY, key("gate:v1", snap), key("latch:v1", snap), key("proven:v2", snap)], ["h", 1000, ha_auth.BUDGET, "t", "", "", 1000, 60000])
     assert reply == [1, 0]
-    reply = await latch._call("reserve_request", [BUDGET_KEY], [ha_auth.REQUEST_ALLOWANCE])
+    reply = await latch._call("reserve_request", [BUDGET_KEY], [ha_auth.REQUEST_ALLOWANCE, "rq", 1000, 60000])
     assert reply[0] in (0, 1, 2) and isinstance(reply[1], int)
-    assert isinstance(await latch._call("reopen", [BUDGET_KEY], [ha_auth.BUDGET]), int)
+    assert isinstance(await latch._call("reopen", [BUDGET_KEY, key("gate:v1", snap)], [ha_auth.BUDGET, 1000]), int)
     assert (await latch.admit(snap, **READ)).kind in (ha_auth.PROVE, ha_auth.GATED)
 
 
@@ -306,7 +307,7 @@ async def reservation_rechecks_what_the_caller_read(env: Env) -> None:
     snap = credentials()
     latch = env.latch()
     gate = key("gate:v1", snap)
-    arguments = ["holder", 1000, ha_auth.BUDGET, "t", "", ""]
+    arguments = ["holder", 1000, ha_auth.BUDGET, "t", "", "", 1000, 60000]
     keys = [BUDGET_KEY, gate, key("latch:v1", snap), key("proven:v2", snap)]
     assert await latch._call("reserve_proof", keys, arguments) == [1, 0]
     await env.redis.delete(gate, BUDGET_KEY)
@@ -316,7 +317,7 @@ async def reservation_rechecks_what_the_caller_read(env: Env) -> None:
     await env.redis.delete(key("latch:v1", snap))
     await env.redis.set(key("proven:v2", snap), "appeared", ex=100)
     assert await latch._call("reserve_proof", keys, arguments) == [3, 0]
-    assert await latch._call("reserve_proof", keys, arguments[:4] + ["", "appeared"]) == [1, 0]
+    assert await latch._call("reserve_proof", keys, arguments[:4] + ["", "appeared"] + arguments[6:]) == [1, 0]
 
 
 async def a_proof_started_from_a_stale_read_starts_over(env: Env) -> None:
@@ -355,7 +356,78 @@ async def a_rest_success_never_clears_the_count(env: Env) -> None:
     assert (await env.n(), await env.epoch()) == (2, 1)
 
 
+async def leaked_reservations_cannot_freeze_the_budget(env: Env) -> None:
+    """Three proofs reserve and their holders die before settling: n = 3 and r = 3.
+    The old reopen kept n at r, so a save could not recover. Now it does, and
+    exactly one more failed sign-in follows before the next success."""
+    latch = env.latch()
+    leaked = [credentials(token=f"leaked-{i}") for i in range(3)]
+    for snap in leaked:
+        assert (await latch.admit(snap, **READ)).kind == ha_auth.PROVE
+    assert (await env.n(), await env.r()) == (3, 3)
+    assert (await latch.admit(credentials(token="after"), **READ)).kind == ha_auth.WITHHELD
+    await latch.clear_and_reopen(leaked[0])
+    assert (await env.n(), await env.r()) == (2, 0), "the save drops the leaked reservations and lowers to one attempt"
+    admission = await latch.admit(leaked[0], **READ)
+    assert admission.kind == ha_auth.PROVE and await env.n() == 3
+    await settle(latch, leaked[0], admission, "auth_rejected")
+    assert await env.n() == 3 and (await latch.admit(leaked[0], **READ)).kind == ha_auth.WITHHELD
+    await no_ttl_on_budget(env)
+
+
+async def a_reservation_that_is_never_settled_expires(env: Env) -> None:
+    """Reservations are per holder with an expiry: a dead holder's stops counting
+    in r by itself, a live one still counts."""
+    latch = env.latch()
+    first = await latch.admit(credentials(token="dies"), **READ)
+    assert first.kind == ha_auth.PROVE and (await env.n(), await env.r()) == (1, 1)
+    env.clock.advance(ha_auth.RESERVATION_TTL - 5)
+    second = await latch.admit(credentials(token="lives"), **READ)
+    assert second.kind == ha_auth.PROVE and await env.r() == 2, "before the expiry both still count"
+    env.clock.advance(10)
+    third = await latch.admit(credentials(token="third"), **READ)
+    assert third.kind == ha_auth.PROVE
+    assert (await env.n(), await env.r()) == (3, 2), "the first one expired; n still holds its possible failure"
+    await settle(latch, credentials(token="lives"), second, "refund")
+    await settle(latch, credentials(token="third"), third, "refund")
+    assert await env.r() == 0 and await env.n() == 1
+
+
+async def an_unsettled_route_canary_expires_too(env: Env) -> None:
+    latch = env.latch()
+    snap = credentials()
+    await prove_ok(latch, snap)
+    canary = await latch.admit(snap, **WRITE)
+    assert canary.kind == ha_auth.CANARY and await env.r() == 1
+    cover = dict(method="POST", path="/api/services/cover/open", key="POST /api/services/cover/open cover.a")
+    second = await latch.admit(snap, **dict(cover, path="/api/services/lock/lock", key="POST /api/services/lock/lock lock.a"))
+    assert second.kind == ha_auth.CANARY and await env.r() == 2, "each canary holds its own reservation while it is live"
+    env.clock.advance(ha_auth.RESERVATION_TTL + 1)
+    again = await latch.admit(snap, **cover)
+    assert (again.kind, again.reason) == (ha_auth.WITHHELD, ha_auth.REASON_BUDGET), "two possibly-counted attempts fill the allowance"
+    assert await env.r() == 0 and await env.n() == 2, "the dead canaries stopped counting as reserved but stay counted as attempts"
+    await settle(latch, snap, canary, "refund")  # a late settle of an expired reservation is harmless
+    assert await env.r() == 0
+
+
+async def a_late_settlement_after_a_save_counts_as_unreserved(env: Env) -> None:
+    """A save drops reservations and bumps the epoch. The failure of an attempt that
+    was reserved before the save is then counted again: Home Assistant did count it."""
+    latch = env.latch()
+    late = await latch.admit(credentials(token="before-the-save"), **READ)
+    assert late.kind == ha_auth.PROVE and (await env.n(), await env.r()) == (1, 1)
+    await latch.clear_and_reopen(credentials(token="the-saved-one"))
+    assert (await env.n(), await env.r()) == (1, 0)
+    await settle(latch, credentials(token="before-the-save"), late, "auth_rejected")
+    assert await env.n() == 2, "counted again, not treated as the reservation it used to be"
+    await no_ttl_on_budget(env)
+
+
 SCENARIOS = {
+    "a_late_settlement_after_a_save_counts_as_unreserved": a_late_settlement_after_a_save_counts_as_unreserved,
+    "leaked_reservations_cannot_freeze_the_budget": leaked_reservations_cannot_freeze_the_budget,
+    "a_reservation_that_is_never_settled_expires": a_reservation_that_is_never_settled_expires,
+    "an_unsettled_route_canary_expires_too": an_unsettled_route_canary_expires_too,
     "gate_contention": gate_contention,
     "two_digests_one_slot": two_digests_one_slot,
     "unreachable_sent_stays_counted": unreachable_sent_stays_counted,

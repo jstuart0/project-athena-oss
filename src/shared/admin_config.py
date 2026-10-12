@@ -11,6 +11,7 @@ import httpx
 from typing import Optional, Dict, Any, List, Literal, Tuple
 import structlog
 from shared.admin_url import get_admin_url, path_segment
+from shared.ha_credentials import NON_INJECTABLE_KEY_SERVICES
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
 from shared.knowledge_tiers import entry_visible
@@ -670,6 +671,11 @@ class AdminConfigClient:
             is_required = req.get("is_required", True)
 
             if not service_name:
+                continue
+
+            if service_name in NON_INJECTABLE_KEY_SERVICES:
+                # Defence in depth for a row created before the admin route refused it.
+                logger.warning("tool_api_key_not_injectable", tool_name=tool_name)
                 continue
 
             # Fetch the actual API key

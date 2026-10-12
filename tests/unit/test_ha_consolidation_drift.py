@@ -35,11 +35,28 @@ PENDING_PHASE_3: Dict[str, Set[Tuple[str, str]]] = {}
 PROFILE_PARAMETER_SITE = ("admin/backend/app/services/ha_access.py", "ws_session")
 
 
+# Jetson is a separate deployment and stays out of scope (it reads HA_URL/HA_TOKEN
+# itself). Only these existing files are skipped; any other or new file under
+# src/jetson is scanned like the rest of the tree. Compared exactly with the disk.
+JETSON_OUT_OF_SCOPE = {
+    "src/jetson/__init__.py": "package marker",
+    "src/jetson/athena_lite.py": "separate edge deployment (decision D7)",
+    "src/jetson/athena_lite_llm.py": "separate edge deployment (decision D7)",
+    "src/jetson/llm_webhook_service.py": "separate edge deployment (decision D7); reads HA_TOKEN itself",
+    "src/jetson/config/ha_config.py": "separate edge deployment (decision D7); reads HA_URL/HA_TOKEN itself",
+}
+
+
 # -- scanning ------------------------------------------------------------------------------------
 
 
 _SOURCES: Optional[List[Tuple[str, str]]] = None
 _TREES: Dict[str, Optional[ast.AST]] = {}
+
+
+def is_skipped(rel: str) -> bool:
+    """Files the scans leave out: the pinned Jetson files, test trees and caches."""
+    return rel in JETSON_OUT_OF_SCOPE or "/tests/" in rel or "node_modules" in rel or "__pycache__" in rel
 
 
 def scanned_files() -> Iterator[Tuple[str, str]]:
@@ -51,7 +68,7 @@ def scanned_files() -> Iterator[Tuple[str, str]]:
             base = ROOT / entry
             for path in [base] if base.is_file() else sorted(base.rglob("*.py")):
                 rel = path.relative_to(ROOT).as_posix()
-                if rel.startswith("src/jetson/") or "/tests/" in rel or "node_modules" in rel or "__pycache__" in rel:
+                if is_skipped(rel):
                     continue
                 _SOURCES.append((rel, path.read_text(encoding="utf-8", errors="ignore")))
     yield from _SOURCES
@@ -384,7 +401,7 @@ class TestKeyNameLiteral:
 
 
 class TestBearerSites:
-    HA = {("src/shared/ha_http.py", "HATransport.handle_async_request")}
+    HA = {("src/shared/ha_http.py", "_bearer")}  # the one place a bearer value is made; the transport sets the header from it
     # jarvis-web calls Home Assistant with its own env token (D7, ticketed): pinned by (function, count).
     JARVIS_BEARER = {("apps/jarvis-web/backend/main.py", "get_ha_headers"): 2}
     NON_HA = {
@@ -573,22 +590,52 @@ class TestConstructionSites:
         found = construction_population()
         assert found == self.EXPECTED, {"missing": dict(self.EXPECTED - found), "extra": dict(found - self.EXPECTED)}
 
+    # A latch whose Redis arrives as a parameter can be handed None by a caller. These are
+    # the only such sites, each with the one caller allowed to pass it.
+    REDIS_PARAMETER_SITES = {
+        ("admin/backend/app/services/ha_access.py", "init"): "admin main passes None only under DEV_MODE (no Redis client there)",
+    }
+
+    @classmethod
+    def latch_redis_problems(cls, rel, source):
+        bad = []
+        tree = parse(source)
+        if tree is None:
+            return bad
+        for function in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            params = {a.arg for a in function.args.args + function.args.kwonlyargs}
+            none_names = {
+                t.id for a in ast.walk(function) if isinstance(a, ast.Assign) and isinstance(a.value, ast.Constant) and a.value.value is None
+                for t in a.targets if isinstance(t, ast.Name)
+            }
+            for call in [n for n in ast.walk(function) if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "HAAuthLatch"]:
+                redis = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "redis"), None)
+                if redis is None or (isinstance(redis, ast.Constant) and redis.value is None) or (isinstance(redis, ast.Name) and redis.id in none_names):
+                    bad.append((rel, function.name, "None"))
+                elif isinstance(redis, ast.Name) and redis.id in params and (rel, function.name) not in cls.REDIS_PARAMETER_SITES:
+                    bad.append((rel, function.name, "parameter"))
+        return bad
+
     def test_a_latch_is_never_built_without_redis_in_production(self):
         bad = []
         for rel, source in scanned_files():
-            tree = parse(source)
-            if tree is None or rel == "src/orchestrator/room_probe.py":
+            if rel == "src/orchestrator/room_probe.py":
                 continue
-            for function in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-                for call in [n for n in ast.walk(function) if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "HAAuthLatch"]:
-                    redis = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "redis"), None)
-                    none_names = {
-                        t.id for a in ast.walk(function) if isinstance(a, ast.Assign) and isinstance(a.value, ast.Constant) and a.value.value is None
-                        for t in a.targets if isinstance(t, ast.Name)
-                    }
-                    if redis is None or (isinstance(redis, ast.Constant) and redis.value is None) or (isinstance(redis, ast.Name) and redis.id in none_names):
-                        bad.append((rel, function.name))
+            bad += self.latch_redis_problems(rel, source)
         assert bad == []
+
+    def test_a_none_passed_through_a_parameter_is_caught(self):
+        source = "def build(redis):\n    return HAAuthLatch(redis, instance='x', service_api_key=None)\n"
+        assert self.latch_redis_problems("src/planted.py", source) == [("src/planted.py", "build", "parameter")]
+        assert self.latch_redis_problems("src/planted.py", "def b():\n    return HAAuthLatch(None, instance='x')\n") == [("src/planted.py", "b", "None")]
+        assert self.latch_redis_problems("src/planted.py", "def b(redis=None):\n    r = None\n    return HAAuthLatch(r)\n") == [("src/planted.py", "b", "None")]
+        assert self.latch_redis_problems("src/planted.py", "def b():\n    client = make()\n    return HAAuthLatch(client)\n") == []
+
+    def test_the_parameter_sites_are_real_and_the_admin_caller_passes_none_only_in_dev_mode(self):
+        for rel, function in self.REDIS_PARAMETER_SITES:
+            assert any(f"def {function}(" in line or f"async def {function}(" in line for line in (ROOT / rel).read_text().splitlines())
+        main = (ROOT / "admin/backend/main.py").read_text(encoding="utf-8")
+        assert "await ha_access.init(None if DEV_MODE else redis_client)" in main
 
     def test_one_latch_per_process_reaches_the_channel_the_registry_and_the_publisher(self):
         for rel in self.PROCESS:
@@ -776,6 +823,155 @@ class TestOrchestratorRegistryReads:
         assert self.reads(ast.parse("def f(ha_registry):\n    return ha_registry.current()\n"), "current") == {"f"}
         assert self.reads(ast.parse("def g():\n    return _runtime.get_ha_registry().current()\n"), "current") == {"g"}
         assert self.reads(ast.parse("def h(room_directory):\n    return room_directory.current()\n"), "current") == set()
+
+
+def test_the_jetson_skip_list_is_exactly_the_files_on_disk():
+    on_disk = {p.relative_to(ROOT).as_posix() for p in (ROOT / "src" / "jetson").rglob("*.py")}
+    assert on_disk == set(JETSON_OUT_OF_SCOPE), sorted(on_disk ^ set(JETSON_OUT_OF_SCOPE))
+    scanned = {rel for rel, _ in scanned_files()}
+    assert not scanned & set(JETSON_OUT_OF_SCOPE)
+    assert "src/shared/ha_credentials.py" in scanned
+
+
+def test_a_new_jetson_file_would_be_scanned():
+    new = "src/jetson/new_module.py"
+    assert new not in JETSON_OUT_OF_SCOPE
+    assert is_skipped("src/jetson/athena_lite.py") and not is_skipped(new) and not is_skipped("src/jetson/config/other.py")
+    source = 'import os\nTOKEN = os.getenv("HA_TOKEN")\n'
+    assert planted(env_readers, source, new) == {(new, "<module>")}
+
+
+class TestTokenReaders:
+    """Where a token's plain text is read, and who may mark a request as a proof."""
+
+    REVEAL_SITES = {
+        ("src/shared/ha_auth.py", "HAAuthLatch._legacy_key"): "the legacy marker's digest",
+        ("src/shared/ha_credentials.py", "HACredentials.configured"): "is there a token at all",
+        ("src/shared/ha_credentials.py", "HACredentials.identity"): "change detection",
+        ("src/shared/ha_ws.py", "_prove_ws"): "the proof's handshake",
+        ("src/shared/ha_ws.py", "ha_ws_session"): "a session's handshake",
+        ("src/shared/ha_http.py", "_bearer"): "the Authorization value, origin-checked",
+    }
+
+    @staticmethod
+    def reveal_calls():
+        found = set()
+        for rel, source in scanned_files():
+            if ".reveal(" not in source:
+                continue
+            for node, qual in scoped(parse(source)):
+                if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "reveal":
+                    found.add((rel, qual))
+        return found
+
+    def test_the_population_of_reveal_calls_is_exactly_the_pinned_one(self):
+        found = self.reveal_calls()
+        assert found == set(self.REVEAL_SITES), sorted(found ^ set(self.REVEAL_SITES))
+
+    def test_a_new_reveal_call_would_be_found(self):
+        found = planted(lambda tree: {q for n, q in scoped(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "reveal"},
+                        "def leak(snapshot):\n    return snapshot.token.reveal()\n")
+        assert found == {("planted.py", "leak")}
+
+    def test_the_proof_marker_is_used_only_in_the_transport(self):
+        users = set()
+        for rel, source in scanned_files():
+            if "PROOF_EXTENSION" in source or "athena_ha_proof" in source:
+                users.add(rel)
+        assert users == {"src/shared/ha_http.py"}, users
+
+    def test_the_proof_marker_is_set_in_exactly_one_function(self):
+        tree = parse((ROOT / "src/shared/ha_http.py").read_text(encoding="utf-8"))
+        setters = {q for n, q in scoped(tree) if isinstance(n, ast.Name) and n.id == "PROOF_EXTENSION"}
+        assert setters == {"<module>", "HATransport.handle_async_request", "HATransport._proof_status"}
+
+
+class TestNonInjectableKeys:
+    """The Home Assistant token is never attached to a tool, a workflow or a model.
+
+    The set lives in shared.ha_credentials. Every place that turns a stored key
+    into an argument, a header the model sees or a workflow value either honours
+    it or only reaches keys through one that does.
+    """
+
+    SITES = {
+        ("src/shared/admin_config.py", "AdminConfigClient.get_api_keys_for_tool"),
+        ("admin/backend/app/routes/tool_proposals.py", "inject_api_keys"),
+        ("admin/backend/app/routes/tool_calling.py", "add_tool_api_key_requirement"),
+    }
+
+    @staticmethod
+    def names(function: ast.AST) -> Set[str]:
+        return {n.id for n in ast.walk(function) if isinstance(n, ast.Name)}
+
+    def functions(self, rel: str):
+        tree = parse((ROOT / rel).read_text(encoding="utf-8"))
+        out = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        out[f"{node.name}.{item.name}"] = item
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.setdefault(node.name, node)
+        return out
+
+    def test_the_set_is_owned_in_shared_and_holds_the_home_assistant_key(self):
+        from shared import ha_credentials
+
+        assert ha_credentials.NON_INJECTABLE_KEY_SERVICES == frozenset({ha_credentials.HA_KEY_SERVICE})
+        owners = {rel for rel, source in scanned_files() if re.search(r"^NON_INJECTABLE_KEY_SERVICES\s*=", source, re.M)}
+        assert owners == {"src/shared/ha_credentials.py"}
+
+    def test_every_injection_site_honours_the_set(self):
+        for rel, qual in sorted(self.SITES):
+            function = self.functions(rel)[qual]
+            assert "NON_INJECTABLE_KEY_SERVICES" in self.names(function), (rel, qual)
+
+    # Every place the admin backend decrypts a stored secret, classified. A new
+    # decrypt site fails here until someone says whether it can reach a tool.
+    DECRYPT_SITES = {
+        ("admin/backend/app/auth/oidc.py", "load_oidc_config_from_db"): "server-side sign-in",
+        ("admin/backend/app/routes/calendar_sources.py", "resolve_lodgify_api_key"): "server-side calendar sync",
+        ("admin/backend/app/routes/cloud_providers.py", "check_provider_health"): "server-side health probe",
+        ("admin/backend/app/routes/external_api_keys.py", "_mask_key"): "masks to the last four characters",
+        ("admin/backend/app/routes/external_api_keys.py", "get_api_key_for_service"): "service-key-gated read for the resolver and RAG services",
+        ("admin/backend/app/routes/external_api_keys.py", "get_credentials_for_service"): "service-key-gated read for LiveKit and OAuth",
+        ("admin/backend/app/routes/model_downloads.py", "get_hf_token"): "server-side download",
+        ("admin/backend/app/routes/secrets.py", "get_service_secret"): "service-key-gated read",
+        ("admin/backend/app/routes/secrets.py", "reveal_secret"): "owner-only reveal",
+        ("admin/backend/app/routes/settings.py", "get_oidc_settings"): "server-side sign-in settings",
+        ("admin/backend/app/routes/tool_proposals.py", "get_n8n_api_key"): "server-side n8n deploy",
+        ("admin/backend/app/routes/tool_proposals.py", "inject_api_keys"): "INJECTION SITE: honours NON_INJECTABLE_KEY_SERVICES",
+        ("admin/backend/app/services/ha_access.py", "key_saved"): "the Home Assistant stack itself",
+        ("admin/backend/app/services/ha_access.py", "read_enabled_key"): "the Home Assistant stack itself",
+        ("admin/backend/app/utils/encryption.py", "<module>"): "the helper's own definition",
+    }
+
+    def test_the_population_of_decrypt_sites_is_the_pinned_one(self):
+        found = set()
+        for rel, source in scanned_files():
+            if "decrypt_value" not in source:
+                continue
+            for node, qual in scoped(parse(source)):
+                if isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", "")) == "decrypt_value":
+                    found.add((rel, qual))
+        assert found == set(self.DECRYPT_SITES), sorted(found ^ set(self.DECRYPT_SITES))
+        assert {k for k, v in self.DECRYPT_SITES.items() if v.startswith("INJECTION SITE")} <= self.SITES
+
+    def test_the_orchestrators_injection_reaches_keys_only_through_the_filtered_function(self):
+        source = (ROOT / "src/orchestrator/main.py").read_text(encoding="utf-8")
+        tree = parse(source)
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "get_api_keys_for_tool"]
+        assert len(calls) == 1, "the one injection site"
+        injectors = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "get_external_api_key"
+                     and any(isinstance(a, ast.Name) and a.id in ("function_name", "tool_name") for a in n.args)]
+        assert injectors == [], "no direct per-tool key fetch bypasses the filtered function"
+
+    def test_the_scan_catches_a_planted_unfiltered_site(self):
+        planted_source = "def inject(db, name):\n    return decrypt_value(db.query(K).first().api_key_encrypted)\n"
+        tree = parse(planted_source)
+        assert "NON_INJECTABLE_KEY_SERVICES" not in self.names(tree.body[0])
 
 
 def test_no_admin_module_is_left_pending():

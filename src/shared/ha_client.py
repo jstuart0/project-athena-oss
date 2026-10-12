@@ -74,7 +74,7 @@ class HomeAssistantClient:
             "ha_call_service_request",
             domain=domain,
             service=service,
-            service_data=service_data,
+            data_keys=sorted((service_data or {}).keys()),
             path=path
         )
 
@@ -94,7 +94,8 @@ class HomeAssistantClient:
                 "ha_call_service_error",
                 domain=domain,
                 service=service,
-                error=str(e)
+                error_class=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
             )
             raise
 
@@ -129,7 +130,7 @@ class HomeAssistantClient:
             slog.debug(
                 "ha_create_automation_request",
                 automation_id=automation_id,
-                config=config_with_id
+                config_keys=sorted(config_with_id.keys()),
             )
 
             response = await self._channel.request("POST", path, json=config_with_id)
@@ -151,7 +152,8 @@ class HomeAssistantClient:
             slog.error(
                 "ha_create_automation_exception",
                 automation_id=automation_id,
-                error=str(e)
+                error_class=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
             )
             return False
 

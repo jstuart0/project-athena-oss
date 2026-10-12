@@ -28,6 +28,20 @@ write access is inside the trust boundary: ``budget:v2`` and ``seen`` are not
 signed. Without Redis (or a service key to sign with) the same rules run on
 in-process state, ``MemoryRedis``, which is also what the tests' fakes extend.
 
+"At most 3" counts automatic traffic only. It excludes the documented
+exceptions, in particular (b): sends already admitted when Home Assistant revokes
+a proven token all fail (up to ``INFLIGHT_CAP`` per process, 1 when the proof is
+older than ``CANARY_AFTER``), and each operator save, a Redis outage and a roll
+across versions have their own bounds (docs/CONFIGURATION.md, "How Athena avoids
+getting banned").
+
+Reservations are per holder: a reservation is a field ``res:<holder>`` in the
+budget hash with an expiry (``RESERVATION_TTL``), so a holder that died or timed
+out after reserving stops counting in ``r`` by itself, and a save drops them at
+once. The budget's scripts touch keys that must share a hash slot: use a
+single-node Redis (or one hash tag); on a Redis Cluster they fail and the gate
+fails closed.
+
 Nothing here logs a URL, a host or a token.
 """
 from __future__ import annotations
@@ -65,6 +79,7 @@ PROVEN_TTL = 600
 CANARY_AFTER = 10.0
 INFLIGHT_CAP = 18
 PROBE_SCHEDULE_SECONDS = (120, 21600)
+RESERVATION_TTL = 120.0
 ADMIN_ONLY_TTL = 86400
 SEEN_TTL = 2_592_000
 LATCH_TTL = 86400
@@ -138,11 +153,37 @@ local function num(v)
   if x == nil or x < 0 then return 0 end
   return math.floor(x)
 end
+-- A reservation is a field 'res:<holder>' in the budget hash holding its expiry
+-- (ms). 'r' is the number of live ones; an expired one (a process died or timed
+-- out after reserving) stops counting, so r can't stay stuck.
+local function sweep(budget_key, now)
+  local all = redis.call('HGETALL', budget_key)
+  local live = 0
+  for i = 1, #all, 2 do
+    if string.sub(all[i], 1, 4) == 'res:' then
+      if num(all[i + 1]) <= now then redis.call('HDEL', budget_key, all[i]) else live = live + 1 end
+    end
+  end
+  redis.call('HSET', budget_key, 'r', live)
+  return live
+end
+local function clear_reservations(budget_key)
+  local gone = 0
+  local fields = redis.call('HKEYS', budget_key)
+  for i = 1, #fields do
+    if string.sub(fields[i], 1, 4) == 'res:' then
+      redis.call('HDEL', budget_key, fields[i])
+      gone = gone + 1
+    end
+  end
+  redis.call('HSET', budget_key, 'r', 0)
+  return gone
+end
 """
 
 RESERVE_PROOF = _LUA_HELPERS + """
 -- KEYS: budget, gate, latch, proven.
--- ARGV: holder, lease_ms, budget, now_iso, latch_as_read, proven_as_read.
+-- ARGV: holder, lease_ms, budget, now_iso, latch_as_read, proven_as_read, now_ms, reservation_ttl_ms.
 -- Returns {1, epoch} reserved, {0, 0} lease held, {2, epoch} budget spent, {3, 0}
 -- the latch or the proof changed since the caller read them (read again).
 local latch = redis.call('GET', KEYS[3])
@@ -155,6 +196,7 @@ end
 if not redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then
   return {0, 0}
 end
+local live = sweep(KEYS[1], tonumber(ARGV[7]))
 local n = num(redis.call('HGET', KEYS[1], 'n'))
 local epoch = num(redis.call('HGET', KEYS[1], 'epoch'))
 local budget = tonumber(ARGV[3])
@@ -163,7 +205,8 @@ if n >= budget then
   return {2, epoch}
 end
 redis.call('HSET', KEYS[1], 'n', n + 1)
-redis.call('HSET', KEYS[1], 'r', num(redis.call('HGET', KEYS[1], 'r')) + 1)
+redis.call('HSET', KEYS[1], 'res:' .. ARGV[1], tonumber(ARGV[7]) + tonumber(ARGV[8]))
+redis.call('HSET', KEYS[1], 'r', live + 1)
 if n + 1 >= budget and redis.call('HEXISTS', KEYS[1], 'spent_at') == 0 then
   redis.call('HSET', KEYS[1], 'spent_at', ARGV[4])
 end
@@ -171,9 +214,9 @@ return {1, epoch}
 """
 
 RESERVE_REQUEST = _LUA_HELPERS + """
--- KEYS: budget. ARGV: allowance.
+-- KEYS: budget. ARGV: allowance, holder, now_ms, reservation_ttl_ms.
+local r = sweep(KEYS[1], tonumber(ARGV[3]))
 local n = num(redis.call('HGET', KEYS[1], 'n'))
-local r = num(redis.call('HGET', KEYS[1], 'r'))
 local epoch = num(redis.call('HGET', KEYS[1], 'epoch'))
 local allowance = tonumber(ARGV[1])
 if n >= allowance then
@@ -181,6 +224,7 @@ if n >= allowance then
   return {0, epoch}
 end
 redis.call('HSET', KEYS[1], 'n', n + 1)
+redis.call('HSET', KEYS[1], 'res:' .. ARGV[2], tonumber(ARGV[3]) + tonumber(ARGV[4]))
 redis.call('HSET', KEYS[1], 'r', r + 1)
 return {1, epoch}
 """
@@ -189,7 +233,8 @@ SETTLE = _LUA_HELPERS + """
 -- KEYS: budget, proven, seen, admin_only, latch, gate, callers, legacy.
 -- ARGV: op, epoch, reserved, holder, caller, now_iso, route, request_key,
 --       admitted_gen, new_proven, proven_ttl, seen_ttl, admin_only_ttl,
---       latch_value, latch_ttl, legacy_ttl, count_cap, budget, add_seen.
+--       latch_value, latch_ttl, legacy_ttl, count_cap, budget, add_seen,
+--       reservation, now_ms.
 local op = ARGV[1]
 local budget = tonumber(ARGV[18])
 local same = (num(redis.call('HGET', KEYS[1], 'epoch')) == tonumber(ARGV[2]))
@@ -200,18 +245,17 @@ local function drop_spent()
     redis.call('HDEL', KEYS[1], 'spent_at')
   end
 end
+local function dec_r()
+  if ARGV[20] ~= '' then redis.call('HDEL', KEYS[1], 'res:' .. ARGV[20]) end
+  sweep(KEYS[1], tonumber(ARGV[21]))
+end
 local function refund()
   if reserved and same then
     local n = num(redis.call('HGET', KEYS[1], 'n'))
-    local r = num(redis.call('HGET', KEYS[1], 'r'))
     if n > 0 then redis.call('HSET', KEYS[1], 'n', n - 1) end
-    if r > 0 then redis.call('HSET', KEYS[1], 'r', r - 1) end
+    dec_r()
     drop_spent()
   end
-end
-local function dec_r()
-  local r = num(redis.call('HGET', KEYS[1], 'r'))
-  if r > 0 then redis.call('HSET', KEYS[1], 'r', r - 1) end
 end
 local function keep()
   if reserved and same then dec_r() end
@@ -295,7 +339,7 @@ return 1
 CLEAR_ON_AUTH_OK = _LUA_HELPERS + """
 -- KEYS: budget, callers, proven, latch, gate, legacy. ARGV: new_proven, proven_ttl.
 redis.call('HSET', KEYS[1], 'n', 0)
-redis.call('HSET', KEYS[1], 'r', 0)
+clear_reservations(KEYS[1])
 redis.call('HINCRBY', KEYS[1], 'epoch', 1)
 redis.call('HDEL', KEYS[1], 'spent_at')
 redis.call('DEL', KEYS[2], KEYS[4], KEYS[5], KEYS[6])
@@ -304,10 +348,16 @@ return num(redis.call('HGET', KEYS[1], 'epoch'))
 """
 
 REOPEN = _LUA_HELPERS + """
--- KEYS: budget. ARGV: budget.
+-- KEYS: budget, gate. ARGV: budget, now_ms.
+-- A save deletes the gate lease. With no lease held, no proof is running for this
+-- digest, so reservations still on the books are leaked (a pod died, a call timed
+-- out): drop them and bump the epoch so a late settle counts as unreserved.
 local budget = tonumber(ARGV[1])
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  if clear_reservations(KEYS[1]) > 0 then redis.call('HINCRBY', KEYS[1], 'epoch', 1) end
+end
+local r = sweep(KEYS[1], tonumber(ARGV[2]))
 local n = num(redis.call('HGET', KEYS[1], 'n'))
-local r = num(redis.call('HGET', KEYS[1], 'r'))
 local lowered = n
 if lowered > budget - 1 then lowered = budget - 1 end
 if lowered < r then lowered = r end
@@ -575,19 +625,43 @@ class _MemoryPipeline:
         return out
 
 
+def _mirror_sweep(store: MemoryRedis, budget_key, now) -> int:
+    """Drop expired ``res:<holder>`` reservations; ``r`` becomes the live count."""
+    table = store._hash(budget_key, create=True)
+    live = 0
+    for name in [f for f in table if str(f).startswith("res:")]:
+        if _num(table[name]) <= int(now):
+            del table[name]
+        else:
+            live += 1
+    store._budget_set(budget_key, "r", live)
+    return live
+
+
+def _mirror_clear_reservations(store: MemoryRedis, budget_key) -> int:
+    table = store._hash(budget_key, create=True)
+    gone = [f for f in table if str(f).startswith("res:")]
+    for name in gone:
+        del table[name]
+    store._budget_set(budget_key, "r", 0)
+    return len(gone)
+
+
 def _mirror_reserve_proof(store: MemoryRedis, keys, args):
     budget_key, gate, latch_key, proven_key = keys
-    holder, lease_ms, budget, now_iso, latch_as_read, proven_as_read = args
+    holder, lease_ms, budget, now_iso, latch_as_read, proven_as_read, now_ms, ttl_ms = args
     if (store._raw_get(latch_key) or "") != latch_as_read or (store._raw_get(proven_key) or "") != proven_as_read:
         return [3, 0]
     if not store._set(gate, holder, nx=True, px=lease_ms):
         return [0, 0]
+    live = _mirror_sweep(store, budget_key, now_ms)
     n, epoch = store._count(budget_key, "n"), store._count(budget_key, "epoch")
     if n >= int(budget):
         store._delete(gate)
         return [2, epoch]
     store._budget_set(budget_key, "n", n + 1)
-    store._budget_set(budget_key, "r", store._count(budget_key, "r") + 1)
+    store._budget_set(budget_key, f"res:{holder}", int(now_ms) + int(ttl_ms))
+    store._budget_set(budget_key, "r", live + 1)
     table = store._hash(budget_key)
     if n + 1 >= int(budget) and "spent_at" not in table:
         store._hset(budget_key, "spent_at", now_iso)
@@ -595,11 +669,13 @@ def _mirror_reserve_proof(store: MemoryRedis, keys, args):
 
 
 def _mirror_reserve_request(store: MemoryRedis, keys, args):
-    (budget_key,), allowance = keys, int(args[0])
-    n, r, epoch = (store._count(budget_key, name) for name in ("n", "r", "epoch"))
+    (budget_key,), allowance, holder, now_ms, ttl_ms = keys, int(args[0]), args[1], int(args[2]), int(args[3])
+    r = _mirror_sweep(store, budget_key, now_ms)
+    n, epoch = store._count(budget_key, "n"), store._count(budget_key, "epoch")
     if n >= allowance:
         return [2, epoch] if n - r >= allowance else [0, epoch]
     store._budget_set(budget_key, "n", n + 1)
+    store._budget_set(budget_key, f"res:{holder}", now_ms + ttl_ms)
     store._budget_set(budget_key, "r", r + 1)
     return [1, epoch]
 
@@ -607,7 +683,8 @@ def _mirror_reserve_request(store: MemoryRedis, keys, args):
 def _mirror_settle(store: MemoryRedis, keys, args):
     budget_k, proven_k, seen_k, admin_k, latch_k, gate_k, callers_k, legacy_k = keys
     (op, epoch, reserved_flag, holder, caller, now_iso, route, req_key, admitted_gen, new_proven,
-     proven_ttl, seen_ttl, admin_ttl, latch_value, latch_ttl, legacy_ttl, count_cap, budget, add_seen) = args
+     proven_ttl, seen_ttl, admin_ttl, latch_value, latch_ttl, legacy_ttl, count_cap, budget, add_seen,
+     reservation, now_ms) = args
     budget = int(budget)
     same = store._count(budget_k, "epoch") == int(epoch)
     reserved = reserved_flag == "1"
@@ -619,20 +696,24 @@ def _mirror_settle(store: MemoryRedis, keys, args):
         if count("n") < budget and store._hash(budget_k) is not None:
             store._hdel(budget_k, "spent_at")
 
+    def dec_r():
+        if reservation != "":
+            table = store._hash(budget_k)
+            if table is not None:
+                table.pop(f"res:{reservation}", None)
+        _mirror_sweep(store, budget_k, now_ms)
+
     def refund():
         if reserved and same:
-            n, r = count("n"), count("r")
+            n = count("n")
             if n > 0:
                 store._budget_set(budget_k, "n", n - 1)
-            if r > 0:
-                store._budget_set(budget_k, "r", r - 1)
+            dec_r()
             drop_spent()
 
     def keep(is_reserved=None):
         if (reserved if is_reserved is None else is_reserved) and same:
-            r = count("r")
-            if r > 0:
-                store._budget_set(budget_k, "r", r - 1)
+            dec_r()
 
     def fail(is_reserved=None):
         if (reserved if is_reserved is None else is_reserved) and same:
@@ -704,7 +785,7 @@ def _mirror_clear_on_auth_ok(store: MemoryRedis, keys, args):
     budget_k, callers_k, proven_k, latch_k, gate_k, legacy_k = keys
     new_proven, proven_ttl = args
     store._budget_set(budget_k, "n", 0)
-    store._budget_set(budget_k, "r", 0)
+    _mirror_clear_reservations(store, budget_k)
     store._hincrby(budget_k, "epoch", 1)
     store._hdel(budget_k, "spent_at")
     store._delete(callers_k, latch_k, gate_k, legacy_k)
@@ -713,8 +794,12 @@ def _mirror_clear_on_auth_ok(store: MemoryRedis, keys, args):
 
 
 def _mirror_reopen(store: MemoryRedis, keys, args):
-    (budget_k,), budget = keys, int(args[0])
-    n, r = store._count(budget_k, "n"), store._count(budget_k, "r")
+    (budget_k, gate_k), budget, now_ms = keys, int(args[0]), int(args[1])
+    if not store._exists(gate_k):
+        if _mirror_clear_reservations(store, budget_k) > 0:
+            store._hincrby(budget_k, "epoch", 1)
+    r = _mirror_sweep(store, budget_k, now_ms)
+    n = store._count(budget_k, "n")
     lowered = max(r, min(n, budget - 1))
     store._budget_set(budget_k, "n", lowered)
     if lowered < budget:
@@ -823,6 +908,7 @@ class Admission:
     latch_step: int = 0
     latch_at: int = 0
     holder: str = ""
+    reservation: str = ""
     route: str = ""
     canary: Optional[Tuple[str, Any]] = field(default=None, repr=False)
 
@@ -872,6 +958,11 @@ class HAAuthLatch:
         refresh_gap: float = REFRESH_MIN_GAP,
     ):
         self._shared = bool(service_api_key) and redis is not None
+        if not self._shared and os.environ.get("REDIS_URL"):
+            # The failed sign-in budget is then per process, not per cluster.
+            logger.warning(
+                "ha_auth_not_shared", has_redis=redis is not None, has_service_key=bool(service_api_key),
+            )
         self._redis = redis if self._shared else MemoryRedis()
         self._key = (service_api_key or uuid.uuid4().hex).encode()
         self._service_api_key = service_api_key or None
@@ -896,6 +987,10 @@ class HAAuthLatch:
             )
         }
         self._local_proof: Dict[str, Tuple[str, int]] = {}
+        # A real rejection whose settlement didn't reach Redis: the proof it ended
+        # may still be stored there, so nothing for this digest is admitted OPEN
+        # until the settlement has been retried.
+        self._unsettled: Dict[str, Tuple[Admission, str, str, str]] = {}
         self._local_seen: Set[Tuple[str, str]] = set()
         self._route_canaries: Set[Tuple[str, str]] = set()
         self._stale_canaries: Set[str] = set()
@@ -1050,6 +1145,13 @@ class HAAuthLatch:
 
     async def _decide(self, snapshot: Any, state: _State, route: str, key: str, proof_request: bool):
         digest = snapshot.digest
+        if digest in self._unsettled:
+            # Redis is back (the read just worked): finish deleting the proof and recording the
+            # rejection before any OPEN, then read again. A failure here is a GATED admission.
+            admission, caller, request_key, latch_value = self._unsettled[digest]
+            await self._settle(snapshot, "rejected", admission, caller=caller, request_key=request_key, latch_value=latch_value)
+            self._unsettled.pop(digest, None)
+            return _RESTART
         now = self._now_ms()
         latch = state.latch
         if latch is None and state.legacy:
@@ -1079,7 +1181,7 @@ class HAAuthLatch:
             return _RESTART
         if code == 1:
             return Admission(PROVE, epoch=epoch, reserved=True, proof_request=True, probe=True,
-                             latch_step=latch.step, latch_at=latch.at, holder=holder)
+                             latch_step=latch.step, latch_at=latch.at, holder=holder, reservation=holder)
         if code == 2:
             return Admission(WITHHELD, REASON_BUDGET, proof_request=proof_request)
         return Admission(WITHHELD, REASON_LATCHED, proof_request=proof_request)
@@ -1089,7 +1191,7 @@ class HAAuthLatch:
         if code == 3:
             return _RESTART
         if code == 1:
-            return Admission(PROVE, epoch=epoch, reserved=True, proof_request=True, holder=holder)
+            return Admission(PROVE, epoch=epoch, reserved=True, proof_request=True, holder=holder, reservation=holder)
         if code == 2:
             return Admission(WITHHELD, REASON_BUDGET, proof_request=proof_request)
         return _WAIT
@@ -1101,13 +1203,17 @@ class HAAuthLatch:
             return _WAIT
         self._route_canaries.add(marker)  # before the await: the next same-route request must see it
         try:
-            result = await self._call("reserve_request", [self._k("budget:v2")], [REQUEST_ALLOWANCE])
+            reservation = f"{self._instance}:{uuid.uuid4().hex[:8]}"
+            result = await self._call(
+                "reserve_request", [self._k("budget:v2")],
+                [REQUEST_ALLOWANCE, reservation, self._now_ms(), int(RESERVATION_TTL * 1000)],
+            )
             code, epoch = int(result[0]), int(result[1])
         except BaseException:
             self._route_canaries.discard(marker)
             raise
         if code == 1:
-            return Admission(CANARY, epoch=epoch, gen=state.proven.gen, reserved=True,
+            return Admission(CANARY, epoch=epoch, gen=state.proven.gen, reserved=True, reservation=reservation,
                              proof_request=proof_request, canary=("route", marker))
         self._route_canaries.discard(marker)
         if code == 2:
@@ -1120,7 +1226,8 @@ class HAAuthLatch:
         result = await self._call(
             "reserve_proof",
             [self._k("budget:v2"), self._k("gate:v1", digest), self._k("latch:v1", digest), self._k("proven:v2", digest)],
-            [holder, int(self._gate_lease * 1000), BUDGET, _iso(self._wall()), state.latch_raw or "", state.proven_raw or ""],
+            [holder, int(self._gate_lease * 1000), BUDGET, _iso(self._wall()), state.latch_raw or "", state.proven_raw or "",
+             self._now_ms(), int(RESERVATION_TTL * 1000)],
         )
         return int(result[0]), int(result[1]), holder
 
@@ -1243,8 +1350,10 @@ class HAAuthLatch:
             await self._settle_passed(snapshot, admission, caller, route, now)
         elif result == "auth_rejected":
             self._local_proof.pop(digest, None)
-            await self._settle(snapshot, "rejected", admission, caller=caller, request_key=key,
-                               latch_value=self._trip_value(digest, admission, now))
+            latch_value = self._trip_value(digest, admission, now)
+            self._unsettled[digest] = (admission, caller, key, latch_value)  # stays if the settlement fails
+            await self._settle(snapshot, "rejected", admission, caller=caller, request_key=key, latch_value=latch_value)
+            self._unsettled.pop(digest, None)
         elif result == "banned":
             await self._settle(snapshot, "banned", admission, caller=caller)
         elif result == "unreachable_sent":
@@ -1294,6 +1403,7 @@ class HAAuthLatch:
             op, admission.epoch, "1" if admission.reserved else "0", admission.holder, caller, _iso(self._wall()),
             route, request_key, admission.gen or "", new_proven, self._proven_ttl, SEEN_TTL, ADMIN_ONLY_TTL,
             latch_value, LATCH_TTL, LATCH_TTL, COUNT_CAP, BUDGET, "1" if add_seen else "0",
+            admission.reservation, self._now_ms(),
         ]
         await self._call("settle", keys, args)
 
@@ -1323,7 +1433,7 @@ class HAAuthLatch:
                 self._k("latch:v1", digest), self._k("proven:v2", digest), self._k("gate:v1", digest),
                 self._k("admin_only:v1", digest), self._k("seen:v1", digest), self._legacy_key(snapshot),
             ))
-            await self._call("reopen", [self._k("budget:v2")], [BUDGET])
+            await self._call("reopen", [self._k("budget:v2"), self._k("gate:v1", digest)], [BUDGET, self._now_ms()])
         except asyncio.CancelledError:
             raise
         except Exception as exc:

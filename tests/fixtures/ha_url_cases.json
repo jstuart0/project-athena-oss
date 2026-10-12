@@ -188,18 +188,53 @@
   },
   {
    "url": "http://2852039166/",
-   "env": null,
-   "admin": null
+   "env": "host_form",
+   "admin": "host_form"
   },
   {
    "url": "http://0xa9fea9fe/",
-   "env": null,
-   "admin": null
+   "env": "host_form",
+   "admin": "host_form"
   },
   {
    "url": "http://169.254.43518/",
-   "env": null,
-   "admin": null
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://ha.example.invalid./",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://10.20.30.10./",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://12345/",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://0X7f000001/",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://1.2.3/",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://ha.0x10.example.invalid/",
+   "env": "host_form",
+   "admin": "host_form"
+  },
+  {
+   "url": "http://ha.1.example.invalid/",
+   "env": "host_form",
+   "admin": "host_form"
   }
  ]
 }

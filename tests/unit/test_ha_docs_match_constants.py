@@ -41,3 +41,11 @@ def test_public_text_for_this_work_has_no_ticket_ids_or_planning_paths():
     assert not re.search(r"ATHENA-\d+", SECTION)
     for name in ("CHANGELOG.md", "docs/CONFIGURATION.md", ".env.example", "CLAUDE.md"):
         assert ".mozart" not in (ROOT / name).read_text(encoding="utf-8"), name
+
+
+def test_the_page_states_the_reservation_expiry_the_redis_requirement_and_the_single_row():
+    assert f"(2 minutes)" in SECTION and ha_auth.RESERVATION_TTL == 120.0
+    assert "single-node Redis" in SECTION and "fails closed" in SECTION
+    page = DOC[DOC.index("#### Where Athena finds its Home Assistant address and token"):]
+    assert "whatever its key type, is refused" in page and "never handed to a tool" in page
+    assert "`169.254.43518`" in page and "trailing dot" in page

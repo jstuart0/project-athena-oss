@@ -145,6 +145,11 @@ async def create_external_api_key(
 
     _check_ha_address(key_data.service_name, key_data.endpoint_url)
 
+    # The Home Assistant key is a single row, whatever its key_type: a second one would
+    # leave the resolver reading whichever the database returns first.
+    if key_data.service_name == HA_KEY_SERVICE and db.query(ExternalAPIKey).filter_by(service_name=HA_KEY_SERVICE).first():
+        raise HTTPException(status_code=409, detail="The Home Assistant key already exists. Edit it instead of adding another.")
+
     # Check for existing key with same service_name and key_type
     existing_query = db.query(ExternalAPIKey).filter_by(service_name=key_data.service_name)
     if key_data.key_type:

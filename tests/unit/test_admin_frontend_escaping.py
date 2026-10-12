@@ -1622,6 +1622,18 @@ def test_a_stale_enabled_row_is_grey_labelled_no_recent_check_and_not_an_error_c
     assert "Health checks haven&#39;t run" not in out["errors"] and "Health checks haven't run since" in out["errors"]
 
 
+def test_the_stale_banner_is_measured_against_the_servers_clock_not_the_browsers():
+    """The rows were last checked at 09:14 and the server's own clock reads 12:00 that
+    day. Today (the browser's clock) is much later: only the server's clock gives
+    the same-day time."""
+    registry = _registry(_service(health_status="stale", monitoring="stale", last_health_check="2026-10-11T09:14:00+00:00"), overall="unknown")
+    registry["checked_at"] = "2026-10-11T12:00:00+00:00"
+    out = _load_status(registry, _ha_payload())
+    assert "Health checks haven't run since 09:14. The statuses below may be out of date." in out["errors"]
+    source = APP_JS.read_text()
+    assert "pollerBanner(data, checkedMs)" in source and "pollerBanner(data)" not in source
+
+
 def test_a_switched_off_row_reads_not_monitored_with_its_old_error_dated_and_grey():
     off = _service("ha-api", enabled=False, health_status="disabled", monitoring="off", last_error="timeout:old failure",
                    last_health_check="2026-09-27T08:00:00+00:00", last_observed_health=None)

@@ -83,9 +83,9 @@ def test_every_script_replies_in_types_the_decoder_reads(redis_url, decode):
         latch = make_stack(redis=client, clock=Clock()).latch
         snap = make_stack().creds
         keys = [scenarios.BUDGET_KEY, scenarios.key("gate:v1", snap), scenarios.key("latch:v1", snap), scenarios.key("proven:v2", snap)]
-        proof = await latch._call("reserve_proof", keys, ["holder", 1000, ha_auth.BUDGET, "2026-10-12T00:00:00+00:00", "", ""])
-        request = await latch._call("reserve_request", [scenarios.BUDGET_KEY], [ha_auth.REQUEST_ALLOWANCE])
-        reopen = await latch._call("reopen", [scenarios.BUDGET_KEY], [ha_auth.BUDGET])
+        proof = await latch._call("reserve_proof", keys, ["holder", 1000, ha_auth.BUDGET, "2026-10-12T00:00:00+00:00", "", "", 1000, 60000])
+        request = await latch._call("reserve_request", [scenarios.BUDGET_KEY], [ha_auth.REQUEST_ALLOWANCE, "rq", 1000, 60000])
+        reopen = await latch._call("reopen", [scenarios.BUDGET_KEY, scenarios.key("gate:v1", snap)], [ha_auth.BUDGET, 1000])
         epoch = await latch._call("clear_on_auth_ok", [
             scenarios.BUDGET_KEY, scenarios.CALLERS_KEY, scenarios.key("proven:v2", snap),
             scenarios.key("latch:v1", snap), scenarios.key("gate:v1", snap), latch._legacy_key(snap),

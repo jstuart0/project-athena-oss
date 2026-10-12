@@ -197,6 +197,7 @@ def test_a_new_route_sends_one_reserved_canary_and_a_full_allowance_fails_closed
         kinds = Counter(a.kind for a in same)
         reserved = next(a for a in same if a.kind == ha_auth.CANARY)
         assert reserved.reserved is True
+        await env.redis.delete(scenarios.BUDGET_KEY)  # forget the canary's own reservation
         await env.set_budget(n=2, r=0)  # two real failures: the allowance is full
         unseen = dict(method="POST", path="/api/services/cover/open", key="POST /api/services/cover/open cover.a")
         blocked = await latch.admit(snap, **unseen)
@@ -533,3 +534,120 @@ def test_the_instance_id_is_sanitized_and_only_names_leases():
         assert ha_auth.instance_id() == "pod_name_with_spaces"
     finally:
         os.environ.pop("HOSTNAME", None)
+
+
+# -- a rejection whose settlement didn't reach Redis ------------------------------------------------
+
+
+def _flaky_world():
+    clock = Clock()
+    flaky = FlakyRedis(ha_auth.MemoryRedis(clock=clock))
+    return flaky, make_latch(flaky, clock=clock, gate_wait=0.2), clock
+
+
+def test_a_failed_settlement_of_a_real_rejection_never_lets_the_stale_proof_admit_open():
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        snap = credentials()
+        await scenarios.prove_ok(latch, snap)
+        proven_key = scenarios.key("proven:v2", snap)
+        sent = await latch.admit(snap, **READ)
+        assert sent.kind == ha_auth.OPEN
+        flaky.down = True
+        await scenarios.settle(latch, snap, sent, "auth_rejected")  # Home Assistant said 401; Redis blipped
+        flaky.down = False
+        assert await flaky.exists(proven_key), "the stale proof is still stored"
+        same_route = await latch.admit(snap, **READ)
+        other_route = await latch.admit(snap, **WRITE)
+        return same_route, other_route, await flaky.exists(proven_key)
+
+    same_route, other_route, proof_left = run(scenario())
+    assert (same_route.kind, same_route.reason) == (ha_auth.WITHHELD, ha_auth.REASON_LATCHED), "the rejection was recorded on the retry"
+    assert (other_route.kind, other_route.reason) == (ha_auth.WITHHELD, ha_auth.REASON_LATCHED), "and it stops every route, not just that one"
+    assert not proof_left, "the stale proof was deleted"
+
+
+def test_a_failed_settlement_of_a_rejected_proof_still_latches_when_redis_returns():
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        snap = credentials()
+        admission = await latch.admit(snap, **READ)
+        assert admission.kind == ha_auth.PROVE
+        flaky.down = True
+        await scenarios.settle(latch, snap, admission, "auth_rejected")
+        flaky.down = False
+        return await latch.admit(snap, **READ), await flaky.exists(scenarios.key("latch:v1", snap))
+
+    after, latched = run(scenario())
+    assert after.kind == ha_auth.WITHHELD and after.reason == ha_auth.REASON_LATCHED and latched
+
+
+def test_while_redis_is_still_down_nothing_is_admitted_after_the_unsettled_rejection():
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        snap = credentials()
+        await scenarios.prove_ok(latch, snap)
+        sent = await latch.admit(snap, **READ)
+        flaky.down = True
+        await scenarios.settle(latch, snap, sent, "auth_rejected")
+        return await latch.admit(snap, **READ), await latch.admit(snap, **WRITE)
+
+    first, second = run(scenario())
+    assert first.kind == ha_auth.GATED and second.kind == ha_auth.GATED
+
+
+def test_a_retry_that_fails_again_keeps_the_gate_closed_until_it_succeeds():
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        snap = credentials()
+        await scenarios.prove_ok(latch, snap)
+        sent = await latch.admit(snap, **READ)
+        flaky.down = True
+        await scenarios.settle(latch, snap, sent, "auth_rejected")
+        flaky.down = False
+        calls = {"n": 0}
+        real_settle = latch._settle
+
+        async def failing_once(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("blip")
+            return await real_settle(*args, **kwargs)
+
+        latch._settle = failing_once
+        first = await latch.admit(snap, **READ)
+        second = await latch.admit(snap, **READ)
+        return first, second, calls["n"]
+
+    first, second, calls = run(scenario())
+    assert first.kind == ha_auth.GATED
+    assert second.kind == ha_auth.WITHHELD and calls == 2
+
+
+# -- a latch that isn't shared ----------------------------------------------------------------------------
+
+
+def test_a_latch_without_redis_warns_once_when_redis_is_configured(monkeypatch):
+    import structlog
+
+    monkeypatch.setenv("REDIS_URL", "redis://redis.example.invalid:6379/0")
+    with structlog.testing.capture_logs() as logs:
+        ha_auth.HAAuthLatch(None, instance="pod", service_api_key="service-key-for-tests")
+        ha_auth.HAAuthLatch(ha_auth.MemoryRedis(), instance="pod", service_api_key=None)
+    warnings = [entry for entry in logs if entry["event"] == "ha_auth_not_shared"]
+    assert len(warnings) == 2 and all(entry["log_level"] == "warning" for entry in warnings)
+    assert {(w["has_redis"], w["has_service_key"]) for w in warnings} == {(False, True), (True, False)}
+    assert "redis.example.invalid" not in str(logs)
+
+
+def test_no_warning_when_redis_is_not_configured_or_the_latch_is_shared(monkeypatch):
+    import structlog
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    with structlog.testing.capture_logs() as logs:
+        ha_auth.HAAuthLatch(None, instance="pod", service_api_key=None)
+    assert not [entry for entry in logs if entry["event"] == "ha_auth_not_shared"]
+    monkeypatch.setenv("REDIS_URL", "redis://redis.example.invalid:6379/0")
+    with structlog.testing.capture_logs() as logs:
+        ha_auth.HAAuthLatch(ha_auth.MemoryRedis(), instance="pod", service_api_key="service-key-for-tests")
+    assert not [entry for entry in logs if entry["event"] == "ha_auth_not_shared"]

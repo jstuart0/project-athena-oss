@@ -130,3 +130,39 @@ def test_a_registry_session_failure_text_is_fixed(caplog):
     with structlog.testing.capture_logs() as logs, caplog.at_level(logging.DEBUG):
         summary = run(scenario())
     assert_clean(json.dumps(summary) + json.dumps(logs, default=str) + app_log_text(caplog), "the registry failure")
+
+
+MARKER = "private-message-body-4417"
+
+
+def test_call_service_and_create_automation_log_no_payload_and_no_exception_text(caplog):
+    """The client's logs carry key names, the error class and a status code, never
+    the service data, an automation's config, or an exception message (which
+    names the address)."""
+    from shared.ha_client import HomeAssistantClient
+
+    async def scenario(valid):
+        stack = make_stack(fake=FakeHA(valid=valid, threshold=None), gate_wait=0.1)
+        client = HomeAssistantClient(stack.channel)
+        outcomes = []
+        try:
+            outcomes.append(await client.call_service("notify", "mobile_app", {"message": MARKER, "title": MARKER}))
+        except Exception as exc:
+            outcomes.append(type(exc).__name__)
+        outcomes.append(await client.create_automation("auto_1", {"alias": MARKER, "trigger": [], "action": [{"message": MARKER}]}))
+        await stack.channel.aclose()
+        return outcomes
+
+    with structlog.testing.capture_logs() as logs, caplog.at_level(logging.DEBUG):
+        run(scenario((TOKEN,)))
+        run(scenario(()))
+    text = json.dumps(logs, default=str) + app_log_text(caplog)
+    assert logs, "the calls must have logged"
+    for secret in (MARKER, TOKEN, HOST):
+        assert secret not in text, f"{secret!r} leaked in a log record"
+    events = {entry["event"] for entry in logs}
+    assert {"ha_call_service_request", "ha_call_service_error"} <= events
+    request = next(entry for entry in logs if entry["event"] == "ha_call_service_request")
+    assert request["data_keys"] == ["message", "title"]
+    error = next(entry for entry in logs if entry["event"] == "ha_call_service_error")
+    assert error["error_class"] and "error" not in error

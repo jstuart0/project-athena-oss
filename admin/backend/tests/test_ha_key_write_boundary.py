@@ -192,3 +192,19 @@ def test_saving_the_key_again_clears_a_latched_token_end_to_end(owner_client, db
 def test_a_viewer_cannot_save_the_key(viewer_client, db, saved):
     assert viewer_client.post(KEYS, json=body(ORIGIN_A)).status_code == 403
     assert db.query(ExternalAPIKey).count() == 0 and saved == []
+
+
+@pytest.mark.parametrize("key_type", [None, "api_key", "oauth", "combined"])
+def test_the_home_assistant_key_is_a_single_row_whatever_the_key_type(owner_client, db, test_user, saved, key_type):
+    seed(db, test_user)
+    response = owner_client.post(KEYS, json=body(ORIGIN_A, **({"key_type": key_type} if key_type else {})))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "The Home Assistant key already exists. Edit it instead of adding another."
+    assert db.query(ExternalAPIKey).filter_by(service_name="home-assistant").count() == 1
+    assert saved == [], "a refused create does not touch the sign-in stop"
+
+
+def test_another_service_may_still_have_several_rows_by_key_type(owner_client, db, saved):
+    first = owner_client.post(KEYS, json=body("https://api.example.invalid", service="api-football", key_type="api_key"))
+    second = owner_client.post(KEYS, json=body("https://api.example.invalid", service="api-football", key_type="oauth"))
+    assert (first.status_code, second.status_code) == (201, 201)

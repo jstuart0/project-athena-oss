@@ -64,6 +64,21 @@ def validate_path(path: Any) -> str:
     return path
 
 
+def _origin_of(url: httpx.URL) -> str:
+    """scheme://host:port in the form ``HACredentials.origin`` uses."""
+    host = f"[{url.host}]" if ":" in url.host else url.host
+    port = url.port or (443 if url.scheme == "https" else 80)
+    return f"{url.scheme}://{host}:{port}"
+
+
+def _bearer(snapshot: HACredentials, request: httpx.Request) -> str:
+    """The Authorization value, only for a request addressed to the snapshot's own
+    origin: the token is never sent anywhere else, whoever built the request."""
+    if _origin_of(request.url) != snapshot.origin:
+        raise RuntimeError("request is not addressed to the Home Assistant these credentials belong to")
+    return f"Bearer {snapshot.token.reveal()}"
+
+
 def _synthetic(request: httpx.Request, status: int, reason: str) -> httpx.Response:
     return httpx.Response(status, request=request, extensions={WITHHELD_EXTENSION: reason})
 
@@ -121,7 +136,7 @@ class HATransport(httpx.AsyncBaseTransport):
         if snapshot is None:
             raise RuntimeError("unknown Home Assistant credentials")
         if request.extensions.get(PROOF_EXTENSION):
-            request.headers["Authorization"] = f"Bearer {snapshot.token.reveal()}"
+            request.headers["Authorization"] = _bearer(snapshot, request)
             return await self._inner_send(request)
         method, path = request.method.upper(), request.url.path
         key = ha_auth.request_key(method, path, self._json_body(request))
@@ -131,9 +146,16 @@ class HATransport(httpx.AsyncBaseTransport):
                 return admission
             result = "other"
             try:
-                request.headers["Authorization"] = f"Bearer {snapshot.token.reveal()}"
+                request.headers["Authorization"] = _bearer(snapshot, request)
                 self._sent_since_withheld = True
-                response = await self._inner_send(request)
+                # From here the request may have reached Home Assistant and been counted:
+                # an error that isn't a failure to connect keeps a reservation spent.
+                result = "unreachable_sent"
+                try:
+                    response = await self._inner_send(request)
+                except (httpx.ConnectError, httpx.ConnectTimeout, asyncio.CancelledError):
+                    result = "other"  # it never got there, or the caller gave up: the reservation is given back
+                    raise
                 result = self._result_for(request, response.status_code)
                 return response
             finally:
