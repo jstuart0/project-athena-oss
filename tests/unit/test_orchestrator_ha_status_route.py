@@ -74,6 +74,9 @@ class FakeRedis:
     async def hgetall(self, key):
         return dict(self.h.get(key, {}))
 
+    async def hscan(self, key, cursor=0, match=None, count=None):
+        return 0, dict(self.h.get(key, {}))
+
     async def hdel(self, key, *fields):
         pass
 

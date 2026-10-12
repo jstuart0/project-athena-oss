@@ -75,6 +75,17 @@ class FakeRedis:
         self._check("hgetall")
         return dict(self.hashes.get(key, {}))
 
+    page = 10
+
+    async def hscan(self, key, cursor=0, match=None, count=None):
+        """Paginated like Redis: `page` fields per call, cursor 0 at the end."""
+        self._check("hscan")
+        fields = list(self.hashes.get(key, {}).items())
+        cursor = int(cursor)
+        chunk = fields[cursor:cursor + self.page]
+        nxt = cursor + self.page
+        return (nxt if nxt < len(fields) else 0), dict(chunk)
+
     async def hdel(self, key, *fields):
         self._check("hdel")
         for field in fields:
@@ -891,3 +902,132 @@ def test_lifespan_builds_the_publisher_from_the_raw_ha_client():
     ]
     assert len(calls) == 1
     assert any(isinstance(a, ast.Name) and a.id == "ha_client_raw" for a in calls[0].args)
+
+
+# ---------------------------------------------------------------------------
+# A hash anyone with Redis write access can fill must not break the merge
+# ---------------------------------------------------------------------------
+
+def _good_entry(clock, *, outcome="ok", offset=-5):
+    at = (clock.now + timedelta(seconds=offset)).isoformat()
+    return {
+        "configured": True,
+        "rest": {"last_outcome": outcome, "last_outcome_at": at, "last_success_at": at, "consecutive_failures": 0},
+        "registry": {"state": "ok", "areas": 4, "last_success_at": at, "last_failure_at": None, "last_failure_class": None},
+        "published_at": clock.now.isoformat(),
+    }
+
+
+def _with(entry, **changes):
+    out = json.loads(json.dumps(entry))
+    for dotted, value in changes.items():
+        node = out
+        *path, last = dotted.split("__")
+        for part in path:
+            node = node[part]
+        node[last] = value
+    return out
+
+
+def _hostile_values(clock):
+    good = _good_entry(clock)
+    return {
+        "list-outcome": json.dumps(_with(good, rest__last_outcome=["ok"])),
+        "dict-outcome": json.dumps(_with(good, rest__last_outcome={"a": 1})),
+        "dict-state": json.dumps(_with(good, registry__state={"a": 1})),
+        "list-state": json.dumps(_with(good, registry__state=[1])),
+        "list-class": json.dumps(_with(good, registry__last_failure_class=["auth"])),
+        "dict-class": json.dumps(_with(good, registry__last_failure_class={})),
+        "year-one": json.dumps(_with(good, published_at="0001-01-01T00:00:00+05:00")),
+        "year-one-event": json.dumps(_with(good, rest__last_outcome_at="0001-01-01T00:00:00+05:00")),
+        "year-max": json.dumps(_with(good, published_at="9999-12-31T23:59:59-05:00")),
+        "deep": "[" * 2000 + "]" * 2000,
+        "number": "42",
+        "null": "null",
+        "garbage": "{not json",
+        "non-utf8-ish": "\ud800",
+    }
+
+
+def test_hostile_entries_leave_the_other_replicas_merge_intact_and_are_pruned():
+    redis, clock = FakeRedis(), Clock()
+    redis.hashes[ha_link.REDIS_KEY] = {"pod-good": json.dumps(_good_entry(clock, outcome="auth_rejected"))}
+    redis.hashes[ha_link.REDIS_KEY].update({f"bad-{k}": v for k, v in _hostile_values(clock).items()})
+    monitor, _ = monitor_at(clock)
+    pub = publisher(monitor, redis, "pod-a", clock=clock)
+    run(pub.publish_once())
+    view = pub.view()
+    assert view["coverage"] == "cluster"
+    assert view["replicas_reporting"] == 2  # this replica and the good peer; no hostile entry counted
+    assert view["rest"]["last_outcome"] == "auth_rejected"
+    left = set(redis.hashes[ha_link.REDIS_KEY])
+    assert left == {"pod-good", "pod-a"}, f"hostile fields not pruned: {sorted(left)}"
+
+
+def test_merge_never_raises_on_hostile_python_values():
+    clock = Clock()
+    good = _good_entry(clock)
+    hostile = [
+        _with(good, rest__last_outcome=["ok"]), _with(good, rest__last_outcome={"a": 1}),
+        _with(good, registry__state=[]), _with(good, registry__state={}),
+        _with(good, registry__last_failure_class=[]), _with(good, registry__last_failure_class={}),
+        _with(good, published_at="0001-01-01T00:00:00+05:00"),
+        _with(good, rest__last_success_at="0001-01-01T00:00:00+05:00"),
+        _with(good, configured=[]), _with(good, rest=[]), 7, None, "x", [],
+    ]
+    entries = {f"h{i}": value for i, value in enumerate(hostile)}
+    entries["good"] = good
+    view = ha_link.merge(entries, clock.now, {})
+    assert view is not None and view["replicas_reporting"] == 1
+
+
+@pytest.mark.parametrize("value", ["0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00", "x", "", None, 5, [], {}])
+def test_parse_time_returns_none_instead_of_raising(value):
+    assert ha_link._parse_time(value) in (None, ha_link._parse_time(value))
+    ha_link._parse_time(value)  # must not raise
+
+
+def test_a_year_one_time_is_none_and_link_state_survives_it():
+    assert ha_link._parse_time("0001-01-01T00:00:00+05:00") is None
+    view = {"configured": True,
+            "rest": {"last_outcome": "ok", "last_outcome_at": "0001-01-01T00:00:00+05:00",
+                     "last_success_at": "0001-01-01T00:00:00+05:00", "consecutive_failures": 0},
+            "registry": ha_link.disabled_registry_summary()}
+    assert ha_link.link_state(view) == ("unknown", "waiting")
+
+
+def test_at_most_sixty_four_fields_are_read_and_this_replica_is_always_counted():
+    redis, clock = FakeRedis(), Clock()
+    for i in range(200):
+        redis.hashes.setdefault(ha_link.REDIS_KEY, {})[f"peer-{i:03d}"] = json.dumps(_good_entry(clock))
+    monitor, _ = monitor_at(clock)
+    pub = publisher(monitor, redis, "pod-zzz", clock=clock)
+    run(pub.publish_once())
+    view = pub.view()
+    assert view["coverage"] == "cluster"
+    assert view["replicas_reporting"] <= ha_link.MAX_FIELDS + 1
+    assert view["replicas_reporting"] >= ha_link.MAX_FIELDS  # the cap was reached, not exceeded by much
+    assert "hgetall" not in redis.calls
+    assert redis.calls.count("hscan") >= 6  # paged, not one unbounded read
+
+
+def test_a_value_over_four_kib_is_skipped_before_it_is_parsed_and_pruned():
+    redis, clock = FakeRedis(), Clock()
+    big = _with(_good_entry(clock), rest__pad="x" * (ha_link.MAX_VALUE_BYTES + 10))
+    assert len(json.dumps(big)) > ha_link.MAX_VALUE_BYTES
+    redis.hashes[ha_link.REDIS_KEY] = {"pod-big": json.dumps(big), "pod-ok": json.dumps(_good_entry(clock))}
+    monitor, _ = monitor_at(clock)
+    pub = publisher(monitor, redis, "pod-a", clock=clock)
+    run(pub.publish_once())
+    assert pub.view()["replicas_reporting"] == 2
+    assert "pod-big" not in redis.hashes[ha_link.REDIS_KEY]
+    assert ha_link._decode_entry("x" * (ha_link.MAX_VALUE_BYTES + 1)) is None
+    assert ha_link._decode_entry(json.dumps(_good_entry(clock))) is not None
+
+
+def test_a_value_exactly_at_the_cap_is_still_parsed():
+    payload = json.dumps({"k": "x" * 10})
+    assert len(payload) < ha_link.MAX_VALUE_BYTES
+    padded = '{"k": "' + "x" * (ha_link.MAX_VALUE_BYTES - 9) + '"}'
+    assert len(padded) == ha_link.MAX_VALUE_BYTES
+    assert ha_link._decode_entry(padded) == {"k": "x" * (ha_link.MAX_VALUE_BYTES - 9)}

@@ -42,6 +42,8 @@ PRUNE_AFTER_SECONDS = 3600
 PUBLISH_INTERVAL_SECONDS = 15.0
 PUBLISH_MIN_GAP_SECONDS = 1.0
 PEER_WINDOW_SECONDS = 900.0
+MAX_FIELDS = 64
+MAX_VALUE_BYTES = 4096
 SKEW_TOLERANCE_SECONDS = 5.0
 STALE_MERGE_INTERVALS = 3
 FAILING_AFTER_CONSECUTIVE = 3
@@ -84,11 +86,12 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        # OverflowError: a year-0001 time with a positive offset has no UTC form.
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +293,7 @@ class _Entry:
         entry.configured = raw["configured"]
         entry.published_at = published
         outcome = rest.get("last_outcome")
-        if outcome is not None and outcome not in OUTCOMES:
+        if outcome is not None and not (isinstance(outcome, str) and outcome in OUTCOMES):
             return None
         entry.outcome = outcome
         failures = _nonneg_int(rest.get("consecutive_failures"))
@@ -313,7 +316,7 @@ class _Entry:
         entry.reg_success_at = times["reg_success_at"]
         entry.reg_failure_at = times["reg_failure_at"]
         state = registry.get("state")
-        if state not in REGISTRY_STATES:
+        if not (isinstance(state, str) and state in REGISTRY_STATES):
             return None
         entry.reg_state = state
         areas = registry.get("areas")
@@ -321,7 +324,7 @@ class _Entry:
             return None
         entry.areas = areas
         failure_class = registry.get("last_failure_class")
-        if failure_class is not None and failure_class not in FAILURE_CLASSES:
+        if failure_class is not None and not (isinstance(failure_class, str) and failure_class in FAILURE_CLASSES):
             return None
         entry.reg_failure_class = failure_class
         return entry
@@ -334,6 +337,15 @@ class _Entry:
             value = getattr(self, name)
             if value is not None and value > ceiling:
                 setattr(self, name, ceiling)
+
+
+def _parse_entry(raw: Any) -> Optional[_Entry]:
+    """A validated entry, or None for anything malformed. Whatever a peer (or
+    anything with write access to the hash) stored, this never raises."""
+    try:
+        return _Entry.parse(raw)
+    except Exception:
+        return None
 
 
 def _newest(entries: Iterable[_Entry], attribute: str) -> Optional[_Entry]:
@@ -371,15 +383,18 @@ def merge(
     """
     kept = []
     for replica, raw in entries.items():
-        entry = _Entry.parse(raw)
+        entry = _parse_entry(raw)
         if entry is None:
             continue
-        if entry.published_at - now > timedelta(seconds=skew):
+        try:
+            if entry.published_at - now > timedelta(seconds=skew):
+                continue
+            seen = first_seen.setdefault((replica, entry.published_at.isoformat()), now)
+            if (now - seen).total_seconds() > window:
+                continue
+            entry.clamp(seen, skew)
+        except Exception:
             continue
-        seen = first_seen.setdefault((replica, entry.published_at.isoformat()), now)
-        if (now - seen).total_seconds() > window:
-            continue
-        entry.clamp(seen, skew)
         kept.append(entry)
     if not kept:
         return None
@@ -485,6 +500,18 @@ def home_assistant_reachable(view: Mapping[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 # Publishing and the cached view
 # ---------------------------------------------------------------------------
+
+
+def _decode_entry(value: Any) -> Any:
+    """The JSON object a stored value holds, or None when it is too large,
+    not JSON, or nested too deeply to parse."""
+    value = _decode(value)
+    if not isinstance(value, str) or len(value.encode("utf-8", "ignore")) > MAX_VALUE_BYTES:
+        return None
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError, RecursionError):
+        return None
 
 
 def _decode(value: Any) -> Any:
@@ -605,13 +632,12 @@ class HALinkPublisher:
         try:
             await self._redis.hset(REDIS_KEY, self._replica_id, json.dumps(local))
             await self._redis.expire(REDIS_KEY, REDIS_KEY_TTL_SECONDS)
-            raw = await self._redis.hgetall(REDIS_KEY)
             entries = {}
-            for field_name, value in (raw or {}).items():
-                try:
-                    entries[str(_decode(field_name))] = json.loads(_decode(value))
-                except (ValueError, TypeError):
-                    entries[str(_decode(field_name))] = None
+            for field_name, value in (await self._read_fields()).items():
+                entries[str(_decode(field_name))] = _decode_entry(value)
+            # This replica's own entry is always known, even if the hash holds
+            # more fields than are read.
+            entries[self._replica_id] = json.loads(json.dumps(local))
             now = self._wall()
             merged = merge(entries, now, self._first_seen, self._window)
             self._prune_first_seen(entries)
@@ -630,6 +656,20 @@ class HALinkPublisher:
         self._merged_at = self._monotonic() if merged is not None else None
         await self._remove_old_entries(entries, now)
 
+    async def _read_fields(self) -> Dict[Any, Any]:
+        """At most ``MAX_FIELDS`` fields of the hash, by HSCAN, so a hash grown by
+        anything with write access can't make every cycle read it all."""
+        fields: Dict[Any, Any] = {}
+        cursor: Any = 0
+        while True:
+            cursor, chunk = await self._redis.hscan(REDIS_KEY, cursor, count=MAX_FIELDS)
+            for field_name, value in (chunk or {}).items():
+                if len(fields) >= MAX_FIELDS:
+                    break
+                fields[field_name] = value
+            if len(fields) >= MAX_FIELDS or str(_decode(cursor)) == "0":
+                return fields
+
     def _prune_first_seen(self, entries: Mapping[str, Any]) -> None:
         live = set()
         for replica, raw in entries.items():
@@ -640,14 +680,15 @@ class HALinkPublisher:
             del self._first_seen[key]
 
     async def _remove_old_entries(self, entries: Mapping[str, Any], now: datetime) -> None:
-        old = [
-            replica
-            for replica, raw in entries.items()
-            if replica != self._replica_id
-            and isinstance(raw, Mapping)
-            and (published := _parse_time(raw.get("published_at"))) is not None
-            and (now - published).total_seconds() > PRUNE_AFTER_SECONDS
-        ]
+        """Delete other replicas' fields that are malformed, unparseable or more
+        than an hour old (this replica's own field is rewritten every cycle)."""
+        old = []
+        for replica, raw in entries.items():
+            if replica == self._replica_id:
+                continue
+            entry = _parse_entry(raw)
+            if entry is None or (now - entry.published_at).total_seconds() > PRUNE_AFTER_SECONDS:
+                old.append(replica)
         if not old:
             return
         try:
