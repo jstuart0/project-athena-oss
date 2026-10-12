@@ -917,9 +917,13 @@ class TestNonInjectableKeys:
         return out
 
     def test_the_set_is_owned_in_shared_and_holds_the_home_assistant_key(self):
-        from shared import ha_credentials
-
-        assert ha_credentials.NON_INJECTABLE_KEY_SERVICES == frozenset({ha_credentials.HA_KEY_SERVICE})
+        # By AST: this file runs in the guards job, whose environment has no httpx.
+        tree = parse((ROOT / "src/shared/ha_credentials.py").read_text(encoding="utf-8"))
+        values = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+        assert values["HA_KEY_SERVICE"].value == "home-assistant"
+        rhs = values["NON_INJECTABLE_KEY_SERVICES"]
+        assert isinstance(rhs, ast.Call) and rhs.func.id == "frozenset"
+        assert [e.id for e in rhs.args[0].elts] == ["HA_KEY_SERVICE"]
         owners = {rel for rel, source in scanned_files() if re.search(r"^NON_INJECTABLE_KEY_SERVICES\s*=", source, re.M)}
         assert owners == {"src/shared/ha_credentials.py"}
 
