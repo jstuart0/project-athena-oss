@@ -12,9 +12,7 @@ import re
 
 import pytest
 
-from .frontend_node import DOM_STUB, FRONTEND, requires_node, run_scripts
-
-pytestmark = requires_node
+from .frontend_node import DOM_STUB, FRONTEND, run_scripts
 
 ESCAPE = FRONTEND / "escape-html.js"
 VOCAB = FRONTEND / "status-vocab.js"

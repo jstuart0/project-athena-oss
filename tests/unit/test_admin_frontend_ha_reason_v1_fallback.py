@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import json
 
-from .frontend_node import FRONTEND, REPO, requires_node, run_scripts
-
-pytestmark = requires_node
+from .frontend_node import FRONTEND, REPO, run_scripts
 
 FROZEN = REPO / "tests" / "fixtures" / "admin_frontend" / "app_ha_block_9e80241.js"
 ESCAPE = FRONTEND / "escape-html.js"

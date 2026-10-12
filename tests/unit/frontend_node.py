@@ -1,8 +1,7 @@
 """Helpers for the admin-frontend Node tests: a hard-failing node lookup and
 a runner that loads classic browser scripts into one shared context.
 
-Not a test file. A missing node is a failure, never a skip, when
-ATHENA_REQUIRE_NODE is set (the frontend-escaping job sets it).
+Not a test file. A missing node is a failure, never a skip.
 """
 from __future__ import annotations
 
@@ -31,10 +30,9 @@ def _resolve() -> str | None:
 
 
 NODE_BIN = _resolve()
-if NODE_BIN is None and os.environ.get("ATHENA_REQUIRE_NODE"):
-    pytest.fail("ATHENA_REQUIRE_NODE is set but no working node interpreter was found", pytrace=False)
-
-requires_node = pytest.mark.skipif(NODE_BIN is None, reason="node is required for this test (set ATHENA_REQUIRE_NODE=1 to make it fail)")
+if NODE_BIN is None:
+    # Never a skip: these tests are the evidence the pages work (set ATHENA_NODE_BIN or install node).
+    pytest.fail("no working node interpreter found (checked ATHENA_NODE_BIN, then PATH); the admin-frontend tests need one", pytrace=False)
 
 Source = Union[str, Path]
 

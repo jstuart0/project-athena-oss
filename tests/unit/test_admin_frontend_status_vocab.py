@@ -13,9 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .frontend_node import FRONTEND, REPO, requires_node, run_scripts
-
-pytestmark = requires_node
+from .frontend_node import FRONTEND, REPO, run_scripts
 
 VOCAB = FRONTEND / "status-vocab.js"
 ESCAPE = FRONTEND / "escape-html.js"

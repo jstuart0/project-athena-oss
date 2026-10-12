@@ -18,9 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from .frontend_node import DOM_STUB, FRONTEND, NODE_BIN, requires_node, run_scripts
-
-pytestmark = requires_node
+from .frontend_node import DOM_STUB, FRONTEND, NODE_BIN, run_scripts
 
 DOCKERFILE = FRONTEND / "Dockerfile"
 STATUS_FILES = ["utils.js", "status-vocab.js", "mission-control.js", "voice-pipelines.js", "app.js", "service-control.js",
