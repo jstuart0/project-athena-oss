@@ -423,7 +423,65 @@ async def a_late_settlement_after_a_save_counts_as_unreserved(env: Env) -> None:
     await no_ttl_on_budget(env)
 
 
+async def a_stale_proof_after_a_lost_settlement_admits_one_canary_on_another_replica(env: Env) -> None:
+    """Replica A sees a 401 on a proven token while Redis is unreachable for it, so the
+    proof is still stored when Redis returns. Replica B must not go OPEN on that proof:
+    its first decision is one reserved canary, and the rest wait for it."""
+    from .ha_auth_fakes import FlakyRedis
+
+    snap = credentials()
+    flaky = FlakyRedis(env.redis)
+    a = make_latch(flaky, clock=env.clock, instance="pod-a", gate_wait=0.3)
+    b = env.latch("pod-b", gate_wait=0.3)
+    await prove_ok(a, snap)
+    sent = await a.admit(snap, **READ)
+    assert sent.kind == ha_auth.OPEN
+    flaky.down = True
+    await settle(a, snap, sent, "auth_rejected")  # Home Assistant said 401; the settlement was lost
+    flaky.down = False
+    env.clock.advance(ha_auth.CANARY_AFTER + 1)  # the outage outlasted the proof's freshness
+    assert await env.exists(key("proven:v2", snap)), "the stale proof is still stored"
+    first = await b.admit(snap, **READ)
+    assert first.kind == ha_auth.CANARY and first.reserved is True, first
+    others = await asyncio.gather(*[b.admit(snap, **READ) for _ in range(5)])
+    assert Counter(o.kind for o in others) == {ha_auth.GATED: 5}, "everything else waits for the one canary"
+    third_replica = env.latch("pod-c", gate_wait=0.3)
+    assert (await third_replica.admit(snap, **READ)).kind == ha_auth.GATED, "one stale canary cluster-wide, not one per replica"
+    assert await env.n() == 1
+    await settle(b, snap, first, "auth_rejected")  # the canary finds out
+    assert (await b.admit(snap, **READ)).kind == ha_auth.WITHHELD
+    assert not await env.exists(key("proven:v2", snap))
+    after = await a.admit(snap, **READ)  # A's lost settlement is now recorded too
+    assert after.kind == ha_auth.WITHHELD and await env.n() <= ha_auth.BUDGET
+    await no_ttl_on_budget(env)
+
+
+async def every_lost_settlement_is_retried_and_counted_once(env: Env) -> None:
+    """Two rejections whose settlements were lost are both recorded when Redis returns,
+    by one coroutine at a time: n rises by two, not by one and not by four."""
+    from .ha_auth_fakes import FlakyRedis
+
+    snap = credentials()
+    flaky = FlakyRedis(env.redis)
+    latch = make_latch(flaky, clock=env.clock, instance="pod-a", gate_wait=0.5)
+    await prove_ok(latch, snap)
+    first, second = await latch.admit(snap, **READ), await latch.admit(snap, **READ)
+    assert first.kind == second.kind == ha_auth.OPEN
+    flaky.down = True
+    await settle(latch, snap, first, "auth_rejected")
+    await settle(latch, snap, second, "auth_rejected")
+    assert len(latch._unsettled[snap.digest]) == 2, "one entry per lost rejection"
+    flaky.down = False
+    results = await asyncio.gather(*[latch.admit(snap, **READ) for _ in range(6)])
+    assert all(r.kind == ha_auth.WITHHELD for r in results), results
+    assert await env.n() == 2, "each lost rejection counted once, however many requests asked"
+    assert snap.digest not in latch._unsettled and not latch._retrying
+    await no_ttl_on_budget(env)
+
+
 SCENARIOS = {
+    "a_stale_proof_after_a_lost_settlement_admits_one_canary_on_another_replica": a_stale_proof_after_a_lost_settlement_admits_one_canary_on_another_replica,
+    "every_lost_settlement_is_retried_and_counted_once": every_lost_settlement_is_retried_and_counted_once,
     "a_late_settlement_after_a_save_counts_as_unreserved": a_late_settlement_after_a_save_counts_as_unreserved,
     "leaked_reservations_cannot_freeze_the_budget": leaked_reservations_cannot_freeze_the_budget,
     "a_reservation_that_is_never_settled_expires": a_reservation_that_is_never_settled_expires,

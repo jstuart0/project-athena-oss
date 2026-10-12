@@ -203,8 +203,8 @@
   },
   {
    "url": "http://ha.example.invalid./",
-   "env": "host_form",
-   "admin": "host_form"
+   "env": null,
+   "admin": null
   },
   {
    "url": "http://10.20.30.10./",
@@ -228,13 +228,53 @@
   },
   {
    "url": "http://ha.0x10.example.invalid/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://ha.1.example.invalid/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://10.0.0.5.nip.io/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://10.20.30.5.sslip.io/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://ha.2.lan/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://3.example.com/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://[0:0:0:0:0:0:0:1]/",
    "env": "host_form",
    "admin": "host_form"
   },
   {
-   "url": "http://ha.1.example.invalid/",
+   "url": "http://[::FFFF:7f00:1]/",
    "env": "host_form",
    "admin": "host_form"
+  },
+  {
+   "url": "http://010.1.1.1/",
+   "env": "unparseable",
+   "admin": "unparseable"
+  },
+  {
+   "url": "http://1.2.3.4.5/",
+   "env": null,
+   "admin": null
   }
  ]
 }

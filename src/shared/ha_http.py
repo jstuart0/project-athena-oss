@@ -148,13 +148,14 @@ class HATransport(httpx.AsyncBaseTransport):
             try:
                 request.headers["Authorization"] = _bearer(snapshot, request)
                 self._sent_since_withheld = True
-                # From here the request may have reached Home Assistant and been counted:
-                # an error that isn't a failure to connect keeps a reservation spent.
+                # From here the request may have reached Home Assistant and been counted: an error
+                # that isn't a failure to connect, and a cancellation, keep a reservation spent
+                # (as in ha_ws). Only something before the header is attached gives it back.
                 result = "unreachable_sent"
                 try:
                     response = await self._inner_send(request)
-                except (httpx.ConnectError, httpx.ConnectTimeout, asyncio.CancelledError):
-                    result = "other"  # it never got there, or the caller gave up: the reservation is given back
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    result = "other"  # it never got there: the reservation is given back
                     raise
                 result = self._result_for(request, response.status_code)
                 return response

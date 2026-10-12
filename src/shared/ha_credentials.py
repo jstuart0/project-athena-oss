@@ -246,17 +246,26 @@ _HEX_LABEL = re.compile(r"0x[0-9a-f]*")
 
 
 def _odd_host_form(host: str) -> bool:
-    """A host written in a form some resolvers read as an address: all digits
-    (``2852039166``), a ``0x`` hex form, a dotted name with a purely numeric
-    label that isn't a canonical dotted quad (``169.254.43518``, ``010.1.1.1``),
-    or a trailing dot. A canonical IPv4 or IPv6 literal is not odd; the DNS check
-    at use stays as the second layer for names."""
-    if _literal_ip(host) is not None:
+    """A host a resolver might read as a number: every label is decimal or ``0x``
+    hex and there are at most four of them (``2852039166``, ``0xa9fea9fe``,
+    ``169.254.43518``, ``1.2.3``), with a single trailing dot allowed on such a
+    host (``10.20.30.10.``). A real name that merely contains a numeric label
+    (``10.0.0.5.nip.io``, ``ha.2.lan``, ``3.example.com``), or ends in a dot
+    (``ha.example.com.``), is a name: the DNS check at use judges it. Canonical IP
+    literals are handled before this."""
+    labels = host.lower().rstrip(".").split(".") if host.endswith(".") else host.lower().split(".")
+    if not 1 <= len(labels) <= 4:
         return False
-    if host.endswith("."):
-        return True
-    labels = host.lower().split(".")
-    return any(_DECIMAL_LABEL.fullmatch(label) or _HEX_LABEL.fullmatch(label) for label in labels)
+    return all(_DECIMAL_LABEL.fullmatch(label) or _HEX_LABEL.fullmatch(label) for label in labels)
+
+
+def _written_as_literal(host: str) -> Optional[bool]:
+    """None when ``host`` isn't an IP literal at all; otherwise whether it is
+    written in its canonical text (``str(ip) == host.lower()``)."""
+    try:
+        return str(ipaddress.ip_address(host)) == host.lower()
+    except ValueError:
+        return None
 
 
 def _inspect(url: Any, source: str) -> Tuple[Optional[str], Optional[_Parsed]]:
@@ -282,8 +291,6 @@ def _inspect(url: Any, source: str) -> Tuple[Optional[str], Optional[_Parsed]]:
     host = parsed.host
     if not host:
         return "host", None
-    if _odd_host_form(host):
-        return "host_form", None
     explicit = parsed.port
     if explicit is not None and not 1 <= explicit <= 65535:
         return "port", None
@@ -291,6 +298,9 @@ def _inspect(url: Any, source: str) -> Tuple[Optional[str], Optional[_Parsed]]:
     ip = _literal_ip(host)
     if ip is not None and always_blocked(ip):
         return "blocked_address", None
+    written = _written_as_literal(host)
+    if written is False or (written is None and _odd_host_form(host)):
+        return "host_form", None
     if source == SOURCE_ADMIN:
         checked = str(ip) if ip is not None else host
         if not (checked in ("localhost", "127.0.0.1", "::1") and is_local_host(checked)):

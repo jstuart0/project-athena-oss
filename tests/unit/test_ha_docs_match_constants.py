@@ -48,4 +48,6 @@ def test_the_page_states_the_reservation_expiry_the_redis_requirement_and_the_si
     assert "single-node Redis" in SECTION and "fails closed" in SECTION
     page = DOC[DOC.index("#### Where Athena finds its Home Assistant address and token"):]
     assert "whatever its key type, is refused" in page and "never handed to a tool" in page
-    assert "`169.254.43518`" in page and "trailing dot" in page
+    assert "`169.254.43518`" in page and "`10.0.0.5.nip.io`" in page and "canonical text" in page
+    assert "enabling it from nothing" in page and "needs a restart of the orchestrator" in page
+    assert f"more than {int(ha_auth.CANARY_AFTER)} seconds old" in SECTION

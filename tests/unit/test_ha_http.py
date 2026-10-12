@@ -243,7 +243,7 @@ def test_a_proven_token_goes_through_and_a_first_use_goes_out_as_a_reserved_cana
     assert fake.failed_total == 0 and fake.ws_auth_frames == 1, "one proof, then plain requests"
 
 
-def test_a_cancelled_send_is_observed_once_as_other_and_gives_its_slot_back():
+def test_a_cancelled_send_is_observed_once_as_unreachable_sent_and_gives_its_slot_back():
     async def scenario():
         fake = FakeHA(delay=0.2)
         stack = make_stack(fake=fake)
@@ -266,7 +266,7 @@ def test_a_cancelled_send_is_observed_once_as_other_and_gives_its_slot_back():
         return observed, stack.latch._slots._value
 
     observed, slots = run(scenario())
-    assert observed == ["other"]
+    assert observed == ["unreachable_sent"], "the header was attached: the request may have been counted"
     assert slots == ha_auth.INFLIGHT_CAP
 
 
@@ -499,3 +499,38 @@ def test_a_request_to_the_right_origin_still_carries_the_token():
         return response.status_code
 
     assert run(scenario()) == 200
+
+
+def test_a_cancelled_reserved_canary_stays_counted_but_a_refused_origin_gives_it_back():
+    """A4: only something before the Authorization header is attached refunds."""
+    from shared import ha_auth
+
+    def budget(stack):
+        return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("n", 0))
+
+    async def cancelled():
+        fake = FakeHA(delay=0.3)
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")  # prove first
+        before = budget(stack)
+        task = asyncio.ensure_future(stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"}))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await stack.channel.aclose()
+        return budget(stack) - before
+
+    async def refused_origin():
+        stack = make_stack(gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        before = budget(stack)
+        request = httpx.Request("POST", "https://other-host.example.invalid/api/services/cover/open", json={"entity_id": "cover.a"},
+                                extensions={"athena_ha_digest": stack.creds.digest})
+        with pytest.raises(RuntimeError, match="not addressed"):
+            await stack.channel._transport.handle_async_request(request)
+        await stack.channel.aclose()
+        return budget(stack) - before
+
+    assert run(cancelled()) == 1, "cancelled after the header: still counted"
+    assert run(refused_origin()) == 0, "refused before the header: given back"

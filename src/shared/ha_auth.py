@@ -990,7 +990,8 @@ class HAAuthLatch:
         # A real rejection whose settlement didn't reach Redis: the proof it ended
         # may still be stored there, so nothing for this digest is admitted OPEN
         # until the settlement has been retried.
-        self._unsettled: Dict[str, Tuple[Admission, str, str, str]] = {}
+        self._unsettled: Dict[str, List[Tuple[Admission, str, str, str]]] = {}
+        self._retrying: Set[str] = set()
         self._local_seen: Set[Tuple[str, str]] = set()
         self._route_canaries: Set[Tuple[str, str]] = set()
         self._stale_canaries: Set[str] = set()
@@ -1145,13 +1146,8 @@ class HAAuthLatch:
 
     async def _decide(self, snapshot: Any, state: _State, route: str, key: str, proof_request: bool):
         digest = snapshot.digest
-        if digest in self._unsettled:
-            # Redis is back (the read just worked): finish deleting the proof and recording the
-            # rejection before any OPEN, then read again. A failure here is a GATED admission.
-            admission, caller, request_key, latch_value = self._unsettled[digest]
-            await self._settle(snapshot, "rejected", admission, caller=caller, request_key=request_key, latch_value=latch_value)
-            self._unsettled.pop(digest, None)
-            return _RESTART
+        if digest in self._retrying or self._unsettled.get(digest):
+            return await self._retry_unsettled(snapshot)
         now = self._now_ms()
         latch = state.latch
         if latch is None and state.legacy:
@@ -1166,12 +1162,33 @@ class HAAuthLatch:
         if not seen:
             return await self._route_canary(snapshot, state, route, proof_request)
         if now - state.proven.at > self._canary_after * 1000:
-            if digest in self._stale_canaries:
-                return _WAIT
-            self._stale_canaries.add(digest)
-            return Admission(CANARY, epoch=state.epoch, gen=state.proven.gen, proof_request=proof_request,
-                             canary=("stale", digest))
+            return await self._stale_canary(snapshot, state, proof_request)
         return Admission(OPEN, epoch=state.epoch, gen=state.proven.gen, proof_request=proof_request)
+
+    async def _retry_unsettled(self, snapshot: Any):
+        """Redis is back (the read just worked): record every rejection whose settlement
+        was lost before anything is admitted OPEN, then read again. Each entry is taken
+        out before it is retried and put back only if the retry fails, and one coroutine
+        at a time does this per digest, so none is settled twice by this process."""
+        digest = snapshot.digest
+        if digest in self._retrying:
+            return _WAIT
+        self._retrying.add(digest)
+        try:
+            pending = self._unsettled.get(digest, [])
+            while pending:
+                entry = pending.pop(0)
+                admission, caller, request_key, latch_value = entry
+                try:
+                    await self._settle(snapshot, "rejected", admission, caller=caller, request_key=request_key, latch_value=latch_value)
+                except BaseException:
+                    pending.insert(0, entry)
+                    raise
+            self._unsettled.pop(digest, None)
+        finally:
+            self._retrying.discard(digest)
+            self._wake(digest)
+        return _RESTART
 
     async def _decide_latched(self, snapshot: Any, state: _State, latch: _Latch, now: int, proof_request: bool):
         if latch.next is None or now < latch.next:
@@ -1216,6 +1233,38 @@ class HAAuthLatch:
             return Admission(CANARY, epoch=epoch, gen=state.proven.gen, reserved=True, reservation=reservation,
                              proof_request=proof_request, canary=("route", marker))
         self._route_canaries.discard(marker)
+        if code == 2:
+            return Admission(WITHHELD, REASON_BUDGET, proof_request=proof_request)
+        return _WAIT
+
+    async def _stale_canary(self, snapshot: Any, state: _State, proof_request: bool):
+        """A proof older than ``CANARY_AFTER`` (an idle spell, or a Redis outage that kept it
+        from being renewed) may no longer be true. One request, cluster-wide, finds out
+        first: it takes a short lease, reserves against the budget like a route canary, and
+        every other request waits. A pass renews the proof for everyone; a rejection ends it."""
+        digest = snapshot.digest
+        if digest in self._stale_canaries:
+            return _WAIT
+        self._stale_canaries.add(digest)  # before the awaits: the next request of this process must see it
+        holder = f"{self._instance}:{uuid.uuid4().hex[:8]}"
+        try:
+            if not await self._bounded(self._redis.set(
+                self._k("stale:v1", digest), holder, nx=True, px=int(self._gate_lease * 1000),
+            )):
+                self._stale_canaries.discard(digest)
+                return _WAIT
+            result = await self._call(
+                "reserve_request", [self._k("budget:v2")],
+                [REQUEST_ALLOWANCE, holder, self._now_ms(), int(RESERVATION_TTL * 1000)],
+            )
+            code, epoch = int(result[0]), int(result[1])
+        except BaseException:
+            self._stale_canaries.discard(digest)
+            raise
+        if code == 1:
+            return Admission(CANARY, epoch=epoch, gen=state.proven.gen, reserved=True, reservation=holder,
+                             proof_request=proof_request, canary=("stale", digest))
+        self._stale_canaries.discard(digest)
         if code == 2:
             return Admission(WITHHELD, REASON_BUDGET, proof_request=proof_request)
         return _WAIT
@@ -1351,9 +1400,12 @@ class HAAuthLatch:
         elif result == "auth_rejected":
             self._local_proof.pop(digest, None)
             latch_value = self._trip_value(digest, admission, now)
-            self._unsettled[digest] = (admission, caller, key, latch_value)  # stays if the settlement fails
-            await self._settle(snapshot, "rejected", admission, caller=caller, request_key=key, latch_value=latch_value)
-            self._unsettled.pop(digest, None)
+            try:
+                await self._settle(snapshot, "rejected", admission, caller=caller, request_key=key, latch_value=latch_value)
+            except BaseException:
+                # Every rejection whose settlement may not have reached Redis is kept, one entry each.
+                self._unsettled.setdefault(digest, []).append((admission, caller, key, latch_value))
+                raise
         elif result == "banned":
             await self._settle(snapshot, "banned", admission, caller=caller)
         elif result == "unreachable_sent":
@@ -1432,6 +1484,7 @@ class HAAuthLatch:
             await self._bounded(self._redis.delete(
                 self._k("latch:v1", digest), self._k("proven:v2", digest), self._k("gate:v1", digest),
                 self._k("admin_only:v1", digest), self._k("seen:v1", digest), self._legacy_key(snapshot),
+                self._k("stale:v1", digest),
             ))
             await self._call("reopen", [self._k("budget:v2"), self._k("gate:v1", digest)], [BUDGET, self._now_ms()])
         except asyncio.CancelledError:

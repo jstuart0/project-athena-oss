@@ -395,11 +395,12 @@ def test_any_blocked_address_among_several_rejects_the_name():
 
 @pytest.mark.parametrize("url", [
     "http://2852039166/", "http://0xa9fea9fe/", "http://169.254.43518/", "http://12345/", "http://0X7f000001/",
-    "http://1.2.3/", "http://ha.0x10.example.invalid/", "http://ha.1.example.invalid/",
-    "http://ha.example.invalid./", "http://10.20.30.10./",
+    "http://1.2.3/", "http://10.20.30.10./", "http://0x7f.1/", "http://127.1/",
+    "http://[0:0:0:0:0:0:0:1]/", "http://[::FFFF:7f00:1]/",
 ])
 def test_odd_numeric_host_forms_are_refused_at_save_and_never_looked_up(url):
-    assert hc.ha_url_problem(url, source="admin") == "host_form"
+    word = hc.ha_url_problem(url, source="admin")
+    assert word == "host_form"
     assert hc.ha_url_problem(url, source="env") == "host_form"
 
     async def scenario():
@@ -412,9 +413,39 @@ def test_odd_numeric_host_forms_are_refused_at_save_and_never_looked_up(url):
     assert (c.configured, c.problem) == (False, "host_form") and calls == [], "refused before any DNS lookup"
 
 
-@pytest.mark.parametrize("url", ["http://10.20.30.10/", "http://ha.example.invalid/", "http://ha-1.example.invalid/", "http://[2001:db8::1]/", "http://ha2.example.invalid/", "http://x0x.example.invalid/"])
-def test_ordinary_hosts_are_not_odd(url):
+@pytest.mark.parametrize("url", [
+    "http://10.0.0.5.nip.io/", "http://10.20.30.5.sslip.io/", "http://ha.2.lan/", "http://3.example.com/",
+    "http://ha.example.invalid./", "http://ha.0x10.example.invalid/", "http://ha.1.example.invalid/", "http://1.2.3.4.5/",
+])
+def test_real_names_with_a_numeric_label_or_a_trailing_dot_go_through_to_the_dns_check(url):
+    assert hc.ha_url_problem(url, source="env") is None
     assert hc.ha_url_problem(url, source="admin") is None
+
+    async def scenario(address):
+        dns = public_dns((address,))
+        r = resolver(Source(KeyLookup.found(url, TOKEN)), dns=dns)
+        await r.start()
+        return r.current(), dns.calls
+
+    c, calls = run(scenario("10.20.30.7"))
+    assert c.configured is True and len(calls) == 1
+    c, _ = run(scenario("169.254.169.254"))
+    assert (c.configured, c.problem) == (False, "blocked_address"), "the DNS check still judges a name"
+
+
+def test_a_leading_zero_quad_never_reaches_the_policy_because_httpx_cannot_parse_it():
+    import httpx
+
+    with pytest.raises(httpx.InvalidURL):
+        httpx.URL("http://010.1.1.1/")
+    assert hc.ha_url_problem("http://010.1.1.1/", source="admin") == "unparseable"
+    assert hc.ha_url_problem("http://010.1.1.1/", source="env") == "unparseable"
+
+
+@pytest.mark.parametrize("url,word", [("http://[2001:DB8::1]/", None), ("http://[2001:db8::1]/", None), ("http://[::ffff:a9fe:a9fe]/", "blocked_address")])
+def test_literals_written_canonically_pass_the_text_check_and_others_do_not(url, word):
+    got = hc.ha_url_problem(url, source="env")
+    assert got == word or (word is None and got is None)
 
 
 def test_the_dns_check_stays_the_second_layer_for_a_name_that_resolves_to_a_blocked_address():

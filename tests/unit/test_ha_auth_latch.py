@@ -173,7 +173,8 @@ def test_a_stale_proof_sends_one_canary_and_the_rest_wait_for_it():
         if result is None:
             return Counter(a.kind for a in done), len(calls) - len(done), None
         canary = done[0]
-        assert canary.kind == ha_auth.CANARY and canary.reserved is False
+        assert canary.kind == ha_auth.CANARY and canary.reserved is True, "the stale canary is budget-counted"
+        assert await env.n() == 1 and await env.r() == 1
         await scenarios.settle(latch, snap, canary, result)
         return Counter(a.kind for a in await asyncio.gather(*calls)), 0, env
 
@@ -651,3 +652,50 @@ def test_no_warning_when_redis_is_not_configured_or_the_latch_is_shared(monkeypa
     with structlog.testing.capture_logs() as logs:
         ha_auth.HAAuthLatch(ha_auth.MemoryRedis(), instance="pod", service_api_key="service-key-for-tests")
     assert not [entry for entry in logs if entry["event"] == "ha_auth_not_shared"]
+
+
+def test_a_request_that_arrives_while_the_lost_settlements_are_being_retried_waits_for_them():
+    """The retry takes each entry out of the list before it settles it, so the list can be empty
+    while the last settlement is still in flight. A request arriving then must still wait."""
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        snap = credentials()
+        await scenarios.prove_ok(latch, snap)
+        sent = await latch.admit(snap, **READ)
+        flaky.down = True
+        await scenarios.settle(latch, snap, sent, "auth_rejected")
+        flaky.down = False
+        real_settle = latch._settle
+
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return await real_settle(*args, **kwargs)
+
+        latch._settle = slow
+        first = asyncio.ensure_future(latch.admit(snap, **READ))
+        await asyncio.sleep(0.01)  # the entry has been taken out; its settlement is in flight
+        late = await latch.admit(snap, **READ)
+        return await first, late
+
+    first, late = run(scenario())
+    assert first.kind == ha_auth.WITHHELD
+    assert late.kind == ha_auth.WITHHELD, "it waited for the retry and then saw the rejection"
+
+
+def test_a_save_also_forgets_the_stale_canary_lease():
+    async def scenario():
+        clock = Clock()
+        redis = ha_auth.MemoryRedis(clock=clock)
+        latch = make_latch(redis, clock=clock, gate_wait=0.2)
+        snap = credentials()
+        await scenarios.prove_ok(latch, snap)
+        clock.advance(ha_auth.CANARY_AFTER + 1)
+        canary = await latch.admit(snap, **READ)
+        assert canary.kind == ha_auth.CANARY
+        lease = scenarios.key("stale:v1", snap)
+        held = await redis.exists(lease)
+        await latch.clear_and_reopen(snap)
+        return held, await redis.exists(lease)
+
+    held, after = run(scenario())
+    assert held and not after
