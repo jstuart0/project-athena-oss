@@ -509,10 +509,12 @@ async def _poll_all_services(semaphore: asyncio.Semaphore) -> dict:
             # POLLER WRITES (dexter D2): disjoint from service_control writes.
             # Do NOT include 'is_running' (owned by service_control.py).
             # Do NOT include 'updated_at' (config-change audit; dexter D7).
-            # synchronize_session=False issues a raw UPDATE, bypassing ORM
-            # event hooks including the onupdate=func.now() on updated_at.
+            # A bulk Query.update still applies column onupdate defaults, so
+            # updated_at is set to itself: a column present in the SET
+            # clause suppresses its onupdate=func.now().
             db.query(RagService).filter(RagService.id == svc_id).update(
                 {
+                    RagService.updated_at: RagService.updated_at,
                     RagService.health_status: status,
                     RagService.last_health_check: now,
                     RagService.last_response_time_ms: response_time_ms,

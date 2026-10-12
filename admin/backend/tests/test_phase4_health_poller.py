@@ -295,11 +295,10 @@ class TestPollWriteSemantics:
     async def test_updated_at_not_bumped(self, db):
         """Poller must not advance updated_at (dexter D7).
 
-        Mechanism: synchronize_session=False issues a raw UPDATE that lists
-        only the 5 health columns; SQLAlchemy's onupdate=func.now() only fires
-        when the ORM flushes a tracked attribute change — not on raw UPDATEs.
-        We verify this by capturing updated_at before the poll cycle and
-        asserting it is unchanged after.
+        Mechanism: a bulk Query.update still applies onupdate=func.now(), so
+        the poller sets updated_at to itself, which suppresses it. The row's
+        updated_at is pinned in the past first, so a bump can't hide inside
+        the same second as the poll.
         """
         svc = RagService(
             name="test-svc-updated_at",
@@ -315,7 +314,14 @@ class TestPollWriteSemantics:
         db.commit()
         svc_id = svc.id
 
-        # Capture updated_at AFTER the ORM has settled (server_default applied).
+        # Pin updated_at well in the past so a bump can't hide inside the
+        # same wall-clock second as the poll.
+        from datetime import datetime, timezone
+        db.query(RagService).filter(RagService.id == svc_id).update(
+            {RagService.updated_at: datetime(2020, 1, 1, tzinfo=timezone.utc)},
+            synchronize_session=False,
+        )
+        db.commit()
         db.refresh(svc)
         updated_at_before = svc.updated_at
 
