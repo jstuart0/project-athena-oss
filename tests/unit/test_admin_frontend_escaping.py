@@ -1185,3 +1185,621 @@ def test_rebuild_outcome_passes_through_success_and_conflicts():
     assert _reindex_outcome(200, {"embedded": 3})["embedded"] == 3
     assert _reindex_outcome(409, {"error": "reindex_busy", "retry_after_seconds": 5})["error"] == "reindex_busy"
     assert _reindex_outcome(403, {"detail": "Insufficient permissions"}) == {"error": "forbidden"}
+
+
+# ---------------------------------------------------------------------------
+# Home Assistant status card and "not monitored" rows (campaign
+# 2026-10-11-deliver-athena-ha-health-status, Phase 3). Pure helpers from
+# app.js, service-control.js and mission-control.js run in Node with the real
+# escape-html.js; TZ is pinned to UTC so '3:12 pm' and '27 Sep' are stable.
+# ---------------------------------------------------------------------------
+
+import ast  # noqa: E402
+
+MISSION_CONTROL_JS = FRONTEND_DIR / "mission-control.js"
+VOICE_PIPELINES_JS = FRONTEND_DIR / "voice-pipelines.js"
+HA_STATUS_PY = Path(__file__).resolve().parents[2] / "admin" / "backend" / "app" / "services" / "ha_status.py"
+CHECKED_AT = "2026-10-11T12:00:00+00:00"
+
+
+def _run_node_utc(sources: list[str], js_expr: str):
+    script = f"""
+    'use strict';
+    global.window = global;
+    {chr(10).join(sources)}
+    Promise.resolve((function() {{ return {js_expr}; }})()).then((result) => {{
+        process.stdout.write(JSON.stringify(result === undefined ? "__undefined__" : result));
+    }});
+    """
+    proc = subprocess.run(
+        [NODE_BIN, "-e", script], capture_output=True, text=True, timeout=30,
+        env={**os.environ, "TZ": "UTC"},
+    )
+    assert proc.returncode == 0, f"node failed: {proc.stderr}\n---script---\n{script}"
+    return json.loads(proc.stdout)
+
+
+def _app_ha_sources() -> list[str]:
+    """escape-html.js plus app.js's status helpers, the Home Assistant card
+    and the registry-row helpers (everything between the vocabulary comment
+    and loadStatus)."""
+    source = APP_JS.read_text()
+    start = source.index("// Status vocabulary shared with Service Control")
+    start = source.rindex("// ----", 0, start)
+    end = source.index("async function loadStatus() {")
+    return [
+        ESCAPE_HTML_JS.read_text(),
+        _extract_function_source(APP_JS, "serviceStatus"),
+        _extract_function_source(APP_JS, "summarizeServices"),
+        source[start:end],
+    ]
+
+
+def _ha(expr: str):
+    return _run_node_utc(_app_ha_sources(), expr)
+
+
+def _plain(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html or "")
+
+
+def _ha_payload(**changes):
+    base = {
+        "state": "connected", "reason": "ok", "areas": 9,
+        "last_outcome_at": "2026-10-11T11:58:00+00:00", "last_success_at": "2026-10-11T11:58:00+00:00",
+        "coverage": "cluster", "replicas_reporting": 2, "checked_at": CHECKED_AT,
+        "gateway": "ok", "gateway_sampled": True,
+    }
+    base.update(changes)
+    return base
+
+
+def _summ(**changes):
+    return _ha(f"summarizeHomeAssistant({json.dumps(_ha_payload(**changes))})")
+
+
+# -- the reason map ---------------------------------------------------------------
+
+def _python_reasons() -> set[str]:
+    tree = ast.parse(HA_STATUS_PY.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "REASONS" for t in node.targets):
+            call = node.value
+            assert isinstance(call, ast.Call) and call.func.id == "frozenset"
+            return {el.value for el in call.args[0].elts}
+    raise AssertionError("REASONS not found in ha_status.py")
+
+
+def test_the_js_reason_map_has_exactly_the_python_reason_set():
+    js_keys = set(_ha("Object.keys(HA_REASON_COPY)"))
+    assert js_keys == _python_reasons()
+    assert len(js_keys) == 15
+    assert "gateway_token_rejected" not in js_keys and "gateway_token_rejected" not in _python_reasons()
+
+
+HA_COPY = {
+    "ok": ("Connected", None, None),
+    "waiting": ("No contact yet",
+                "Athena hasn't talked to Home Assistant since it started. This updates after the first voice command.", None),
+    "token_rejected": ("Token rejected",
+                       "Home Assistant turned down Athena's access token, so Athena can't control your home.",
+                       "Create a long-lived access token in Home Assistant (your profile → Security), save it under External API Keys → home-assistant, then restart the orchestrator."),
+    "forbidden": ("Access blocked",
+                  "Home Assistant refused Athena. This usually means it blocked Athena's address after failed sign-ins.",
+                  "Remove Athena's address from Home Assistant's ip_bans.yaml and restart Home Assistant, then check the token."),
+    "unreachable": ("Can't reach Home Assistant",
+                    "Athena couldn't connect. Home Assistant may be off, restarting, or at a different address.",
+                    "Check that Home Assistant is running and that the address under External API Keys → home-assistant is right."),
+    "timeout": ("Not responding",
+                "Athena connected, but Home Assistant didn't answer in time. It may be busy or starting up.", None),
+    "tls_error": ("Secure connection failed",
+                  "Athena reached Home Assistant but couldn't set up the HTTPS connection. Check the address uses the right scheme (http or https) and port.", None),
+    "ha_error": ("Home Assistant error",
+                 "Home Assistant is running but returned an error to Athena. Its own log will say why.", None),
+    "registry_unavailable": ("Connected, rooms not loaded",
+                             "Commands reach Home Assistant, but Athena couldn't load its areas, so it can't tell which room you're in.",
+                             "Restart the orchestrator to try again."),
+    "registry_refused": ("Connected, rooms not loaded",
+                         "Home Assistant turned down Athena's token when it loaded areas earlier. Commands work now.",
+                         "Restart the orchestrator to load rooms."),
+    "not_configured": ("Not set up",
+                       "Add your Home Assistant address and token so Athena can control your home.", "BUTTON"),
+    "orchestrator_unreachable": ("Status unavailable",
+                                 "The admin panel couldn't reach Athena's orchestrator to ask about Home Assistant. Home Assistant itself may be fine.", None),
+    "orchestrator_refused": ("Status unavailable",
+                             "The orchestrator refused the admin panel's service key. Home Assistant itself may be fine.",
+                             "Check SERVICE_API_KEY matches on admin-backend and the orchestrator."),
+    "orchestrator_blocked": ("Status unavailable",
+                             "The orchestrator's address isn't on the admin panel's allowed list. Home Assistant itself may be fine.",
+                             "Allow the orchestrator's address in HEALTH_POLL_ALLOWED_PRIVATE_HOSTS."),
+    "orchestrator_outdated": ("Status unavailable",
+                              "The orchestrator is an older version that doesn't report this yet.", "Update the orchestrator."),
+}
+
+
+@pytest.mark.parametrize("reason", sorted(HA_COPY))
+def test_each_reason_reads_its_binding_copy(reason):
+    headline, detail, action = HA_COPY[reason]
+    out = _summ(reason=reason, state="unknown", last_success_at=None, last_outcome_at=None)
+    assert out["headline"] == headline
+    assert out["detail"] == detail
+    if action == "BUTTON":
+        assert out["action"].startswith('<button type="button" onclick="showTab(\'external-api-keys\')"')
+        assert ">Set up Home Assistant</button>" in out["action"]
+    else:
+        assert out["action"] == action
+
+
+def test_the_copy_names_no_certificate_and_stays_in_the_owners_words():
+    out = _ha("Object.values(HA_REASON_COPY)")
+    blob = json.dumps(out).lower()
+    assert "certificate" not in blob
+    assert "gateway_token_rejected" not in blob
+
+
+# -- classes -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("state,dot,text", [
+    ("connected", "bg-green-500", "text-green-400"),
+    ("attention", "bg-amber-500", "text-amber-400"),
+    ("failing", "bg-red-500", "text-red-400"),
+    ("not_configured", "bg-gray-500", "text-gray-400"),
+    ("unknown", "bg-gray-500", "text-gray-400"),
+    ("zzz", "bg-gray-500", "text-gray-400"),
+    ("__proto__", "bg-gray-500", "text-gray-400"),
+    ("constructor", "bg-gray-500", "text-gray-400"),
+    ("<img src=x>", "bg-gray-500", "text-gray-400"),
+])
+def test_each_state_maps_to_its_class_pair_and_an_unknown_state_is_grey(state, dot, text):
+    out = _summ(state=state)
+    assert (out["dotClass"], out["textClass"]) == (dot, text)
+
+
+@pytest.mark.parametrize("reason", [r for r in sorted(HA_COPY) if r.startswith("orchestrator_")] + ["waiting"])
+def test_an_unknown_state_and_orchestrator_failures_are_grey_and_never_headed_home_assistant(reason):
+    out = _summ(state="unknown", reason=reason)
+    assert (out["dotClass"], out["textClass"]) == ("bg-gray-500", "text-gray-400")
+    assert not out["headline"].startswith("Home Assistant")
+
+
+def test_a_hostile_reason_reads_status_unknown_and_is_never_echoed():
+    out = _summ(reason="<img src=x>", state="<img src=x>", gateway="<img src=x>", coverage="<img src=x>")
+    assert out["headline"] == "Status unknown"
+    assert out["detail"] is None and out["action"] is None
+    assert "<img" not in json.dumps(out)
+    assert _summ(reason="constructor")["headline"] == "Status unknown"
+    assert _summ(reason="__proto__")["headline"] == "Status unknown"
+
+
+def test_a_missing_or_malformed_payload_reads_status_unknown_not_a_crash():
+    for payload in ("null", "undefined", "[]", "'text'", "42"):
+        out = _ha(f"summarizeHomeAssistant({payload})")
+        assert out["headline"] == "Status unknown" and out["dotClass"] == "bg-gray-500"
+
+
+# -- the idle sentence and the meta line --------------------------------------------------
+
+def test_ok_aged_forty_minutes_is_green_with_the_idle_sentence():
+    out = _summ(last_success_at="2026-10-11T11:20:00+00:00", last_outcome_at="2026-10-11T11:20:00+00:00")
+    assert out["textClass"] == "text-green-400"
+    assert out["detail"] == ("Athena checks Home Assistant whenever it uses it. Nothing has needed it since "
+                             "11:20 am, so this is the latest it knows.")
+
+
+def test_ok_aged_five_minutes_has_no_detail():
+    assert _summ(last_success_at="2026-10-11T11:55:00+00:00")["detail"] is None
+
+
+def test_the_idle_sentence_uses_a_twelve_hour_clock_with_pm():
+    out = _summ(last_success_at="2026-10-11T00:12:00+00:00", last_outcome_at="2026-10-11T00:12:00+00:00",
+                checked_at="2026-10-11T15:12:00+00:00")
+    assert "since 12:12 am" in out["detail"]
+    out = _summ(last_success_at="2026-10-11T15:12:00+00:00", last_outcome_at="2026-10-11T15:12:00+00:00",
+                checked_at="2026-10-11T23:12:00+00:00")
+    assert "since 3:12 pm" in out["detail"]
+
+
+def test_a_connected_link_says_last_contact_with_one_time():
+    meta = _plain(_summ()["meta"])
+    assert meta.startswith("Last contact 2m ago")
+    assert "last worked" not in meta
+
+
+def test_token_rejected_says_rejected_and_when_it_last_worked():
+    out = _summ(state="failing", reason="token_rejected",
+                last_outcome_at="2026-10-11T11:58:00+00:00", last_success_at="2026-10-11T09:00:00+00:00")
+    assert _plain(out["meta"]).startswith("Rejected 2m ago · last worked 3h ago")
+
+
+def test_another_failure_says_seen_and_a_missing_last_success_drops_the_last_text():
+    seen = _summ(state="failing", reason="timeout", last_outcome_at="2026-10-11T11:58:00+00:00",
+                 last_success_at="2026-10-11T09:00:00+00:00")
+    assert _plain(seen["meta"]).startswith("Seen 2m ago · last worked 3h ago")
+    never = _summ(state="failing", reason="token_rejected", last_outcome_at="2026-10-11T11:58:00+00:00",
+                  last_success_at=None)
+    assert _plain(never["meta"]).startswith("Rejected 2m ago")
+    assert "last worked" not in never["meta"]
+
+
+def test_a_registry_problem_beside_a_newer_success_reads_last_contact_not_seen():
+    out = _summ(state="attention", reason="registry_unavailable", areas=None)
+    assert _plain(out["meta"]).startswith("Last contact 2m ago")
+
+
+@pytest.mark.parametrize("areas,expected", [(0, "0 areas"), (1, "1 area"), (9, "9 areas")])
+def test_the_area_count_and_its_singular(areas, expected):
+    assert expected in _plain(_summ(areas=areas)["meta"]).split(" · ")
+
+
+def test_a_connected_link_with_no_area_count_says_rooms_not_loaded():
+    assert "rooms not loaded" in _plain(_summ(areas=None)["meta"]).split(" · ")
+
+
+@pytest.mark.parametrize("areas", ["7", -1, None, "<img src=x>", True])
+def test_a_bad_area_count_is_not_printed(areas):
+    meta = _plain(_summ(areas=areas, state="failing", reason="timeout")["meta"])
+    assert "undefined" not in meta and "NaN" not in meta and "<img" not in meta and "areas" not in meta
+
+
+def test_a_replica_only_view_says_so_with_a_tooltip():
+    meta = _summ(coverage="replica")["meta"]
+    assert "this replica only" in _plain(meta)
+    assert "title=\"Athena couldn&#39;t combine what all its orchestrator copies have seen" in meta
+    assert "this replica only" not in _summ(coverage="cluster")["meta"]
+
+
+@pytest.mark.parametrize("gateway,text", [
+    ("not_checked", "gateway not checked"), ("refused", "gateway check failed"), ("unavailable", "gateway check failed"),
+])
+def test_the_gateway_note_is_muted_and_never_changes_the_headline_or_dot(gateway, text):
+    base, out = _summ(), _summ(gateway=gateway)
+    assert text in _plain(out["meta"])
+    assert (out["headline"], out["dotClass"], out["textClass"]) == (base["headline"], base["dotClass"], base["textClass"])
+
+
+@pytest.mark.parametrize("gateway", ["ok", "disabled", "unknown", "zzz", None])
+def test_other_gateway_words_add_no_note(gateway):
+    assert "gateway" not in _plain(_summ(gateway=gateway)["meta"])
+
+
+def test_times_are_time_elements_with_the_exact_time_on_hover():
+    meta = _summ()["meta"]
+    assert '<time datetime="2026-10-11T11:58:00+00:00" title="' in meta
+
+
+# -- formatAge -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("iso,expected", [
+    ("2026-10-11T11:59:30+00:00", "just now"),
+    ("2026-10-11T11:59:01+00:00", "just now"),
+    ("2026-10-11T11:59:00+00:00", "1m ago"),
+    ("2026-10-11T11:48:00+00:00", "12m ago"),
+    ("2026-10-11T11:00:01+00:00", "59m ago"),
+    ("2026-10-11T11:00:00+00:00", "1h ago"),
+    ("2026-10-11T09:00:00+00:00", "3h ago"),
+    ("2026-10-10T12:00:01+00:00", "23h ago"),
+    ("2026-10-10T12:00:00+00:00", "10 Oct"),
+    ("2026-09-27T12:00:00+00:00", "27 Sep"),
+    ("2025-09-27T12:00:00+00:00", "27 Sep 2025"),
+    ("2026-10-11T12:05:00+00:00", "just now"),   # in the future against the server clock
+])
+def test_format_age_bands(iso, expected):
+    assert _ha(f"formatAge({json.dumps(iso)}, {json.dumps(CHECKED_AT)})") == expected
+
+
+@pytest.mark.parametrize("bad", ["yesterday", "", "NaN", "2026-13-45T99:99:99Z"])
+def test_format_age_returns_null_for_an_unreadable_time_and_time_tag_is_empty(bad):
+    assert _ha(f"formatAge({json.dumps(bad)}, {json.dumps(CHECKED_AT)})") is None
+    assert _ha(f"timeTag({json.dumps(bad)}, {json.dumps(CHECKED_AT)})") == ""
+
+
+def test_time_tag_escapes_a_hostile_time_attribute():
+    html = _ha("timeTag('2026-10-11T11:58:00+00:00\"><img src=x onerror=alert(1)>', " + json.dumps(CHECKED_AT) + ")")
+    assert "<img" not in html
+
+
+# -- the shared status vocabulary ------------------------------------------------------------
+
+SIX_CODES = ["healthy", "unhealthy", "unconfigured", "pending", "stale", "disabled"]
+SIX_WORDS = ["Healthy", "Unhealthy", "Needs setup", "Checking…", "No recent check", "Not monitored"]
+
+
+def _service_control_status_label(code: str) -> str:
+    return _run_node_utc([_extract_block(SERVICE_CONTROL_JS, "function statusLabel(")], f"statusLabel({json.dumps(code)})")
+
+
+def test_the_dashboard_and_service_control_status_words_are_equal_on_the_six_codes():
+    app_words = [_ha(f"statusLabel({json.dumps(code)})") for code in SIX_CODES]
+    control_words = [_service_control_status_label(code) for code in SIX_CODES]
+    assert app_words == control_words == SIX_WORDS
+
+
+def test_an_unknown_status_code_is_passed_through_for_the_caller_to_escape():
+    assert _ha("statusLabel('weird')") == "weird"
+    assert _ha("statusLabel('constructor')") == "constructor"
+
+
+def test_monitoring_label_for_a_switched_off_row():
+    assert _ha(f"monitoringLabel({{last_health_check: null}}, {json.dumps(CHECKED_AT)})") == "Not monitored · never checked"
+    assert _ha(f"monitoringLabel({{last_health_check: '2026-09-27T08:00:00+00:00'}}, {json.dumps(CHECKED_AT)})") == \
+        "Not monitored · last checked 27 Sep"
+
+
+# -- the poller banner --------------------------------------------------------------------------
+
+NOW_MS = "Date.parse('2026-10-11T12:00:00+00:00')"
+
+
+def _banner(payload):
+    return _ha(f"pollerBanner({json.dumps(payload)}, {NOW_MS})")
+
+
+def _row(monitoring, checked="2026-10-11T09:02:00+00:00", enabled=True):
+    return {"name": "x", "enabled": enabled, "monitoring": monitoring, "last_health_check": checked}
+
+
+def test_every_enabled_row_stale_shows_one_banner_naming_the_newest_check():
+    html = _banner({"overall_health": "unknown", "services": [_row("stale"), _row("stale", "2026-10-11T09:14:00+00:00")]})
+    assert "role=\"status\"" in html
+    assert "Health checks haven't run since 09:14. The statuses below may be out of date." in html
+
+
+def test_one_live_row_shows_no_banner_and_neither_does_an_empty_list():
+    assert _banner({"overall_health": "degraded", "services": [_row("stale"), _row("live")]}) == ""
+    assert _banner({"overall_health": "unknown", "services": []}) == ""
+    assert _banner({"overall_health": "unknown", "services": [_row("off", enabled=False)]}) == ""
+
+
+def test_an_unknown_rollup_with_nothing_ever_checked_says_so():
+    html = _banner({"overall_health": "unknown", "services": [_row("pending", None)]})
+    assert "Health checks haven't run yet." in html
+
+
+def test_an_old_last_check_reads_as_a_date_not_a_clock():
+    html = _banner({"overall_health": "unknown", "services": [_row("stale", "2026-09-27T09:02:00+00:00")]})
+    assert "since 27 Sep." in html
+
+
+# -- summarizeServices ----------------------------------------------------------------------------
+
+def test_an_unknown_overall_health_is_grey_not_red():
+    out = _ha("summarizeServices({overall_health: 'unknown', services: [], healthy_services: 0, enabled_services: 0, disabled_services: 0})")
+    assert out["overallClass"] == "text-gray-400" and out["overallText"] == "UNKNOWN"
+    assert _ha("summarizeServices({overall_health: 'unhealthy', services: [], healthy_services: 0})")["overallClass"] == "text-red-400"
+
+
+# -- the rendered dashboard -------------------------------------------------------------------------
+
+def _load_status(registry, ha_payload=None, ha_error=False):
+    """Run the real loadStatus against a stub DOM and API; returns what it wrote."""
+    sources = _app_ha_sources() + [_extract_block(APP_JS, "async function loadStatus(")]
+    prelude = f"""
+    const nodes = {{}};
+    const el = (id) => (nodes[id] = nodes[id] || {{ id, innerHTML: '', textContent: '', className: '', style: {{}} }});
+    global.document = {{ getElementById: el }};
+    global.infoIcon = () => '';
+    const registry = {json.dumps(registry)};
+    const ha = {json.dumps(ha_payload)};
+    global.apiRequest = async (path) => {{
+        if (path === '/api/service-registry/home-assistant') {{ if ({json.dumps(ha_error)}) throw new Error('boom'); return ha; }}
+        if (path === '/api/service-registry/services') {{ if (registry === null) throw new Error('registry down <b>'); return registry; }}
+        throw new Error('unexpected ' + path);
+    }};
+    """
+    expr = "loadStatus().then(() => ({ha: el('ha-status-container').innerHTML, services: el('services-by-group-container').innerHTML, errors: el('error-container').innerHTML, health: el('stat-health').textContent}))"
+    return _run_node_utc([prelude, *sources], expr)
+
+
+def _registry(*services, overall="degraded"):
+    return {"services": list(services), "overall_health": overall, "healthy_services": 0,
+            "enabled_services": len(services), "disabled_services": 0}
+
+
+def _service(name="weather", **changes):
+    base = {"name": name, "display_name": name.title(), "host": f"{name}-svc", "port": 8010, "enabled": True,
+            "health_status": "healthy", "monitoring": "live", "service_type": "rag",
+            "cache_ttl": 300, "timeout": 5, "last_health_check": "2026-10-11T11:59:00+00:00"}
+    base.update(changes)
+    return base
+
+
+def test_hostile_display_name_host_and_health_message_come_out_escaped():
+    evil = "<img src=x onerror=alert(1)>"
+    out = _load_status(_registry(_service(display_name=evil, host=evil, health_message=evil)), _ha_payload())
+    assert "<img" not in out["services"]
+    assert "&lt;img src=x onerror=alert(1)&gt;" in out["services"]
+
+
+def test_the_card_renders_when_the_registry_call_fails_and_the_registry_when_the_card_fails():
+    registry_down = _load_status(None, _ha_payload())
+    assert "Connected" in registry_down["ha"] and "Failed to load system status: registry down &lt;b&gt;" in registry_down["errors"]
+    card_down = _load_status(_registry(_service()), None, ha_error=True)
+    assert "Status unavailable" in card_down["ha"] and "Couldn&#39;t load" not in card_down["ha"]
+    assert "Couldn't load Home Assistant status." in card_down["ha"]
+    assert 'onclick="loadStatus()"' in card_down["ha"] and ">Try again</button>" in card_down["ha"]
+    assert "Weather" in card_down["services"]
+
+
+def test_the_card_markup_follows_the_binding_structure():
+    ha = _load_status(_registry(_service()), _ha_payload())["ha"]
+    assert 'id="ha-status-heading"' in ha and ">Home Assistant</h3>" in ha
+    assert 'aria-hidden="true"' in ha and "bg-green-500" in ha and "text-green-400" in ha
+    assert "style=" not in ha
+
+
+def test_a_stale_enabled_row_is_grey_labelled_no_recent_check_and_not_an_error_colour():
+    out = _load_status(_registry(_service(health_status="stale", monitoring="stale"), overall="unknown"), _ha_payload())
+    assert "No recent check" in out["services"]
+    assert "bg-gray-500" in out["services"] and "bg-red-500" not in out["services"] and "text-red-400" not in out["services"]
+    assert out["health"] == "UNKNOWN"
+    assert "Health checks haven&#39;t run" not in out["errors"] and "Health checks haven't run since" in out["errors"]
+
+
+def test_a_switched_off_row_reads_not_monitored_with_its_old_error_dated_and_grey():
+    off = _service("ha-api", enabled=False, health_status="disabled", monitoring="off", last_error="timeout:old failure",
+                   last_health_check="2026-09-27T08:00:00+00:00", last_observed_health=None)
+    out = _load_status(_registry(_service(), off, overall="healthy"), _ha_payload())["services"]
+    assert ">Not monitored</h3>" in out
+    assert "These checks are turned off in Service Control, so Athena doesn&#39;t watch them." not in out
+    assert "These checks are turned off in Service Control, so Athena doesn't watch them." in out
+    assert "check off" in out and "disabled</span>" not in out
+    assert "Not monitored · last checked" in out
+    assert "Last result before it was turned off: timeout:old failure" in out
+    assert ">Disabled<" not in out and "healthy" not in out.split("Not monitored")[1].lower().replace("these checks", "")
+
+
+def test_a_switched_off_row_never_checked_says_never_checked():
+    off = _service("ha-api", enabled=False, health_status="disabled", monitoring="off", last_health_check=None)
+    assert "Not monitored · never checked" in _load_status(_registry(_service(), off), _ha_payload())["services"]
+
+
+# -- Service Control ---------------------------------------------------------------------------------
+
+def _sc(expr: str):
+    sources = [
+        ESCAPE_HTML_JS.read_text(),
+        _extract_block(SERVICE_CONTROL_JS, "const RUN_STATE_BADGES"),
+        _extract_block(SERVICE_CONTROL_JS, "function _isNativelyRunning("),
+        _extract_block(SERVICE_CONTROL_JS, "function _healthLine("),
+        _extract_block(SERVICE_CONTROL_JS, "function statusLabel("),
+        _extract_line(SERVICE_CONTROL_JS, "const _SC_MONTHS = "),
+        _extract_line(SERVICE_CONTROL_JS, "const _SC_MONTHS_LONG = "),
+        _extract_block(SERVICE_CONTROL_JS, "function _scAgeWords("),
+        _extract_block(SERVICE_CONTROL_JS, "function servicePollerBanner("),
+        _extract_block(SERVICE_CONTROL_JS, "function _notMonitoredText("),
+        _extract_block(SERVICE_CONTROL_JS, "function renderStatusCell("),
+        _extract_block(SERVICE_CONTROL_JS, "function _freshnessChip("),
+        _extract_block(SERVICE_CONTROL_JS, "function _buildStatusAriaLabel("),
+    ]
+    return _run_node_utc(sources, expr)
+
+
+NOW = "Date.parse('2026-10-11T12:00:00+00:00')"
+
+
+def _extract_line(file_path: Path, prefix: str) -> str:
+    """The single source line starting with `prefix` (a one-line `const X = [...]`)."""
+    lines = [line for line in file_path.read_text().splitlines() if line.startswith(prefix)]
+    assert len(lines) == 1, (prefix, lines)
+    return lines[0]
+
+
+def test_freshness_chip_is_silent_for_an_off_pending_or_unchecked_row():
+    for row in ({"monitoring": "off", "last_health_check": "2026-09-27T08:00:00+00:00"},
+                {"monitoring": "pending", "last_health_check": "2026-10-11T08:00:00+00:00"},
+                {"monitoring": "stale", "last_health_check": None}):
+        assert _sc(f"_freshnessChip({json.dumps(row)}, {NOW})") is None
+
+
+def test_freshness_chip_for_a_stale_row_is_grey_with_the_checker_tooltip_and_no_red_ladder():
+    chip = _sc(f"_freshnessChip({{monitoring: 'stale', last_health_check: '2026-10-11T11:48:00+00:00'}}, {NOW})")
+    assert chip == {"text": "last checked 12m ago", "colorClass": "text-gray-500",
+                    "title": "Athena's background checker hasn't reached this service recently."}
+    old = _sc(f"_freshnessChip({{monitoring: 'stale', last_health_check: '2026-09-27T08:00:00+00:00'}}, {NOW})")
+    assert old["colorClass"] == "text-gray-500" and old["text"] == "last checked 14 days ago".replace("14 days ago", "27 Sep")
+    source = SERVICE_CONTROL_JS.read_text()
+    assert "text-red-500" not in source and "poller may be stalled" not in source
+
+
+def test_freshness_chip_for_a_live_row_is_the_plain_grey_age_between_a_minute_and_the_threshold():
+    assert _sc(f"_freshnessChip({{monitoring: 'live', last_health_check: '2026-10-11T11:59:30+00:00'}}, {NOW})") is None
+    chip = _sc(f"_freshnessChip({{monitoring: 'live', last_health_check: '2026-10-11T11:57:00+00:00'}}, {NOW})")
+    assert chip["text"] == "checked 3m ago" and chip["colorClass"] == "text-gray-500"
+
+
+def test_health_line_for_a_stale_row_is_grey_no_recent_check():
+    assert _sc("_healthLine({run_state: 'running', health_status: 'stale'})") == {"text": "No recent check", "cls": "text-gray-400"}
+
+
+def test_an_off_row_never_says_healthy_and_shows_no_red_text():
+    row = {"run_state": "disabled", "monitoring": "off", "health_status": "disabled", "last_observed_health": None,
+           "last_error": "timeout:old failure", "last_health_check": "2026-09-27T08:00:00+00:00"}
+    html = _sc(f"(() => {{ const _n = Date.now; Date.now = () => {NOW}; try {{ return renderStatusCell({json.dumps(row)}); }} finally {{ Date.now = _n; }} }})()")
+    assert "Not monitored · last checked 27 Sep" in html
+    assert "Last result before it was turned off: timeout:old failure" in html
+    assert "text-red-400" not in html and "ealthy" not in html
+
+
+def test_a_live_row_keeps_its_red_error_line():
+    row = {"run_state": "stopped", "monitoring": "live", "health_status": "unhealthy", "last_error": "timeout:slow"}
+    assert "text-red-400 mt-1\">timeout:slow" in _sc(f"renderStatusCell({json.dumps(row)})")
+
+
+@pytest.mark.parametrize("args,expected", [
+    (("Home Assistant API", "disabled", "2026-09-27T08:00:00+00:00", None, "off"),
+     "Home Assistant API: not monitored, last checked 27 September."),
+    (("Weather", "stale", "2026-10-11T11:48:00+00:00", None, "stale"),
+     "Weather: no recent check, last checked 12 minutes ago."),
+    (("Weather", "healthy", "2026-10-11T11:57:00+00:00", 12, "live"),
+     "Weather: healthy, checked 3 minutes ago, response 12ms."),
+    (("Weather", "stale", "2026-10-11T08:00:00+00:00", None, "stale"),
+     "Weather: no recent check, last checked 4 hours ago."),
+    (("Weather", "disabled", None, None, "off"), "Weather: not monitored, never checked."),
+])
+def test_the_aria_label_matches_the_screen_in_spelled_out_words(args, expected):
+    assert _sc(f"_buildStatusAriaLabel({', '.join(json.dumps(a) for a in args)}, {NOW})") == expected
+
+
+def test_the_aria_label_never_prints_raw_seconds_or_says_healthy_for_an_off_row():
+    label = _sc(f"_buildStatusAriaLabel('X', 'healthy', '2026-09-27T08:00:00+00:00', 5, 'off', {NOW})")
+    assert "seconds" not in label and "healthy" not in label
+
+
+def test_the_service_control_banner_appears_only_when_every_enabled_row_is_stale():
+    rows = [_row("stale"), _row("stale", "2026-10-11T09:14:00+00:00")]
+    html = _sc(f"servicePollerBanner({json.dumps(rows)}, {NOW})")
+    assert "Health checks haven't run since 09:14. The statuses below may be out of date." in html
+    assert _sc(f"servicePollerBanner({json.dumps([_row('stale'), _row('live')])}, {NOW})") == ""
+    assert _sc(f"servicePollerBanner([], {NOW})") == ""
+
+
+def test_the_refresh_button_is_disabled_on_a_switched_off_row():
+    source = SERVICE_CONTROL_JS.read_text()
+    assert "const refreshOff = service.monitoring === 'off';" in source
+    assert 'disabled title="Turn the check on to refresh it"' in source
+    off_line = next(line for line in source.splitlines() if 'disabled title="Turn the check on to refresh it"' in line)
+    assert "onclick" not in off_line, "the off button must not be clickable"
+
+
+# -- Mission Control --------------------------------------------------------------------------------------
+
+def _tile(status: str):
+    return _run_node_utc([_extract_block(MISSION_CONTROL_JS, "function serviceTileStyle(")], f"serviceTileStyle({json.dumps(status)})")
+
+
+@pytest.mark.parametrize("status,color,pulse,title", [
+    ("healthy", "green", False, ""),
+    ("degraded", "yellow", True, ""),
+    ("stale", "gray", False, "No recent check"),
+    ("pending", "gray", False, ""),
+    ("disabled", "gray", False, ""),
+    ("unhealthy", "red", True, ""),
+    ("unreachable", "red", True, ""),
+    ("unconfigured", "red", True, ""),
+])
+def test_mission_control_tile_colour_and_pulse(status, color, pulse, title):
+    assert _tile(status) == {"color": color, "pulse": pulse, "title": title}
+
+
+def test_the_voice_health_label_counts_the_rows_not_checked_recently():
+    source = MISSION_CONTROL_JS.read_text()
+    assert "${data.percentage}% healthy · ${data.stale_count} not checked recently" in source
+
+
+# -- the escaping gate is not vacuous on the new markup ------------------------------------------------------
+
+def test_the_handler_escaping_gate_fails_once_on_a_planted_bad_handler(tmp_path):
+    """Red-first: the same gate command CI runs, pointed at a scratch copy with
+    one deliberately unescaped quoted handler, fails; on the real tree it passes."""
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    gate = [sys.executable, str(repo / "scripts" / "check-handler-escaping.py"), "--class", "unescaped-quoted", "--max", "0"]
+    real = subprocess.run([*gate, "--dir", str(FRONTEND_DIR)], capture_output=True, text=True, timeout=120)
+    assert real.returncode == 0, real.stdout + real.stderr
+    scratch = tmp_path / "frontend"
+    shutil.copytree(FRONTEND_DIR, scratch)
+    with open(scratch / "app.js", "a", encoding="utf-8") as handle:
+        handle.write("\nfunction zzPlanted(name) { return `<button onclick=\"zz('${name}')\">x</button>`; }\n")
+    planted = subprocess.run([*gate, "--dir", str(scratch)], capture_output=True, text=True, timeout=120)
+    assert planted.returncode == 1, planted.stdout + planted.stderr

@@ -262,7 +262,10 @@
         }
 
         if (labelEl) {
-            labelEl.textContent = `${data.percentage}% healthy`;
+            // Rows the checker hasn't reached recently are out of the count; say so.
+            labelEl.textContent = data.stale_count > 0
+                ? `${data.percentage}% healthy · ${data.stale_count} not checked recently`
+                : `${data.percentage}% healthy`;
         }
 
         // Update sparkline
@@ -381,6 +384,19 @@
     }
 
     /**
+     * Pure: a service tile's colour, pulse and tooltip from its display status.
+     * Stale, pending and disabled mean "not known right now", not "down": grey,
+     * no pulse. Only a real problem is red and pulsing.
+     */
+    function serviceTileStyle(status) {
+        if (status === 'healthy') return { color: 'green', pulse: false, title: '' };
+        if (status === 'degraded') return { color: 'yellow', pulse: true, title: '' };
+        if (status === 'stale') return { color: 'gray', pulse: false, title: 'No recent check' };
+        if (status === 'pending' || status === 'disabled') return { color: 'gray', pulse: false, title: '' };
+        return { color: 'red', pulse: true, title: '' };
+    }
+
+    /**
      * Update service status grid.
      */
     function updateServiceStatus(services) {
@@ -393,13 +409,12 @@
         }
 
         container.innerHTML = services.map(service => {
-            const isHealthy = service.status === 'healthy';
-            const statusColor = isHealthy ? 'green' : service.status === 'degraded' ? 'yellow' : 'red';
+            const tile = serviceTileStyle(service.status);
 
             return `
-                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg">
-                    <div class="w-10 h-10 rounded-full bg-${statusColor}-500/20 flex items-center justify-center mb-2">
-                        <span class="w-3 h-3 rounded-full bg-${statusColor}-500 ${!isHealthy ? 'animate-pulse' : ''}"></span>
+                <div class="flex flex-col items-center p-3 bg-dark-bg rounded-lg"${tile.title ? ` title="${tile.title}"` : ''}>
+                    <div class="w-10 h-10 rounded-full bg-${tile.color}-500/20 flex items-center justify-center mb-2">
+                        <span class="w-3 h-3 rounded-full bg-${tile.color}-500 ${tile.pulse ? 'animate-pulse' : ''}"></span>
                     </div>
                     <p class="text-xs text-gray-300 text-center truncate w-full">${escapeHtml(service.name)}</p>
                     ${service.latency_ms ? `<p class="text-xs text-gray-500">${service.latency_ms}ms</p>` : ''}

@@ -14,6 +14,12 @@ let configData = {
         orchestrator: null,
         ollama: null
     },
+    // The raw /api/status word behind each bucket, for the neutral card's label.
+    serviceStatusWord: {
+        gateway: null,
+        orchestrator: null,
+        ollama: null
+    },
     activePreset: null,
     lastRefresh: null
 };
@@ -125,8 +131,10 @@ async function loadConversationSettingsForConfig() {
 function mapServiceStatusToUiBucket(service) {
     if (service.healthy) return 'healthy';
     const status = (service.status || '').toLowerCase();
+    // stale: the health checker hasn't reached the service recently, so its
+    // state is unknown, not "down" (and not "degraded").
     if (status === 'disabled' || status === 'unconfigured' ||
-        status === 'not configured' || status === 'pending') {
+        status === 'not configured' || status === 'pending' || status === 'stale') {
         return 'neutral';
     }
     if (status === 'error' || status === 'timeout' || status === 'unreachable' ||
@@ -134,6 +142,19 @@ function mapServiceStatusToUiBucket(service) {
         return 'offline';
     }
     return 'unhealthy';
+}
+
+/**
+ * The word for a neutral card: why the service is neither up nor down.
+ * 'Not Configured' stays the answer for an unconfigured or unknown status.
+ */
+function neutralLabel(status) {
+    switch ((status || '').toLowerCase()) {
+        case 'stale': return 'No recent check';
+        case 'disabled': return 'Not monitored';
+        case 'pending': return 'Checking…';
+        default: return 'Not Configured';
+    }
 }
 
 /**
@@ -157,10 +178,13 @@ async function loadServiceStatus() {
 
                 if (name.includes('gateway')) {
                     configData.serviceStatus.gateway = status;
+                    configData.serviceStatusWord.gateway = service.status;
                 } else if (name.includes('orchestrator')) {
                     configData.serviceStatus.orchestrator = status;
+                    configData.serviceStatusWord.orchestrator = service.status;
                 } else if (name.includes('ollama')) {
                     configData.serviceStatus.ollama = status;
+                    configData.serviceStatusWord.ollama = service.status;
                 }
             }
         } else {
@@ -224,18 +248,21 @@ function renderServiceStatus() {
         {
             name: 'Gateway',
             status: configData.serviceStatus.gateway,
+            word: configData.serviceStatusWord.gateway,
             port: '8000',
             description: 'Voice request routing, fast-path commands'
         },
         {
             name: 'Orchestrator',
             status: configData.serviceStatus.orchestrator,
+            word: configData.serviceStatusWord.orchestrator,
             port: '8001',
             description: 'Query processing, tool execution, LLM coordination'
         },
         {
             name: 'Ollama',
             status: configData.serviceStatus.ollama,
+            word: configData.serviceStatusWord.ollama,
             port: '11434',
             description: 'Local LLM inference (qwen2.5, llama3.1)'
         }
@@ -259,7 +286,7 @@ function renderServiceStatus() {
                                       svc.status === 'neutral' ? '➖' : '❌';
                     const statusText = svc.status === 'healthy' ? 'Healthy' :
                                       svc.status === 'unhealthy' ? 'Degraded' :
-                                      svc.status === 'neutral' ? 'Not Configured' : 'Offline';
+                                      svc.status === 'neutral' ? neutralLabel(svc.word) : 'Offline';
 
                     return `
                         <div class="bg-dark-card border border-dark-border rounded-xl p-4 hover:border-${statusColor}-500/50 transition-all">
