@@ -93,6 +93,25 @@ def test_command_refuses_before_any_send(payload):
     assert run(scenario()) == ["auth"]
 
 
+def test_command_refuses_auth_even_if_a_profile_listed_it():
+    class _Socket:
+        sent = []
+
+        async def send(self, raw):
+            self.sent.append(raw)
+
+    leaky = ha_ws.Profile("leaky", frozenset({"auth", "config/area_registry/list"}))
+    socket = _Socket()
+
+    async def scenario():
+        session = ha_ws.HAWebSocket(socket, leaky)
+        with pytest.raises(ha_ws.ForbiddenFrameType):
+            await session.command({"type": "auth"})
+
+    run(scenario())
+    assert socket.sent == []
+
+
 def test_the_pipelines_profile_may_set_a_preferred_pipeline_and_the_proof_profile_nothing():
     async def scenario():
         fake, latch, creds = fresh()
