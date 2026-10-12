@@ -211,9 +211,11 @@ def test_a_success_resets_the_failure_count():
     assert s["last_success_at"] == s["last_outcome_at"]
 
 
-def test_the_summary_has_exactly_four_keys():
+def test_the_summary_has_exactly_five_keys():
     monitor, _ = monitor_at()
-    assert set(monitor.summary()) == {"last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures"}
+    assert set(monitor.summary()) == {
+        "last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures", "ban_suspected",
+    }
 
 
 def test_a_backwards_clock_does_not_crash_and_the_latest_recorded_outcome_wins():
@@ -473,7 +475,7 @@ def test_the_newest_outcome_wins_and_success_is_the_max():
     view = merged({"a": a, "b": b})
     assert view["rest"] == {
         "last_outcome": "auth_rejected", "last_outcome_at": iso(-10),
-        "last_success_at": iso(-60), "consecutive_failures": 2,
+        "last_success_at": iso(-60), "consecutive_failures": 2, "ban_suspected": False,
     }
     assert view["replicas_reporting"] == 2
 
@@ -522,9 +524,9 @@ def test_an_entry_older_than_the_window_is_dropped_by_the_readers_clock():
 def test_malformed_entries_are_dropped_and_good_ones_kept():
     bad = [
         None, "x", [], {}, entry(0) | {"configured": "yes"}, entry(0) | {"published_at": "not a time"},
-        entry(0) | {"rest": rest_part("zzz")}, entry(0) | {"rest": rest_part("ok", "yesterday")},
-        entry(0) | {"rest": rest_part(fails=-1)}, entry(0) | {"registry": registry_part("zzz")},
-        entry(0) | {"registry": registry_part(areas="7")}, entry(0) | {"registry": registry_part(cls="weird")},
+        entry(0) | {"rest": rest_part("ok", "yesterday")},
+        entry(0) | {"rest": rest_part(fails=-1)},
+        entry(0) | {"registry": registry_part(areas="7")},
         entry(0) | {"rest": "nope"},
     ]
     entries = {f"bad{i}": value for i, value in enumerate(bad)}
@@ -1031,3 +1033,133 @@ def test_a_value_exactly_at_the_cap_is_still_parsed():
     padded = '{"k": "' + "x" * (ha_link.MAX_VALUE_BYTES - 9) + '"}'
     assert len(padded) == ha_link.MAX_VALUE_BYTES
     assert ha_link._decode_entry(padded) == {"k": "x" * (ha_link.MAX_VALUE_BYTES - 9)}
+
+
+# ---------------------------------------------------------------------------
+# Ban evidence, field-tolerant entries, and the shared sign-in state
+# ---------------------------------------------------------------------------
+
+def test_a_403_on_a_read_any_token_may_make_is_ban_evidence_and_an_ok_clears_it():
+    monitor, clock = monitor_at()
+    monitor.record_response("GET", "/api/states", 403)
+    assert monitor.summary()["ban_suspected"] is True
+    clock.advance(1)
+    monitor.record_response("GET", "/api/states", 200)
+    assert monitor.summary()["ban_suspected"] is False
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/api/services/light/turn_on"), ("GET", "/api/config/automation/config/x"), ("GET", "/api/states/light.a"),
+])
+def test_ban_evidence_comes_from_reads_only(method, path):
+    monitor, _ = monitor_at()
+    monitor.record_response(method, path, 403)
+    assert monitor.summary()["ban_suspected"] is (method == "GET" and path.startswith("/api/states"))
+
+
+def test_ban_evidence_paths_equal_the_token_proof_reads():
+    from shared import ha_auth
+
+    paths = ["/api", "/api/", "/api/states", "/api/states/light.a", "/api/states/Light.A", "/api/services", "/api/config",
+             "/api/services/light/turn_on", "/apix", "/api/states/light.a/b", "/", ""]
+    for path in paths:
+        assert ha_auth.is_token_proof("GET", path) == ha_link.ban_evidence_path(path), path
+    for method in ("POST", "PUT", "DELETE"):
+        assert ha_auth.is_token_proof(method, "/api/states") is False
+
+
+def test_an_unknown_word_drops_that_field_not_the_entry():
+    clock = Clock()
+    good = _good_entry(clock)
+    future_outcome = _with(good, rest__last_outcome="rate_limited", rest__consecutive_failures=4)
+    future_state = _with(good, registry__state="resyncing")
+    future_class = _with(good, registry__last_failure_class="ban")
+    view = ha_link.merge({"a": future_outcome, "b": future_state, "c": future_class}, clock.now, {})
+    assert view["replicas_reporting"] == 3
+    assert view["rest"]["last_success_at"] is not None, "the success the entry carried still counts"
+    only = ha_link.merge({"a": future_outcome}, clock.now, {})
+    assert only["rest"]["last_outcome"] is None and only["rest"]["consecutive_failures"] == 0
+    assert ha_link.merge({"b": future_state}, clock.now, {})["registry"]["state"] == "unavailable"
+    assert ha_link.merge({"c": future_class}, clock.now, {})["registry"]["last_failure_class"] is None
+
+
+@pytest.mark.parametrize("changes", [
+    {"rest__last_outcome": ["ok"]}, {"registry__state": {}}, {"registry__last_failure_class": [1]},
+    {"rest__last_outcome_at": "yesterday"}, {"registry__last_failure_at": 5}, {"published_at": "x"},
+    {"rest__consecutive_failures": -1}, {"configured": "yes"},
+])
+def test_a_value_that_cannot_be_read_at_all_still_drops_the_entry(changes):
+    clock = Clock()
+    assert ha_link.merge({"a": _with(_good_entry(clock), **changes)}, clock.now, {}) is None
+
+
+def test_merge_carries_the_ban_flag_from_the_entry_that_supplies_each_fact():
+    clock = Clock()
+    older = _with(_good_entry(clock, offset=-30), rest__ban_suspected=True, rest__last_outcome="forbidden")
+    newer = _with(_good_entry(clock, offset=-5), rest__ban_suspected=False)
+    assert ha_link.merge({"a": older, "b": newer}, clock.now, {})["rest"]["ban_suspected"] is False
+    assert ha_link.merge({"a": older}, clock.now, {})["rest"]["ban_suspected"] is True
+    failing = _with(_good_entry(clock), registry__state="unavailable", registry__last_failure_at=(clock.now - timedelta(seconds=2)).isoformat(),
+                    registry__last_failure_class="other", registry__ban_suspected=True)
+    assert ha_link.merge({"a": failing}, clock.now, {})["registry"]["ban_suspected"] is True
+    assert ha_link.merge({"a": _good_entry(clock)}, clock.now, {})["registry"]["ban_suspected"] is False
+    assert ha_link.merge({"a": _with(_good_entry(clock), rest__ban_suspected="yes")}, clock.now, {})["rest"]["ban_suspected"] is False
+
+
+class FakeLatch:
+    def __init__(self, summary):
+        self._summary, self.synced = summary, []
+
+    async def sync(self, snapshot):
+        self.synced.append(snapshot.digest)
+
+    def summary(self, snapshot):
+        return dict(self._summary)
+
+
+class FakeResolver:
+    def __init__(self, digest="d1"):
+        self._snapshot = type("Snap", (), {"digest": digest})()
+
+    def current(self):
+        return self._snapshot
+
+
+def test_the_publisher_syncs_the_latch_and_the_view_carries_its_summary():
+    clock = Clock()
+    monitor, _ = monitor_at(clock)
+    summary = {**ha_link.empty_auth(), "latched": True, "latched_at": iso(-10)}
+    latch = FakeLatch(summary)
+    pub = publisher(monitor, FakeRedis(), "pod-a", clock=clock, latch=latch, credentials=FakeResolver())
+    run(pub.publish_once())
+    view = pub.view()
+    assert latch.synced == ["d1"] and view["auth"] == summary and view["coverage"] == "cluster"
+    local = publisher(monitor, None, "pod-a", clock=clock, latch=latch, credentials=FakeResolver())
+    assert local.view()["auth"] == summary
+
+
+def test_without_a_latch_or_a_digest_the_view_says_so_in_one_shape():
+    clock = Clock()
+    monitor, _ = monitor_at(clock)
+    assert publisher(monitor, None, "pod-a", clock=clock).view()["auth"] == ha_link.empty_auth()
+    assert publisher(monitor, None, "pod-a", clock=clock, latch=FakeLatch({}), credentials=FakeResolver("")).view()["auth"] == ha_link.empty_auth()
+    assert set(ha_link.empty_auth()) == {
+        "latched", "latched_at", "next_probe_at", "banned_at", "failures", "budget_spent", "budget_spent_at",
+    }
+    assert ha_link.empty_view()["auth"] == ha_link.empty_auth()
+
+
+def test_configured_may_be_a_callable_asked_on_every_read():
+    clock = Clock()
+    monitor, _ = monitor_at(clock)
+    state = {"configured": False}
+    pub = publisher(monitor, None, "pod-a", clock=clock, configured=lambda: state["configured"])
+    assert pub.view()["configured"] is False
+    state["configured"] = True
+    assert pub.view()["configured"] is True
+
+
+def test_the_callers_vocabulary_is_closed_and_ha_link_owns_it():
+    assert ha_link.CALLERS == (
+        "orchestrator_rest", "orchestrator_registry", "gateway_rest", "gateway_registry", "admin_rest", "admin_ws",
+    )

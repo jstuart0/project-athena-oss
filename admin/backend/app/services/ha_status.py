@@ -58,6 +58,7 @@ REASONS = frozenset({
     "orchestrator_outdated",
     "orchestrator_blocked",
     "not_configured",
+    "ip_banned",
 })
 
 GATEWAY_VALUES = ("ok", "refused", "unavailable", "disabled", "unknown", "not_checked")
@@ -101,11 +102,21 @@ class _Section(BaseModel):
         return value
 
 
+def _real_bool(value: Any) -> bool:
+    return value is True
+
+
 class _Rest(_Section):
     last_outcome: Optional[Outcome]
     last_outcome_at: Optional[str]
     last_success_at: Optional[str]
     consecutive_failures: Optional[int]
+    ban_suspected: bool = False
+
+    @field_validator("ban_suspected", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
 
 
 class _Registry(_Section):
@@ -114,6 +125,36 @@ class _Registry(_Section):
     last_success_at: Optional[str]
     last_failure_at: Optional[str]
     last_failure_class: Optional[FailureClass]
+    ban_suspected: bool = False
+
+    @field_validator("ban_suspected", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
+
+
+class _Auth(BaseModel):
+    """The shared sign-in state an orchestrator reports. Every field is
+    optional and a malformed one reads as absent: an older or newer orchestrator
+    must never make the card say ``orchestrator_outdated`` over it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    latched: bool = False
+    latched_at: Optional[str] = None
+    banned_at: Optional[str] = None
+    budget_spent: bool = False
+    budget_spent_at: Optional[str] = None
+
+    @field_validator("latched", "budget_spent", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> bool:
+        return _real_bool(value)
+
+    @field_validator("latched_at", "banned_at", "budget_spent_at", mode="before")
+    @classmethod
+    def _time(cls, value: Any) -> Optional[str]:
+        return _iso_or_none(value)
 
 
 class _Payload(BaseModel):
@@ -122,6 +163,7 @@ class _Payload(BaseModel):
     configured: bool
     rest: _Rest
     registry: _Registry
+    auth: Optional[_Auth] = None
     coverage: Optional[str] = None
     replicas_reporting: Optional[int] = None
 
@@ -131,6 +173,16 @@ class _Payload(BaseModel):
         if not isinstance(value, bool):
             raise ValueError("configured must be a boolean")
         return value
+
+    @field_validator("auth", mode="before")
+    @classmethod
+    def _auth_or_none(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return None
+        try:
+            return _Auth.model_validate(value)
+        except ValidationError:
+            return None
 
     @field_validator("coverage", mode="before")
     @classmethod
@@ -192,6 +244,8 @@ def classify(
         "rest": {**payload.rest.model_dump(), "consecutive_failures": payload.rest.consecutive_failures or 0},
         "registry": payload.registry.model_dump(),
     }
+    if payload.auth is not None:
+        view["auth"] = payload.auth.model_dump()
     state, reason = ha_link.link_state(view)
     success_at, failure_at, _ = ha_link.link_times(view)
     failure_is_newest = failure_at is not None and (success_at is None or failure_at > success_at)

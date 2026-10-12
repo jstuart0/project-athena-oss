@@ -557,10 +557,10 @@ class AdminConfigClient:
             response.raise_for_status()
             data = response.json()
 
-            logger.info(
+            logger.debug(
                 "external_api_key_fetched",
                 service_name=service_name,
-                endpoint_url=data.get("endpoint_url")
+                has_endpoint_url=bool(data.get("endpoint_url")),
             )
             return data
 

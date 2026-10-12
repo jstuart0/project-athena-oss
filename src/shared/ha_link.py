@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import ssl
 import time
 import uuid
@@ -53,6 +54,12 @@ OUTCOMES = frozenset({"ok", "auth_rejected", "forbidden", "ha_error", "timeout",
 REGISTRY_STATES = ("refused", "unavailable", "ok", "disabled")
 FAILURE_CLASSES = frozenset({"auth", "timeout", "unreachable", "other"})
 
+# The parts of Athena that send Home Assistant traffic, for the per-caller
+# failed sign-in counts. Closed: anything else read from Redis is dropped.
+CALLERS = (
+    "orchestrator_rest", "orchestrator_registry", "gateway_rest", "gateway_registry", "admin_rest", "admin_ws",
+)
+
 COVERAGE_CLUSTER = "cluster"
 COVERAGE_REPLICA = "replica"
 REASON_REDIS_ERROR = "redis_error"
@@ -70,6 +77,7 @@ HEALTHY_STATES = frozenset({STATE_CONNECTED, STATE_ATTENTION})
 _STATES_PREFIX = "/api/states"
 _SERVICES_PREFIX = "/api/services/"
 _RELOAD_SUFFIX = "/reload"
+_ENTITY_STATE_PATH = re.compile(r"/api/states/[a-z0-9_]+\.[a-z0-9_]+")
 
 
 def utc_now() -> datetime:
@@ -105,6 +113,12 @@ def _is_evidence_path(path: str) -> bool:
     if path == _STATES_PREFIX or path.startswith(_STATES_PREFIX + "/"):
         return True
     return path.startswith(_SERVICES_PREFIX) and not path.endswith(_RELOAD_SUFFIX)
+
+
+def ban_evidence_path(path: str) -> bool:
+    """Paths any valid token may read: a 403 here is a blocked address, not a
+    permission problem (``/api``, ``/api/states`` and one entity's state)."""
+    return path in ("/api", "/api/", _STATES_PREFIX) or bool(_ENTITY_STATE_PATH.fullmatch(path))
 
 
 def evidence(method: str, path: str, status: int) -> Optional[str]:
@@ -165,6 +179,7 @@ class HALinkMonitor:
         self._last_outcome_at: Optional[datetime] = None
         self._last_success_at: Optional[datetime] = None
         self._consecutive_failures = 0
+        self._ban_suspected = False
         self.changed = asyncio.Event()
 
     def _stamp(self) -> datetime:
@@ -194,6 +209,10 @@ class HALinkMonitor:
     def record_response(self, method: str, path: str, status: int) -> None:
         outcome = evidence(method, path, status)
         if outcome is not None:
+            if outcome == OUTCOME_OK:
+                self._ban_suspected = False
+            elif outcome == "forbidden" and ban_evidence_path(path):
+                self._ban_suspected = True
             self._record(outcome)
 
     def record_exception(self, exc: BaseException) -> None:
@@ -207,6 +226,7 @@ class HALinkMonitor:
             "last_outcome_at": _iso(self._last_outcome_at),
             "last_success_at": _iso(self._last_success_at),
             "consecutive_failures": self._consecutive_failures,
+            "ban_suspected": self._ban_suspected,
         }
 
 
@@ -257,6 +277,7 @@ _DISABLED_REGISTRY: Dict[str, Any] = {
     "last_success_at": None,
     "last_failure_at": None,
     "last_failure_class": None,
+    "ban_suspected": False,
 }
 
 
@@ -272,11 +293,17 @@ def _nonneg_int(value: Any) -> Optional[int]:
 
 class _Entry:
     """One replica's validated entry with times parsed. ``None`` from
-    ``parse`` means malformed."""
+    ``parse`` means malformed.
+
+    Readers skip fields, not entries: a word this reader doesn't know in one
+    field (a newer replica's outcome, registry state or failure class) drops
+    that field's contribution and keeps the rest, so a rolling upgrade never
+    blanks a replica. A value that can't be parsed at all still drops the entry.
+    """
 
     __slots__ = (
-        "configured", "published_at", "outcome", "outcome_at", "failures", "rest_success_at",
-        "reg_state", "areas", "reg_success_at", "reg_failure_at", "reg_failure_class",
+        "configured", "published_at", "outcome", "outcome_at", "failures", "rest_success_at", "rest_ban",
+        "reg_state", "areas", "reg_success_at", "reg_failure_at", "reg_failure_class", "reg_ban",
     )
 
     @classmethod
@@ -292,14 +319,9 @@ class _Entry:
         entry = cls()
         entry.configured = raw["configured"]
         entry.published_at = published
-        outcome = rest.get("last_outcome")
-        if outcome is not None and not (isinstance(outcome, str) and outcome in OUTCOMES):
-            return None
-        entry.outcome = outcome
         failures = _nonneg_int(rest.get("consecutive_failures"))
         if failures is None:
             return None
-        entry.failures = failures
         times = {}
         for name, source in (
             ("outcome_at", rest.get("last_outcome_at")),
@@ -311,22 +333,31 @@ class _Entry:
             if source is not None and parsed is None:
                 return None
             times[name] = parsed
+        outcome = rest.get("last_outcome")
+        if outcome is not None and not isinstance(outcome, str):
+            return None
+        if outcome is not None and outcome not in OUTCOMES:
+            outcome, times["outcome_at"], failures = None, None, 0
+        entry.outcome = outcome
+        entry.failures = failures
         entry.outcome_at = times["outcome_at"]
         entry.rest_success_at = times["rest_success_at"]
         entry.reg_success_at = times["reg_success_at"]
         entry.reg_failure_at = times["reg_failure_at"]
+        entry.rest_ban = rest.get("ban_suspected") is True
         state = registry.get("state")
-        if not (isinstance(state, str) and state in REGISTRY_STATES):
+        if not isinstance(state, str):
             return None
-        entry.reg_state = state
+        entry.reg_state = state if state in REGISTRY_STATES else None
         areas = registry.get("areas")
         if areas is not None and _nonneg_int(areas) is None:
             return None
         entry.areas = areas
         failure_class = registry.get("last_failure_class")
-        if failure_class is not None and not (isinstance(failure_class, str) and failure_class in FAILURE_CLASSES):
+        if failure_class is not None and not isinstance(failure_class, str):
             return None
-        entry.reg_failure_class = failure_class
+        entry.reg_failure_class = failure_class if failure_class in FAILURE_CLASSES else None
+        entry.reg_ban = registry.get("ban_suspected") is True
         return entry
 
     def clamp(self, first_seen: datetime, skew: float) -> None:
@@ -402,7 +433,7 @@ def merge(
     latest_outcome = _newest(kept, "outcome_at")
     reg_success = _newest(kept, "reg_success_at")
     reg_failure = _newest(kept, "reg_failure_at")
-    state = next(s for s in REGISTRY_STATES if any(e.reg_state == s for e in kept))
+    state = next((s for s in REGISTRY_STATES if any(e.reg_state == s for e in kept)), "unavailable")
     return {
         "configured": any(e.configured for e in kept),
         "rest": {
@@ -410,6 +441,7 @@ def merge(
             "last_outcome_at": _iso(latest_outcome.outcome_at) if latest_outcome else None,
             "last_success_at": _iso(_latest(kept, "rest_success_at")),
             "consecutive_failures": latest_outcome.failures if latest_outcome else 0,
+            "ban_suspected": latest_outcome.rest_ban if latest_outcome else False,
         },
         "registry": {
             "state": state,
@@ -417,6 +449,7 @@ def merge(
             "last_success_at": _iso(_latest(kept, "reg_success_at")),
             "last_failure_at": _iso(_latest(kept, "reg_failure_at")),
             "last_failure_class": reg_failure.reg_failure_class if reg_failure else None,
+            "ban_suspected": reg_failure.reg_ban if reg_failure else False,
         },
         "replicas_reporting": len(kept),
     }
@@ -436,20 +469,55 @@ _REST_FAILURE_REASON = {
 }
 
 
-def link_times(view: Mapping[str, Any]) -> Tuple[Optional[datetime], Optional[datetime], bool]:
-    """``(success_at, failure_at, failure_from_registry)``: the newest success
-    (REST or registry) and the newest failure (REST outcome other than ok, or a
-    registry fetch failure), as aware UTC times. The truth table's S and F."""
+def _auth_time(auth: Mapping[str, Any], flag: str, name: str) -> Optional[datetime]:
+    return _parse_time(auth.get(name)) if auth.get(flag) is True else None
+
+
+def _failure_event(view: Mapping[str, Any]) -> Tuple[Optional[datetime], Optional[str]]:
+    """``(time, kind)`` of the newest failure event, ``kind`` one of ``rest``,
+    ``registry``, ``ban``, ``latch`` or ``budget``. A tie goes to the earlier
+    kind in that order; a time that doesn't parse contributes nothing."""
     rest = view.get("rest") or {}
     registry = view.get("registry") or _DISABLED_REGISTRY
+    auth = view.get("auth") or {}
     rest_failed = rest.get("last_outcome") not in (None, OUTCOME_OK)
-    failure_at = _parse_time(rest.get("last_outcome_at")) if rest_failed else None
-    registry_failure_at = _parse_time(registry.get("last_failure_at"))
+    candidates = (
+        (_parse_time(rest.get("last_outcome_at")) if rest_failed else None, "rest"),
+        (_parse_time(registry.get("last_failure_at")), "registry"),
+        (_parse_time(auth.get("banned_at")), "ban"),
+        (_auth_time(auth, "latched", "latched_at"), "latch"),
+        (_auth_time(auth, "budget_spent", "budget_spent_at"), "budget"),
+    )
+    best: Tuple[Optional[datetime], Optional[str]] = (None, None)
+    for at, kind in candidates:
+        if at is not None and (best[0] is None or at > best[0]):
+            best = (at, kind)
+    return best
+
+
+def link_times(view: Mapping[str, Any]) -> Tuple[Optional[datetime], Optional[datetime], bool]:
+    """``(success_at, failure_at, failure_from_registry)``: the newest success
+    (REST or registry) and the newest failure (a REST outcome other than ok, a
+    registry fetch failure, a ban, a latch or a spent budget), as aware UTC
+    times. The truth table's S and F."""
+    rest = view.get("rest") or {}
+    registry = view.get("registry") or _DISABLED_REGISTRY
     successes = [t for t in (_parse_time(rest.get("last_success_at")), _parse_time(registry.get("last_success_at"))) if t]
-    from_registry = False
-    if registry_failure_at is not None and (failure_at is None or registry_failure_at > failure_at):
-        failure_at, from_registry = registry_failure_at, True
-    return (max(successes) if successes else None), failure_at, from_registry
+    failure_at, kind = _failure_event(view)
+    return (max(successes) if successes else None), failure_at, kind == "registry"
+
+
+def _is_ban(view: Mapping[str, Any], kind: str) -> bool:
+    """B: the event that supplies F is ban evidence."""
+    if kind == "ban":
+        return True
+    if kind == "rest":
+        rest = view.get("rest") or {}
+        return rest.get("last_outcome") == "forbidden" and rest.get("ban_suspected") is True
+    if kind == "registry":
+        registry = view.get("registry") or _DISABLED_REGISTRY
+        return registry.get("ban_suspected") is True and registry.get("state") in ("unavailable", "refused")
+    return False
 
 
 def link_state(view: Mapping[str, Any]) -> Tuple[str, str]:
@@ -459,14 +527,19 @@ def link_state(view: Mapping[str, Any]) -> Tuple[str, str]:
         return STATE_NOT_CONFIGURED, "not_configured"
     rest = view.get("rest") or {}
     registry = view.get("registry") or _DISABLED_REGISTRY
-    success_at, failure_at, failure_from_registry = link_times(view)
+    success_at, _, _ = link_times(view)
+    failure_at, kind = _failure_event(view)
 
     if success_at is None and failure_at is None:
         return STATE_UNKNOWN, "waiting"  # row 2
 
     failure_newer = failure_at is not None and (success_at is None or failure_at > success_at)
     if failure_newer:
-        if failure_from_registry:
+        if _is_ban(view, kind):
+            return STATE_FAILING, "ip_banned"  # row 2a
+        if kind in ("latch", "budget"):
+            return STATE_FAILING, "token_rejected"  # row 3
+        if kind == "registry":
             failure_class = registry.get("last_failure_class")
             if failure_class == "auth":
                 return STATE_FAILING, "token_rejected"  # row 3
@@ -526,7 +599,9 @@ class HALinkPublisher:
 
     ``view()`` is synchronous, does no I/O and never raises. Redis trouble
     degrades it to this replica's own view, tagged ``coverage="replica"``.
-    ``configured`` is fixed at construction.
+    ``configured`` is a bool fixed at construction or a callable asked on each
+    read. With a ``latch`` and ``credentials`` (a resolver) the view carries the
+    shared sign-in state under ``auth``.
     """
 
     def __init__(
@@ -536,7 +611,9 @@ class HALinkPublisher:
         redis: Any,
         replica_id: str,
         *,
-        configured: bool,
+        configured: Any,
+        latch: Any = None,
+        credentials: Any = None,
         interval: float = PUBLISH_INTERVAL_SECONDS,
         min_gap: float = PUBLISH_MIN_GAP_SECONDS,
         window: float = PEER_WINDOW_SECONDS,
@@ -548,7 +625,9 @@ class HALinkPublisher:
         self._registry = registry
         self._redis = redis
         self._replica_id = replica_id
-        self._configured = configured
+        self._configured = configured if callable(configured) else (lambda: configured)
+        self._latch = latch
+        self._credentials = credentials
         self._interval = interval
         self._min_gap = min_gap
         self._window = window
@@ -571,11 +650,20 @@ class HALinkPublisher:
         else:
             registry_summary = registry.link_summary()
         return {
-            "configured": self._configured,
+            "configured": bool(self._configured()),
             "rest": self._monitor.summary(),
             "registry": registry_summary,
             "published_at": self._wall().isoformat(),
         }
+
+    def _auth(self) -> Dict[str, Any]:
+        """The shared sign-in state from the last ``latch.sync``; no I/O."""
+        if self._latch is None or self._credentials is None:
+            return empty_auth()
+        snapshot = self._credentials.current()
+        if not snapshot.digest:
+            return empty_auth()
+        return self._latch.summary(snapshot)
 
     def _local_view(self, reason: str) -> Dict[str, Any]:
         entry = self._local_entry()
@@ -583,6 +671,7 @@ class HALinkPublisher:
             "configured": entry["configured"],
             "rest": entry["rest"],
             "registry": entry["registry"],
+            "auth": self._auth(),
             "coverage": COVERAGE_REPLICA,
             "coverage_reason": reason,
             "replicas_reporting": 1,
@@ -602,6 +691,7 @@ class HALinkPublisher:
                 return self._local_view(REASON_REDIS_ERROR)
             return {
                 **self._cluster,
+                "auth": self._auth(),
                 "coverage": COVERAGE_CLUSTER,
                 "coverage_reason": None,
                 "observed_at": self._wall().isoformat(),
@@ -612,6 +702,7 @@ class HALinkPublisher:
                 "configured": False,
                 "rest": self._empty_rest(),
                 "registry": disabled_registry_summary(),
+                "auth": empty_auth(),
                 "coverage": COVERAGE_REPLICA,
                 "coverage_reason": REASON_REDIS_ERROR,
                 "replicas_reporting": 0,
@@ -620,7 +711,10 @@ class HALinkPublisher:
 
     @staticmethod
     def _empty_rest() -> Dict[str, Any]:
-        return {"last_outcome": None, "last_outcome_at": None, "last_success_at": None, "consecutive_failures": 0}
+        return {
+            "last_outcome": None, "last_outcome_at": None, "last_success_at": None,
+            "consecutive_failures": 0, "ban_suspected": False,
+        }
 
     # -- publishing -------------------------------------------------------
 
@@ -641,6 +735,7 @@ class HALinkPublisher:
             now = self._wall()
             merged = merge(entries, now, self._first_seen, self._window)
             self._prune_first_seen(entries)
+            await self._sync_auth()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -655,6 +750,13 @@ class HALinkPublisher:
         self._cluster = merged
         self._merged_at = self._monotonic() if merged is not None else None
         await self._remove_old_entries(entries, now)
+
+    async def _sync_auth(self) -> None:
+        if self._latch is None or self._credentials is None:
+            return
+        snapshot = self._credentials.current()
+        if snapshot.digest:
+            await self._latch.sync(snapshot)
 
     async def _read_fields(self) -> Dict[Any, Any]:
         """At most ``MAX_FIELDS`` fields of the hash, by HSCAN, so a hash grown by
@@ -730,6 +832,8 @@ def create_publisher(
     ha_client: Any,
     *,
     replica_id: Optional[str] = None,
+    latch: Any = None,
+    credentials: Any = None,
 ) -> HALinkPublisher:
     """The publisher a service builds in its lifespan. ``configured`` is the
     HA client's own answer (a URL and a token), so an install that has no
@@ -741,7 +845,17 @@ def create_publisher(
         redis,
         replica_id or os.getenv("HOSTNAME") or uuid.uuid4().hex,
         configured=configured,
+        latch=latch,
+        credentials=credentials,
     )
+
+
+def empty_auth() -> Dict[str, Any]:
+    """The shared sign-in state of a service with no latch."""
+    return {
+        "latched": False, "latched_at": None, "next_probe_at": None, "banned_at": None,
+        "failures": {}, "budget_spent": False, "budget_spent_at": None,
+    }
 
 
 def empty_view() -> Dict[str, Any]:
@@ -750,6 +864,7 @@ def empty_view() -> Dict[str, Any]:
         "configured": False,
         "rest": HALinkPublisher._empty_rest(),
         "registry": disabled_registry_summary(),
+        "auth": empty_auth(),
         "coverage": COVERAGE_REPLICA,
         "coverage_reason": REASON_REDIS_UNCONFIGURED,
         "replicas_reporting": 0,

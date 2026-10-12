@@ -3,7 +3,7 @@
 Runs in its own process: it imports orchestrator.main behind a stubbed
 config_loader (see test_health_probes.py for why). The response is enums,
 counts and timestamps only; the golden file tests/fixtures/ha_link/
-admin_ha_status_v1.json is what admin-backend's tests parse, so the two sides
+admin_ha_status_v2.json is what admin-backend's tests parse, so the two sides
 can't drift. Regenerate it with UPDATE_GOLDEN=1.
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ from shared import ha_link  # noqa: E402
 from shared.ha_registry import HARegistry, RegistrySnapshot  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
-GOLDEN = FIXTURES / "ha_link" / "admin_ha_status_v1.json"
+GOLDEN = FIXTURES / "ha_link" / "admin_ha_status_v2.json"
 HOUSE = json.loads((FIXTURES / "ha_registry" / "house_a.json").read_text(encoding="utf-8"))
 AREA_NAMES = [
     a["name"] for a in HOUSE["areas"]
@@ -56,9 +56,10 @@ TOKEN = "sekret-token-123"
 HOST = "ha.test"
 T0 = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
 
-TOP_KEYS = {"configured", "rest", "registry", "coverage", "coverage_reason", "replicas_reporting", "observed_at"}
-REST_KEYS = {"last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures"}
-REGISTRY_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class"}
+TOP_KEYS = {"configured", "rest", "registry", "auth", "coverage", "coverage_reason", "replicas_reporting", "observed_at"}
+REST_KEYS = {"last_outcome", "last_outcome_at", "last_success_at", "consecutive_failures", "ban_suspected"}
+REGISTRY_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class", "ban_suspected"}
+AUTH_KEYS = {"latched", "latched_at", "next_probe_at", "banned_at", "failures", "budget_spent", "budget_spent_at"}
 
 
 class FakeRedis:
@@ -161,6 +162,7 @@ def test_exact_key_sets_at_every_level(monkeypatch, client):
     assert set(body) == TOP_KEYS
     assert set(body["rest"]) == REST_KEYS
     assert set(body["registry"]) == REGISTRY_KEYS
+    assert set(body["auth"]) == AUTH_KEYS
 
 
 def test_not_configured_and_registry_missing_shapes(monkeypatch, client):
@@ -172,11 +174,13 @@ def test_not_configured_and_registry_missing_shapes(monkeypatch, client):
     assert body["configured"] is False
     assert body["registry"] == {
         "state": "disabled", "areas": None, "last_success_at": None,
-        "last_failure_at": None, "last_failure_class": None,
+        "last_failure_at": None, "last_failure_class": None, "ban_suspected": False,
     }
     assert body["rest"] == {
         "last_outcome": None, "last_outcome_at": None, "last_success_at": None, "consecutive_failures": 0,
+        "ban_suspected": False,
     }
+    assert body["auth"] == ha_link.empty_auth()
     assert set(body) == TOP_KEYS
 
 

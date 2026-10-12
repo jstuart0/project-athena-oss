@@ -683,10 +683,10 @@ def wall_registry(fetcher, **kwargs):
     return hr.HARegistry(fetcher, monotonic=Clock(), wall=lambda: WALL[0], **kwargs)
 
 
-LINK_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class"}
+LINK_KEYS = {"state", "areas", "last_success_at", "last_failure_at", "last_failure_class", "ban_suspected"}
 
 
-def test_link_summary_has_exactly_five_keys_and_no_names():
+def test_link_summary_has_exactly_six_keys_and_no_names():
     reg = wall_registry(FakeFetcher())
     run(reg.ensure(1))
     summary = reg.link_summary()
@@ -700,7 +700,7 @@ def test_link_summary_has_exactly_five_keys_and_no_names():
 def test_a_disabled_registry_summarises_as_disabled_with_nothing_else():
     assert hr.HARegistry(None).link_summary() == {
         "state": "disabled", "areas": None, "last_success_at": None,
-        "last_failure_at": None, "last_failure_class": None,
+        "last_failure_at": None, "last_failure_class": None, "ban_suspected": False,
     }
 
 

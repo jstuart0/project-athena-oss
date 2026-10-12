@@ -9496,6 +9496,7 @@ async def ha_status():
         "configured": view["configured"],
         "rest": view["rest"],
         "registry": view["registry"],
+        "auth": view["auth"],
         "coverage": view["coverage"],
         "coverage_reason": view["coverage_reason"],
         "replicas_reporting": view["replicas_reporting"],

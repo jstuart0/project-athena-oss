@@ -851,6 +851,676 @@
       "state": "connected",
       "reason": "ok",
       "home_assistant": true
+    },
+    {
+      "id": "ban_rest_read_403_failing_at_once",
+      "row": "2a",
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1,
+          "ban_suspected": true
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "ip_banned",
+      "home_assistant": false
+    },
+    {
+      "id": "rest_services_403_without_ban_evidence_stays_attention",
+      "row": 4,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1,
+          "ban_suspected": false
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "attention",
+      "reason": "forbidden",
+      "home_assistant": true
+    },
+    {
+      "id": "ban_registry_handshake_403_no_success",
+      "row": "2a",
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other",
+          "ban_suspected": true
+        }
+      },
+      "state": "failing",
+      "reason": "ip_banned",
+      "home_assistant": false
+    },
+    {
+      "id": "ban_registry_handshake_403_after_older_success",
+      "row": "2a",
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other",
+          "ban_suspected": true
+        }
+      },
+      "state": "failing",
+      "reason": "ip_banned",
+      "home_assistant": false
+    },
+    {
+      "id": "ban_older_than_success_is_connected",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:20:00+00:00",
+          "last_success_at": null,
+          "consecutive_failures": 1,
+          "ban_suspected": true
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "latched_newer_than_success",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:59:00+00:00",
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "latched_older_than_success_is_ignored",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:20:00+00:00",
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "latched_with_nothing_else",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": null,
+          "last_outcome_at": null,
+          "last_success_at": null,
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "disabled",
+          "areas": null,
+          "last_success_at": null,
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:59:00+00:00",
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "ban_beats_token_rejected_when_newest",
+      "row": "2a",
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1,
+          "ban_suspected": true
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:50:00+00:00",
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "failing",
+      "reason": "ip_banned",
+      "home_assistant": false
+    },
+    {
+      "id": "failures_counted_while_connected_stay_connected",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {
+            "gateway_rest": {
+              "count": 3,
+              "last_at": "2026-10-11T11:10:00+00:00"
+            }
+          },
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "v1_view_without_new_keys",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "ban_flag_stale_but_newest_failure_is_connect_error",
+      "row": 6,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "unreachable",
+          "last_outcome_at": "2026-10-11T11:59:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1,
+          "ban_suspected": true
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        }
+      },
+      "state": "failing",
+      "reason": "unreachable",
+      "home_assistant": false
+    },
+    {
+      "id": "ban_rest_older_than_registry_other_failure",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "forbidden",
+          "last_outcome_at": "2026-10-11T11:50:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 1,
+          "ban_suspected": true
+        },
+        "registry": {
+          "state": "unavailable",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other",
+          "ban_suspected": false
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "ban_registry_flag_but_registry_state_ok",
+      "row": 7,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": "2026-10-11T11:59:00+00:00",
+          "last_failure_class": "other",
+          "ban_suspected": true
+        }
+      },
+      "state": "attention",
+      "reason": "registry_unavailable",
+      "home_assistant": true
+    },
+    {
+      "id": "latched_not_configured",
+      "row": 1,
+      "view": {
+        "configured": false,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:59:00+00:00",
+          "next_probe_at": null,
+          "banned_at": "2026-10-11T11:59:00+00:00",
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "not_configured",
+      "reason": "not_configured",
+      "home_assistant": false
+    },
+    {
+      "id": "token_rejected_beats_older_ban",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:59:00+00:00",
+          "next_probe_at": null,
+          "banned_at": "2026-10-11T11:50:00+00:00",
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "latched_at_equals_success_at",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": "2026-10-11T11:30:00+00:00",
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "latched_without_latched_at",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": true,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "ban_seen_by_gateway_only",
+      "row": "2a",
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": "2026-10-11T11:59:00+00:00",
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "failing",
+      "reason": "ip_banned",
+      "home_assistant": false
+    },
+    {
+      "id": "banned_at_older_than_success",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": "2026-10-11T11:20:00+00:00",
+          "failures": {},
+          "budget_spent": false,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "budget_spent_newer_than_success",
+      "row": 3,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": true,
+          "budget_spent_at": "2026-10-11T11:59:00+00:00"
+        }
+      },
+      "state": "failing",
+      "reason": "token_rejected",
+      "home_assistant": false
+    },
+    {
+      "id": "budget_spent_older_than_success_is_connected",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": true,
+          "budget_spent_at": "2026-10-11T11:20:00+00:00"
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
+    },
+    {
+      "id": "budget_spent_without_spent_at",
+      "row": 10,
+      "view": {
+        "configured": true,
+        "rest": {
+          "last_outcome": "ok",
+          "last_outcome_at": "2026-10-11T11:30:00+00:00",
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "consecutive_failures": 0
+        },
+        "registry": {
+          "state": "ok",
+          "areas": 7,
+          "last_success_at": "2026-10-11T11:30:00+00:00",
+          "last_failure_at": null,
+          "last_failure_class": null
+        },
+        "auth": {
+          "latched": false,
+          "latched_at": null,
+          "next_probe_at": null,
+          "banned_at": null,
+          "failures": {},
+          "budget_spent": true,
+          "budget_spent_at": null
+        }
+      },
+      "state": "connected",
+      "reason": "ok",
+      "home_assistant": true
     }
   ]
 }

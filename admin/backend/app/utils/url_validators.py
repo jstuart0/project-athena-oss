@@ -22,6 +22,9 @@ from urllib.parse import urlparse
 
 import structlog
 
+from shared.url_safety import is_local_host as _is_local_host
+from shared.url_safety import validate_service_host
+
 logger = structlog.get_logger()
 
 
@@ -36,54 +39,24 @@ def validate_host(v: str) -> str:
     """
     Reject empty hosts and known SSRF-exploit targets at the write boundary.
 
-    Blocks:
-    - Cloud IMDS addresses (169.254.169.254, IPv6 equivalents)
-    - Loopback / unspecified / multicast IP ranges
-    - Kubernetes control-plane cluster-local DNS suffixes
-
-    RFC1918 private addresses (10.x, 172.16-31.x, 192.168.x) are ALLOWED
-    with a warning because homelab services legitimately run on RFC1918.
-    A runtime allowlist for the background health poller lands in Phase 4
-    (xander HIGH-1 from r1 codex); this validator is the write-boundary layer.
+    The rule itself lives in ``shared.url_safety.validate_service_host`` so the
+    runtime readers of a service address apply the same one. This wrapper
+    keeps the admin warning for RFC1918 addresses, which homelab services
+    legitimately use; a runtime allowlist for the background health poller is
+    the other layer (xander HIGH-1 from r1 codex).
     """
-    if not v:
-        raise ValueError('host is required')
-    v = v.strip()
-    if not v:
-        raise ValueError('host cannot be blank')
-
-    # Reject Kubernetes control-plane DNS suffixes regardless of whether the
-    # value is also a valid IP (belt-and-suspenders).
-    if v.endswith('.cluster.local') or v.endswith('.svc'):
-        raise ValueError(
-            f'host {v!r} resolves to a k8s cluster-internal address (forbidden)'
-        )
-
+    host = validate_service_host(v)
     try:
-        ip = ipaddress.ip_address(v)
+        ip = ipaddress.ip_address(host)
     except ValueError:
-        # Not a parseable IP — it's a hostname; allow it after suffix check.
-        return v
-
-    # Cloud IMDS — always reject
-    if v in ('169.254.169.254', '::ffff:169.254.169.254', 'fe80::1'):
-        raise ValueError(f'host {v} is a forbidden cloud metadata address')
-    if ip.is_link_local:
-        raise ValueError(f'host {v} is a link-local address (forbidden SSRF range)')
-    if ip.is_loopback:
-        raise ValueError(f'host {v} is a loopback address')
-    if ip.is_multicast:
-        raise ValueError(f'host {v} is a multicast address')
-    if ip.is_unspecified:
-        raise ValueError(f'host {v} is an unspecified address')
-    # RFC1918 allowed — homelab services run on private IPs
+        return host
     if ip.is_private:
         logger.warning(
             "service_host_is_rfc1918",
-            host=v,
+            host=host,
             note="allowed for homelab deployments; Phase 4 adds runtime allowlist",
         )
-    return v
+    return host
 
 
 def validate_health_endpoint(v: Optional[str]) -> Optional[str]:
@@ -150,30 +123,8 @@ def validate_endpoint_url(v: str) -> str:
 
 
 def is_local_host(hostname: str | None) -> bool:
-    """True iff hostname is loopback or RFC1918 or ULA, AND the process is not in a K8s pod.
-
-    Returns False when KUBERNETES_SERVICE_HOST is set in the environment,
-    regardless of hostname — K8s pods are never a "local dev" environment
-    even if cluster service IPs fall in RFC1918 ranges (xander M4).
-
-    Link-local (169.254/16, fe80::/10) is intentionally excluded — APIPA
-    addresses are not legitimate database targets (bob M1).
-    """
-    import os
-
-    if os.getenv("KUBERNETES_SERVICE_HOST") or os.getenv("IN_CLUSTER", "").lower() == "true":
-        return False
-    if not hostname:
-        return False
-    if hostname in ("localhost", "::1"):
-        return True
-    try:
-        ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        return False
-    if ip.is_link_local:
-        return False
-    return ip.is_loopback or ip.is_private
+    """See ``shared.url_safety.is_local_host``; kept here for existing callers."""
+    return _is_local_host(hostname)
 
 
 def redact_url_userinfo(url: str) -> str:

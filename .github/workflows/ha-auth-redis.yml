@@ -1,0 +1,99 @@
+name: Home Assistant auth on real Redis
+
+# The failed sign-in budget (src/shared/ha_auth.py) decides with Lua scripts on a
+# Redis server: a lease and a reservation taken together, an epoch that fences
+# refunds, a counter with no TTL. The unit tests run those rules against an
+# in-memory mirror; this job runs the same scenario table against a real server,
+# with a str client and a bytes client, under both redis-py versions the images
+# lock (8.1.0 in the orchestrator and gateway, 5.0.1 in admin-backend).
+
+on:
+  pull_request:
+    paths:
+      - "src/shared/ha_auth.py"
+      - "src/shared/ha_http.py"
+      - "src/shared/ha_ws.py"
+      - "src/shared/ha_registry.py"
+      - "src/shared/ha_credentials.py"
+      - "admin/backend/app/services/ha_access.py"
+      - "tests/unit/ha_auth_scenarios.py"
+      - "tests/unit/ha_auth_fakes.py"
+      - "tests/unit/test_ha_auth_*.py"
+      - "tests/integration/test_ha_auth_real_redis.py"
+      - "src/orchestrator/requirements.txt"
+      - "src/orchestrator/requirements-test.txt"
+      - "admin/backend/requirements.txt"
+      - "admin/backend/requirements-test.txt"
+      - ".github/workflows/ha-auth-redis.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/shared/ha_auth.py"
+      - "src/shared/ha_http.py"
+      - "src/shared/ha_ws.py"
+      - "src/shared/ha_registry.py"
+      - "src/shared/ha_credentials.py"
+      - "admin/backend/app/services/ha_access.py"
+      - "tests/unit/ha_auth_scenarios.py"
+      - "tests/unit/ha_auth_fakes.py"
+      - "tests/unit/test_ha_auth_*.py"
+      - "tests/integration/test_ha_auth_real_redis.py"
+      - "src/orchestrator/requirements.txt"
+      - "src/orchestrator/requirements-test.txt"
+      - "admin/backend/requirements.txt"
+      - "admin/backend/requirements-test.txt"
+      - ".github/workflows/ha-auth-redis.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  real-redis:
+    name: scenario table on real Redis (${{ matrix.lock }} lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        lock: [orchestrator, admin]
+    services:
+      redis:
+        image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7.4, multi-arch index
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the matrix lock (hash-locked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.lock }}" = "orchestrator" ]; then
+            python3 -m pip install --require-hashes -r src/orchestrator/requirements.txt -r src/orchestrator/requirements-test.txt
+          else
+            python3 -m pip install --require-hashes -r admin/backend/requirements-test.txt
+          fi
+          python3 -m pip install --no-deps -e src/shared
+
+      - name: Show the redis-py version under test
+        shell: bash
+        run: |
+          python3 -c "import redis; print('redis-py', redis.__version__)"
+
+      - name: Run the scenario table and the end-to-end cases on real Redis
+        shell: bash
+        env:
+          HA_AUTH_TEST_REDIS_URL: redis://localhost:6379/15
+        run: |
+          python3 -m pytest -q -p no:cacheprovider -m integration tests/integration/test_ha_auth_real_redis.py

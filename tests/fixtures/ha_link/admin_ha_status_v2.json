@@ -1,0 +1,31 @@
+{
+  "auth": {
+    "banned_at": null,
+    "budget_spent": false,
+    "budget_spent_at": null,
+    "failures": {},
+    "latched": false,
+    "latched_at": null,
+    "next_probe_at": null
+  },
+  "configured": true,
+  "coverage": "cluster",
+  "coverage_reason": null,
+  "observed_at": "2026-10-11T12:00:00+00:00",
+  "registry": {
+    "areas": 9,
+    "ban_suspected": false,
+    "last_failure_at": null,
+    "last_failure_class": null,
+    "last_success_at": "2026-10-11T11:58:00+00:00",
+    "state": "ok"
+  },
+  "replicas_reporting": 1,
+  "rest": {
+    "ban_suspected": false,
+    "consecutive_failures": 0,
+    "last_outcome": "ok",
+    "last_outcome_at": "2026-10-11T11:59:30+00:00",
+    "last_success_at": "2026-10-11T11:59:30+00:00"
+  }
+}

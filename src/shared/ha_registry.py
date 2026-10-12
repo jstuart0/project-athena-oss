@@ -24,8 +24,6 @@ the exception class and counts only.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import re
 import ssl
@@ -36,6 +34,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 import structlog
+
+from shared.ha_credentials import legacy_marker_digest, websocket_url
 
 logger = structlog.get_logger(__name__)
 
@@ -396,15 +396,6 @@ async def _send(ws: Any, payload: Dict[str, Any]) -> None:
     await ws.send(json.dumps(payload))
 
 
-def websocket_url(ha_url: str) -> str:
-    base = ha_url.strip().rstrip("/")
-    if base.startswith("https://"):
-        base = "wss://" + base[len("https://"):]
-    elif base.startswith("http://"):
-        base = "ws://" + base[len("http://"):]
-    return base + "/api/websocket"
-
-
 def _silent_logger():
     import logging
 
@@ -476,14 +467,7 @@ STATE_UNAVAILABLE = "unavailable"
 STATE_OK = "ok"
 
 
-def token_marker_key(token: str, service_api_key: Optional[str]) -> Optional[str]:
-    """The Redis marker suffix for a token: an HMAC of it keyed on the
-    service key (so no token material is in Redis), or None when there is no
-    service key to key it on."""
-    if not token or not service_api_key:
-        return None
-    digest = hmac.new(service_api_key.encode(), token.encode(), hashlib.sha256).hexdigest()
-    return digest[:16]
+token_marker_key = legacy_marker_digest
 
 
 def _failure_class(exc: BaseException) -> str:
@@ -530,6 +514,7 @@ class HARegistry:
         self._last_success_at: Optional[datetime] = None
         self._last_failure_at: Optional[datetime] = None
         self._last_failure_class: Optional[str] = None
+        self._ban_suspected = False
         self._snapshot: Optional[RegistrySnapshot] = None
         self._state = STATE_DISABLED if fetcher is None else STATE_UNAVAILABLE
         self._last_attempt: Optional[float] = None
@@ -556,6 +541,7 @@ class HARegistry:
             "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
             "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
             "last_failure_class": self._last_failure_class,
+            "ban_suspected": self._ban_suspected,
         }
 
     def _note_failure(self, failure_class: str) -> None:

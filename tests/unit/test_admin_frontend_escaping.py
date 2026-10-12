@@ -1270,9 +1270,15 @@ def _python_reasons() -> set[str]:
     raise AssertionError("REASONS not found in ha_status.py")
 
 
+# Reasons the backend can already report whose card copy lands with the frontend
+# phase (status-vocab.js). Until then an unknown reason reads "Status unknown".
+# The frontend phase empties this set and the length below becomes 16.
+PENDING_JS_REASONS = {"ip_banned"}
+
+
 def test_the_js_reason_map_has_exactly_the_python_reason_set():
     js_keys = set(_ha("Object.keys(HA_REASON_COPY)"))
-    assert js_keys == _python_reasons()
+    assert js_keys == _python_reasons() - PENDING_JS_REASONS
     assert len(js_keys) == 15
     assert "gateway_token_rejected" not in js_keys and "gateway_token_rejected" not in _python_reasons()
 

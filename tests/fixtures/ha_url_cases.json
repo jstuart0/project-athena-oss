@@ -1,0 +1,205 @@
+{
+ "comment": "ha_url_problem(url, source=...) results for a process outside a Kubernetes pod. Shared by test_ha_credentials.py and the admin key write-boundary test.",
+ "cases": [
+  {
+   "url": "https://ha.example.invalid",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://192.168.1.20:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://ha.example.invalid:8123/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "https://[2001:db8::1]:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "",
+   "env": "empty",
+   "admin": "empty"
+  },
+  {
+   "url": "ftp://ha.example.invalid",
+   "env": "bad_scheme",
+   "admin": "bad_scheme"
+  },
+  {
+   "url": "ws://ha.example.invalid",
+   "env": "bad_scheme",
+   "admin": "bad_scheme"
+  },
+  {
+   "url": "http://user:pass@ha.example.invalid/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://a@b/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha\\host/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha host/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha\thost/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha\u0000host/",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha.example.invalid/\n",
+   "env": "unsafe_character",
+   "admin": "unsafe_character"
+  },
+  {
+   "url": "http://ha.example.invalid/?token=1",
+   "env": "query",
+   "admin": "query"
+  },
+  {
+   "url": "http://ha.example.invalid/#frag",
+   "env": "fragment",
+   "admin": "fragment"
+  },
+  {
+   "url": "http://ha.example.invalid/api",
+   "env": "path",
+   "admin": "path"
+  },
+  {
+   "url": "http://ha.example.invalid:99999",
+   "env": "port",
+   "admin": "port"
+  },
+  {
+   "url": "http://ha.example.invalid:0",
+   "env": "port",
+   "admin": "port"
+  },
+  {
+   "url": "http://ha.example.invalid:abc",
+   "env": "unparseable",
+   "admin": "unparseable"
+  },
+  {
+   "url": "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "env": "too_long",
+   "admin": "too_long"
+  },
+  {
+   "url": "http://169.254.169.254/",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://169.254.10.10:8123",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://224.0.0.1",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://0.0.0.0:8123",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[fd00:ec2::254]",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[fe80::1]:8123",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[ff02::1]",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[::]",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[::ffff:a9fe:a9fe]/",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://[::ffff:169.254.169.254]/",
+   "env": "blocked_address",
+   "admin": "blocked_address"
+  },
+  {
+   "url": "http://homeassistant.svc:8123",
+   "env": null,
+   "admin": "host_not_allowed"
+  },
+  {
+   "url": "http://ha.default.svc.cluster.local:8123",
+   "env": null,
+   "admin": "host_not_allowed"
+  },
+  {
+   "url": "http://localhost:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://127.0.0.1:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://[::1]:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://[::ffff:127.0.0.1]:8123",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://2852039166/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://0xa9fea9fe/",
+   "env": null,
+   "admin": null
+  },
+  {
+   "url": "http://169.254.43518/",
+   "env": null,
+   "admin": null
+  }
+ ]
+}

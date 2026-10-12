@@ -455,11 +455,16 @@ def test_home_assistant_is_false_before_any_contact_and_when_not_configured():
 
 def test_an_unrelated_forbidden_response_does_not_fail_the_link_until_three_in_a_row():
     _runtime.set_llm_router(_make_fake_llm())
-    monitor = _monitor_with(200, 403)
+    from shared import ha_link
+
+    monitor = ha_link.HALinkMonitor()
+    monitor.record_response("GET", "/api/states", 200)
+    forbidden = ("POST", "/api/services/light/turn_on", 403)  # a service call, not a read any token may make
+    monitor.record_response(*forbidden)
     _runtime.set_ha_link_publisher(_link_publisher(monitor)[1])
     assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is True
-    monitor.record_response("GET", "/api/states", 403)
-    monitor.record_response("GET", "/api/states", 403)
+    monitor.record_response(*forbidden)
+    monitor.record_response(*forbidden)
     assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is False
 
 
