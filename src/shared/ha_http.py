@@ -144,23 +144,68 @@ class HATransport(httpx.AsyncBaseTransport):
             admission = await self._admit(snapshot, request, method, path, key)
             if isinstance(admission, httpx.Response):
                 return admission
-            result = "other"
+            if admission.kind == ha_auth.CANARY:
+                return await self._send_canary(snapshot, request, admission, key)
+            return await self._send_admitted(snapshot, request, admission, key)
+
+    async def _send_admitted(
+        self, snapshot: HACredentials, request: httpx.Request, admission: ha_auth.Admission, key: str,
+        *, timeout: Optional[float] = None,
+    ) -> httpx.Response:
+        result = "other"
+        try:
+            request.headers["Authorization"] = _bearer(snapshot, request)
+            self._sent_since_withheld = True
+            # From here the request may have reached Home Assistant and been counted: an error
+            # that isn't a failure to connect, and a cancellation, keep a reservation spent
+            # (as in ha_ws). Only something before the header is attached gives it back.
+            result = "unreachable_sent"
             try:
-                request.headers["Authorization"] = _bearer(snapshot, request)
-                self._sent_since_withheld = True
-                # From here the request may have reached Home Assistant and been counted: an error
-                # that isn't a failure to connect, and a cancellation, keep a reservation spent
-                # (as in ha_ws). Only something before the header is attached gives it back.
-                result = "unreachable_sent"
-                try:
+                if timeout is None:
                     response = await self._inner_send(request)
-                except (httpx.ConnectError, httpx.ConnectTimeout):
-                    result = "other"  # it never got there: the reservation is given back
-                    raise
-                result = self._result_for(request, response.status_code)
-                return response
-            finally:
-                await self._latch.observe(snapshot, admission, caller=self._caller, key=key, result=result)
+                else:
+                    response = await asyncio.wait_for(self._inner_send(request), timeout)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                result = "other"  # it never got there: the reservation is given back
+                raise
+            except asyncio.TimeoutError:
+                # Cut off after the header: it may have been counted, so it stays spent.
+                error = httpx.ReadTimeout("canary request timed out", request=request)
+                if self._monitor is not None:
+                    self._monitor.record_exception(error)
+                raise error from None
+            result = self._result_for(request, response.status_code)
+            return response
+        finally:
+            await self._latch.observe(snapshot, admission, caller=self._caller, key=key, result=result)
+
+    async def _send_canary(
+        self, snapshot: HACredentials, request: httpx.Request, admission: ha_auth.Admission, key: str,
+    ) -> httpx.Response:
+        """A canary decides whether a proof still holds, so it finishes and settles even if its
+        caller goes away: it runs as its own task, bounded by ``CANARY_TIMEOUT`` (shorter than
+        the stale lease that guards it), and a cancelled caller only stops waiting for it."""
+        timeouts = dict(request.extensions.get("timeout") or {})
+        timeouts["connect"] = min(timeouts.get("connect") or ha_auth.CANARY_TIMEOUT, ha_auth.CANARY_TIMEOUT / 2)
+        request.extensions["timeout"] = timeouts
+        task = asyncio.ensure_future(
+            self._send_admitted(snapshot, request, admission, key, timeout=ha_auth.CANARY_TIMEOUT)
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(self._discard_orphan)
+            raise
+
+    def _discard_orphan(self, task: "asyncio.Task[httpx.Response]") -> None:
+        """Nobody is waiting for this canary any more: read its outcome and close its response."""
+        if task.cancelled() or task.exception() is not None:
+            return
+        closing = asyncio.ensure_future(task.result().aclose())
+        self._tasks.add(closing)
+        closing.add_done_callback(self._tasks.discard)
 
     @staticmethod
     def _json_body(request: httpx.Request) -> Any:

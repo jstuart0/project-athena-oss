@@ -18,7 +18,8 @@ How a request is admitted (``HAAuthLatch.admit``, first match wins):
    the latch;
 4. an unseen route sends **one canary** first, from a smaller allowance, so
    the proof always keeps its slot;
-5. a proof older than ``CANARY_AFTER`` sends a stale canary first;
+5. a proof older than ``CANARY_AFTER`` sends a stale canary first, under a lease that
+   outlives it (``STALE_LEASE`` > ``CANARY_TIMEOUT``);
 6. otherwise the request is ``OPEN``.
 
 The decision state lives in Redis: ``budget:v2`` (no TTL: Home Assistant's own
@@ -73,6 +74,8 @@ LEGACY_MARKER_PREFIX = "athena:ha_registry:refused:"
 BUDGET = 3
 REQUEST_ALLOWANCE = BUDGET - 1
 PROOF_TIMEOUT = 8.0
+CANARY_TIMEOUT = 8.0  # a canary request is cut off here, so its lease can outlive it
+STALE_LEASE = CANARY_TIMEOUT + 2.0
 GATE_LEASE = 10.0
 GATE_WAIT = 5.0
 PROVEN_TTL = 600
@@ -364,6 +367,12 @@ if lowered < r then lowered = r end
 redis.call('HSET', KEYS[1], 'n', lowered)
 if lowered < budget then redis.call('HDEL', KEYS[1], 'spent_at') end
 return lowered
+"""
+
+RELEASE_LEASE = """
+-- KEYS: lease. ARGV: holder. Compare and delete.
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
 """
 
 
@@ -807,12 +816,19 @@ def _mirror_reopen(store: MemoryRedis, keys, args):
     return lowered
 
 
+def _mirror_release_lease(store: MemoryRedis, keys, args):
+    if store._raw_get(keys[0]) == args[0]:
+        return store._delete(keys[0])
+    return 0
+
+
 _MIRRORS = {
     RESERVE_PROOF: _mirror_reserve_proof,
     RESERVE_REQUEST: _mirror_reserve_request,
     SETTLE: _mirror_settle,
     CLEAR_ON_AUTH_OK: _mirror_clear_on_auth_ok,
     REOPEN: _mirror_reopen,
+    RELEASE_LEASE: _mirror_release_lease,
 }
 
 
@@ -949,6 +965,7 @@ class HAAuthLatch:
         redis_timeout: float = 0.25,
         sleep: Callable[[float], Any] = asyncio.sleep,
         gate_lease: float = GATE_LEASE,
+        stale_lease: float = STALE_LEASE,
         gate_wait: float = GATE_WAIT,
         canary_after: float = CANARY_AFTER,
         proven_ttl: int = PROVEN_TTL,
@@ -972,6 +989,7 @@ class HAAuthLatch:
         self._redis_timeout = redis_timeout
         self._sleep = sleep
         self._gate_lease = gate_lease
+        self._stale_lease = stale_lease
         self._gate_wait = gate_wait
         self._canary_after = canary_after
         self._proven_ttl = proven_ttl
@@ -984,6 +1002,7 @@ class HAAuthLatch:
             for name, source in (
                 ("reserve_proof", RESERVE_PROOF), ("reserve_request", RESERVE_REQUEST),
                 ("settle", SETTLE), ("clear_on_auth_ok", CLEAR_ON_AUTH_OK), ("reopen", REOPEN),
+                ("release_lease", RELEASE_LEASE),
             )
         }
         self._local_proof: Dict[str, Tuple[str, int]] = {}
@@ -991,6 +1010,9 @@ class HAAuthLatch:
         # may still be stored there, so nothing for this digest is admitted OPEN
         # until the settlement has been retried.
         self._unsettled: Dict[str, List[Tuple[Admission, str, str, str]]] = {}
+        # A real rejection whose settlement is being awaited right now: the digest is closed
+        # locally from the moment the 401 arrives, not from the moment the settlement fails.
+        self._pending: Dict[str, List[Tuple[Admission, str, str, str]]] = {}
         self._retrying: Set[str] = set()
         self._local_seen: Set[Tuple[str, str]] = set()
         self._route_canaries: Set[Tuple[str, str]] = set()
@@ -1148,6 +1170,8 @@ class HAAuthLatch:
         digest = snapshot.digest
         if digest in self._retrying or self._unsettled.get(digest):
             return await self._retry_unsettled(snapshot)
+        if self._pending.get(digest):
+            return _WAIT
         now = self._now_ms()
         latch = state.latch
         if latch is None and state.legacy:
@@ -1249,7 +1273,7 @@ class HAAuthLatch:
         holder = f"{self._instance}:{uuid.uuid4().hex[:8]}"
         try:
             if not await self._bounded(self._redis.set(
-                self._k("stale:v1", digest), holder, nx=True, px=int(self._gate_lease * 1000),
+                self._k("stale:v1", digest), holder, nx=True, px=int(self._stale_lease * 1000),
             )):
                 self._stale_canaries.discard(digest)
                 return _WAIT
@@ -1376,6 +1400,7 @@ class HAAuthLatch:
             self._note_redis_failure(exc)
         finally:
             self._release_canary(admission)
+            await self._release_stale_lease(snapshot, admission)
             self._wake(digest)
 
     def _release_canary(self, admission: Admission) -> None:
@@ -1383,6 +1408,18 @@ class HAAuthLatch:
             return
         kind, token = admission.canary
         (self._stale_canaries if kind == "stale" else self._route_canaries).discard(token)
+
+    async def _release_stale_lease(self, snapshot: Any, admission: Admission) -> None:
+        """The holder gives its stale lease back once the canary has settled (compare and
+        delete: it never removes one that expired and was taken by another replica)."""
+        if admission.canary is None or admission.canary[0] != "stale":
+            return
+        try:
+            await self._call("release_lease", [self._k("stale:v1", snapshot.digest)], [admission.reservation])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._note_redis_failure(exc)  # the lease expires on its own
 
     async def _observe(self, snapshot: Any, admission: Admission, caller: str, key: str, result: str) -> None:
         digest = snapshot.digest
@@ -1400,18 +1437,28 @@ class HAAuthLatch:
         elif result == "auth_rejected":
             self._local_proof.pop(digest, None)
             latch_value = self._trip_value(digest, admission, now)
+            entry = (admission, caller, key, latch_value)
+            self._pending.setdefault(digest, []).append(entry)  # before the await: the digest is closed now
             try:
                 await self._settle(snapshot, "rejected", admission, caller=caller, request_key=key, latch_value=latch_value)
             except BaseException:
                 # Every rejection whose settlement may not have reached Redis is kept, one entry each.
-                self._unsettled.setdefault(digest, []).append((admission, caller, key, latch_value))
+                self._unsettled.setdefault(digest, []).append(entry)
                 raise
+            finally:
+                self._drop_pending(digest, entry)
         elif result == "banned":
             await self._settle(snapshot, "banned", admission, caller=caller)
         elif result == "unreachable_sent":
             await self._settle(snapshot, "keep", admission, caller=caller)
         elif admission.reserved or admission.holder:
             await self._settle(snapshot, "refund", admission, caller=caller)
+
+    def _drop_pending(self, digest: str, entry: Tuple[Admission, str, str, str]) -> None:
+        entries = self._pending.get(digest, [])
+        entries.remove(entry)
+        if not entries:
+            self._pending.pop(digest, None)
 
     def _record_proof(self, digest: str, gen: str, now: int) -> None:
         self._local_proof[digest] = (gen, now)
@@ -1480,6 +1527,8 @@ class HAAuthLatch:
         digest = snapshot.digest
         self._local_proof.pop(digest, None)
         self._local_seen = {item for item in self._local_seen if item[0] != digest}
+        for other in [d for d in self._unsettled if d != digest]:
+            self._unsettled.pop(other, None)  # a replaced digest's rejection can't affect the new one
         try:
             await self._bounded(self._redis.delete(
                 self._k("latch:v1", digest), self._k("proven:v2", digest), self._k("gate:v1", digest),

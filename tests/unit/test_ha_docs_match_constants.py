@@ -51,3 +51,16 @@ def test_the_page_states_the_reservation_expiry_the_redis_requirement_and_the_si
     assert "`169.254.43518`" in page and "`10.0.0.5.nip.io`" in page and "canonical text" in page
     assert "enabling it from nothing" in page and "needs a restart of the orchestrator" in page
     assert f"more than {int(ha_auth.CANARY_AFTER)} seconds old" in SECTION
+
+
+def test_the_page_states_the_canary_lease_the_local_close_and_the_cancelled_open_send():
+    assert f"cut off after {int(ha_auth.CANARY_TIMEOUT)} seconds" in SECTION
+    assert f"the lease holds for {int(ha_auth.STALE_LEASE)}" in SECTION and ha_auth.STALE_LEASE > ha_auth.CANARY_TIMEOUT
+    assert "finishes and is recorded even if the caller that started it goes away" in SECTION
+    assert "from the moment the 401 arrives, before the rejection has been recorded" in SECTION
+    assert "cancelled after its request was written" in SECTION and "the proof stays live" in SECTION
+
+
+def test_the_changelog_says_odd_numeric_ha_urls_are_refused():
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "`010.1.1.1`" in changelog and "`10.0.0.5.nip.io`" in changelog and "is now refused" in changelog

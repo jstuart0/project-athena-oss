@@ -90,11 +90,15 @@ def test_every_script_replies_in_types_the_decoder_reads(redis_url, decode):
             scenarios.BUDGET_KEY, scenarios.CALLERS_KEY, scenarios.key("proven:v2", snap),
             scenarios.key("latch:v1", snap), scenarios.key("gate:v1", snap), latch._legacy_key(snap),
         ], ["{}", 60])
+        await client.set("athena:ha_auth:stale:v1:probe", "holder", px=5000)
+        wrong = await latch._call("release_lease", ["athena:ha_auth:stale:v1:probe"], ["someone-else"])
+        right = await latch._call("release_lease", ["athena:ha_auth:stale:v1:probe"], ["holder"])
         ttl = await client.ttl(scenarios.BUDGET_KEY)
         await client.aclose()
-        return proof, request, reopen, epoch, ttl
+        return proof, request, reopen, epoch, ttl, (wrong, right)
 
-    proof, request, reopen, epoch, ttl = run(scenario())
+    proof, request, reopen, epoch, ttl, release = run(scenario())
+    assert release == (0, 1), "compare and delete: only the holder removes the lease"
     assert proof == [1, 0] and request[0] == 1 and isinstance(reopen, int) and epoch == 1
     assert ttl == -1, "no script gives the budget hash a TTL"
 

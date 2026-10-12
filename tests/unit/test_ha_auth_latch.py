@@ -625,6 +625,24 @@ def test_a_retry_that_fails_again_keeps_the_gate_closed_until_it_succeeds():
     assert second.kind == ha_auth.WITHHELD and calls == 2
 
 
+def test_unsettled_rejections_of_a_replaced_digest_are_dropped_when_the_key_is_saved():
+    async def scenario():
+        flaky, latch, _ = _flaky_world()
+        old, new = credentials(token="the-old-token"), credentials(token="the-new-token")
+        await scenarios.prove_ok(latch, old)
+        sent = await latch.admit(old, **READ)
+        flaky.down = True
+        await scenarios.settle(latch, old, sent, "auth_rejected")
+        flaky.down = False
+        assert len(latch._unsettled[old.digest]) == 1
+        await latch.clear_and_reopen(new)
+        return dict(latch._unsettled), await latch.admit(new, **READ)
+
+    unsettled, admission = run(scenario())
+    assert unsettled == {}, "the old token's lost rejection can no longer affect the new one"
+    assert admission.kind == ha_auth.PROVE
+
+
 # -- a latch that isn't shared ----------------------------------------------------------------------------
 
 

@@ -479,7 +479,123 @@ async def every_lost_settlement_is_retried_and_counted_once(env: Env) -> None:
     await no_ttl_on_budget(env)
 
 
+async def a_rejection_closes_the_digest_before_its_settlement_finishes(env: Env) -> None:
+    """The 401 is recorded locally before the settlement is awaited: while the settlement
+    is slow, no other request on this process is admitted OPEN against the live proof."""
+    snap = credentials()
+    latch = env.latch("pod-a", gate_wait=0.2)
+    await prove_ok(latch, snap)
+    sent = await latch.admit(snap, **READ)
+    other = await latch.admit(snap, **READ)
+    assert sent.kind == other.kind == ha_auth.OPEN
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_settle = latch._settle
+
+    async def slow(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await real_settle(*args, **kwargs)
+
+    latch._settle = slow
+    rejection = asyncio.ensure_future(settle(latch, snap, sent, "auth_rejected"))
+    await entered.wait()
+    assert await env.exists(key("proven:v2", snap)), "the stored proof is still live while the settlement is in flight"
+    during = await asyncio.gather(*[latch.admit(snap, **call) for call in (READ, WRITE, READ)])
+    assert [a.kind for a in during] == [ha_auth.GATED] * 3, "closed from the moment the 401 arrived"
+    release.set()
+    await rejection
+    assert not latch._pending, "the entry is removed once the settlement succeeded"
+    after = await latch.admit(snap, **READ)
+    assert (after.kind, after.reason) == (ha_auth.WITHHELD, ha_auth.REASON_LATCHED)
+    await settle(latch, snap, other, "passed")  # the other in-flight send, admitted before the 401
+    await no_ttl_on_budget(env)
+
+
+async def a_canary_gives_back_only_its_own_stale_lease(env: Env) -> None:
+    """The stale lease is released by its holder at settlement, by compare and delete: a
+    holder whose lease expired and was taken by another replica never removes the new one."""
+    snap = credentials()
+    lease = key("stale:v1", snap)
+    a = env.latch("pod-a", gate_wait=0.1, stale_lease=0.3)
+    b = env.latch("pod-b", gate_wait=0.1, stale_lease=0.3)
+    await prove_ok(a, snap)
+    await settle(a, snap, await a.admit(snap, **READ), "passed")
+    env.clock.advance(ha_auth.CANARY_AFTER + 1)
+    first = await a.admit(snap, **READ)
+    assert first.kind == ha_auth.CANARY and await env.exists(lease)
+    await env.pass_time(0.5)  # a's lease expired while its canary was unsettled
+    second = await b.admit(snap, **READ)
+    assert second.kind == ha_auth.CANARY and await env.exists(lease)
+    await settle(a, snap, first, "unreachable_sent")  # a settles late
+    assert await env.exists(lease), "a did not remove b's lease"
+    assert (await b.admit(snap, **READ)).kind == ha_auth.GATED
+    await settle(b, snap, second, "passed")
+    assert not await env.exists(lease), "the holder gave its own lease back"
+    assert (await b.admit(snap, **READ)).kind == ha_auth.OPEN, "the pass renewed the proof"
+    await no_ttl_on_budget(env)
+
+
+async def a_stale_lease_outlives_the_longest_canary(env: Env) -> None:
+    snap = credentials()
+    latch = env.latch("pod-a", gate_wait=0.1)
+    await prove_ok(latch, snap)
+    await settle(latch, snap, await latch.admit(snap, **READ), "passed")
+    env.clock.advance(ha_auth.CANARY_AFTER + 1)
+    canary = await latch.admit(snap, **READ)
+    assert canary.kind == ha_auth.CANARY
+    assert ha_auth.STALE_LEASE > ha_auth.CANARY_TIMEOUT and ha_auth.CANARY_TIMEOUT <= ha_auth.PROOF_TIMEOUT
+    assert await env.ttl(key("stale:v1", snap)) >= ha_auth.CANARY_TIMEOUT, "the lease is held for longer than a canary can run"
+    await settle(latch, snap, canary, "passed")
+
+
+async def a_cut_off_canary_is_the_only_one_in_flight_across_replicas(env: Env) -> None:
+    """Two replicas, a stale proof and a Home Assistant that never answers: each canary is
+    cut off at CANARY_TIMEOUT, which is shorter than the lease that guards it, so there is
+    never a second canary in flight, however long the replicas keep asking."""
+    import httpx
+
+    from .ha_auth_fakes import FakeHA, make_stack
+
+    timeout = 0.3
+    saved = ha_auth.CANARY_TIMEOUT
+    ha_auth.CANARY_TIMEOUT = timeout
+    try:
+        fake = FakeHA()
+        stacks = [
+            make_stack(fake=fake, redis=env.redis, clock=env.clock, instance=name, gate_wait=0.05,
+                       stale_lease=timeout + 0.3)
+            for name in ("pod-a", "pod-b")
+        ]
+        for stack in stacks:
+            assert (await stack.channel.request("GET", "/api/states")).status_code == 200
+        env.clock.advance(ha_auth.CANARY_AFTER + 1)  # the proof is now stale
+        fake.delay, fake.max_inflight = 30.0, 0  # Home Assistant stops answering
+        outcomes = []
+
+        async def keep_asking(stack):
+            for _ in range(10):
+                try:
+                    outcomes.append((await stack.channel.request("GET", "/api/states")).status_code)
+                except httpx.ReadTimeout:
+                    outcomes.append("cut off")
+                await asyncio.sleep(0.05)
+
+        await asyncio.gather(*[keep_asking(stack) for stack in stacks for _ in range(2)])
+        assert fake.max_inflight == 1, f"{fake.max_inflight} canaries were in flight at once"
+        assert 1 <= outcomes.count("cut off") <= ha_auth.REQUEST_ALLOWANCE, outcomes
+        assert await env.n() <= ha_auth.REQUEST_ALLOWANCE
+        for stack in stacks:
+            await stack.channel.aclose()
+    finally:
+        ha_auth.CANARY_TIMEOUT = saved
+    await no_ttl_on_budget(env)
+
+
 SCENARIOS = {
+    "a_rejection_closes_the_digest_before_its_settlement_finishes": a_rejection_closes_the_digest_before_its_settlement_finishes,
+    "a_canary_gives_back_only_its_own_stale_lease": a_canary_gives_back_only_its_own_stale_lease,
+    "a_stale_lease_outlives_the_longest_canary": a_stale_lease_outlives_the_longest_canary,
+    "a_cut_off_canary_is_the_only_one_in_flight_across_replicas": a_cut_off_canary_is_the_only_one_in_flight_across_replicas,
     "a_stale_proof_after_a_lost_settlement_admits_one_canary_on_another_replica": a_stale_proof_after_a_lost_settlement_admits_one_canary_on_another_replica,
     "every_lost_settlement_is_retried_and_counted_once": every_lost_settlement_is_retried_and_counted_once,
     "a_late_settlement_after_a_save_counts_as_unreserved": a_late_settlement_after_a_save_counts_as_unreserved,

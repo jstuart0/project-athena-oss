@@ -695,7 +695,8 @@ def validate_service_host(host: str) -> str:
     if not host:
         raise ValueError('host cannot be blank')
 
-    if host.endswith('.cluster.local') or host.endswith('.svc'):
+    bare = host[:-1] if host.endswith('.') else host  # one trailing dot names the same host
+    if bare.lower().endswith(('.cluster.local', '.svc')):
         raise ValueError(
             f'host {host!r} resolves to a k8s cluster-internal address (forbidden)'
         )

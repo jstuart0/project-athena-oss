@@ -318,12 +318,15 @@ def ha_url_problem(url: Any, *, source: str) -> Optional[str]:
     Every source: no backslash, ``@``, whitespace or control character; at
     most 2048 characters; parsed by ``httpx.URL`` (the parser that sends the
     request); http or https; no query or fragment; the path empty or ``/``; a
-    valid port; a host that isn't written as an odd numeric form (all digits, a
-    ``0x`` form, a dotted name with a purely numeric label that isn't a canonical
-    dotted quad, or a trailing dot: ``host_form``); and a host that isn't cloud
-    metadata, link-local, multicast or unspecified (an IPv4-mapped IPv6 literal is
-    judged as its IPv4 address). Any other host that isn't a canonical IP literal
-    is a name, and the resolver judges what it resolves to.
+    valid port; a host that isn't written as an odd numeric form (``host_form``: at
+    most four labels that are all decimal or ``0x`` numbers, such as ``2852039166``,
+    ``0xa9fea9fe`` or ``169.254.43518``, with one trailing dot allowed only on such a
+    host; an IP literal must also be in its canonical text, so ``010.1.1.1`` is
+    refused); and a host that isn't cloud metadata, link-local, multicast or
+    unspecified (an IPv4-mapped IPv6 literal is judged as its IPv4 address). Any
+    other host is a name, including one that merely contains a numeric label
+    (``10.0.0.5.nip.io``, ``ha.2.lan``) or ends in a dot, and the resolver judges
+    what it resolves to.
 
     An admin-supplied URL must also pass the shared service-host rule (no
     loopback, ``.svc`` or ``.cluster.local``), with loopback allowed outside a

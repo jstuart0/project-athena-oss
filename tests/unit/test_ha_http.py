@@ -395,7 +395,7 @@ def test_the_authorization_header_is_built_in_one_function():
         for fn in [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
             if any(isinstance(n, ast.Constant) and n.value == "Authorization" for n in ast.walk(fn)):
                 holders.append(f"{cls.name}.{fn.name}")
-    assert holders == ["HATransport.handle_async_request"]
+    assert holders == ["HATransport.handle_async_request", "HATransport._send_admitted"]
     source = (ROOT / "src" / "shared" / "ha_http.py").read_text()
     assert source.count('request.headers["Authorization"] = _bearer(snapshot, request)') == 2, "both sets go through the origin check"
     assert source.count("Bearer ") == 1 or source.count('f"Bearer ') == 1
@@ -501,36 +501,222 @@ def test_a_request_to_the_right_origin_still_carries_the_token():
     assert run(scenario()) == 200
 
 
-def test_a_cancelled_reserved_canary_stays_counted_but_a_refused_origin_gives_it_back():
-    """A4: only something before the Authorization header is attached refunds."""
+def _budget_n(stack):
     from shared import ha_auth
 
-    def budget(stack):
-        return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("n", 0))
+    return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("n", 0))
 
-    async def cancelled():
-        fake = FakeHA(delay=0.3)
+
+def _budget_r(stack):
+    from shared import ha_auth
+
+    return int(ha_auth._decode(stack.redis._hash(ha_auth.PREFIX + "budget:v2") or {}).get("r", 0))
+
+
+def _proven_raw(stack):
+    return stack.redis._raw_get(stack.latch._k("proven:v2", stack.creds.digest))
+
+
+async def _cancel_midway(stack, method, path, body):
+    task = asyncio.ensure_future(stack.channel.request(method, path, json=body))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_a_cancelled_caller_of_a_valid_token_canary_leaves_n_unchanged_and_the_proof_refreshed():
+    """A5.3: the canary finishes and settles even though its caller went away."""
+    async def scenario():
+        fake = FakeHA()
         stack = make_stack(fake=fake, gate_wait=0.1)
         await stack.channel.request("GET", "/api/states")  # prove first
-        before = budget(stack)
-        task = asyncio.ensure_future(stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"}))
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        stack.clock.advance(5)
+        before_n, before_proof = _budget_n(stack), _proven_raw(stack)
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.5)  # the shielded canary finishes on its own
+        tasks_left = len(stack.channel._transport._tasks)
+        sent = [m for _, m, p in fake.rest_sent if p == "/api/services/cover/open"]
+        after = (_budget_n(stack), _proven_raw(stack), stack.latch._pending, stack.latch._unsettled)
+        r = _budget_r(stack)
         await stack.channel.aclose()
-        return budget(stack) - before
+        return before_n, before_proof, after, tasks_left, sent, r
 
+    before_n, before_proof, (n, proof, pending, unsettled), tasks_left, sent, r = run(scenario())
+    assert n == before_n, "a valid token's canary is not counted, cancelled caller or not"
+    assert proof != before_proof, "the pass refreshed the proof"
+    assert r == 0 and not pending and not unsettled and tasks_left == 0
+    assert sent == ["POST"]
+
+
+def test_a_cancelled_caller_of_a_rejected_token_canary_counts_exactly_once():
+    async def scenario():
+        fake = FakeHA(threshold=None)
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        before = _budget_n(stack)
+        fake.revoke(TOKEN)
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.5)
+        counted, failed = _budget_n(stack) - before, fake.failed_total
+        again = await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return counted, failed, again.status_code, fake.failed_total, stack.latch._unsettled
+
+    counted, failed, again, failed_after, unsettled = run(scenario())
+    assert counted == 1 and failed == 1, "one 401 at Home Assistant, one count in the budget"
+    assert again == 401 and failed_after == 1, "the next request is withheld, not sent"
+    assert not unsettled
+
+
+def test_a_canary_that_times_out_after_the_header_stays_counted(monkeypatch):
+    from shared import ha_auth
+
+    async def scenario():
+        monkeypatch.setattr(ha_auth, "CANARY_TIMEOUT", 0.2)
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        stack.channel._transport._inner = HangingTransport()
+        before = _budget_n(stack)
+        with pytest.raises(httpx.ReadTimeout):
+            await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        counted = _budget_n(stack) - before
+        await stack.channel.aclose()
+        return counted
+
+    assert run(scenario()) == 1, "cut off after the header: it may have been counted"
+
+
+class HangingTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request):
+        await asyncio.sleep(60)
+
+
+class RecordingTransport(httpx.AsyncBaseTransport):
+    """Answers 200 after ``delay``; records the timeouts it was handed and whether the body was closed."""
+
+    def __init__(self, delay=0.0):
+        self.delay = delay
+        self.timeouts = []
+        self.closed = []
+
+    async def handle_async_request(self, request):
+        self.timeouts.append(dict(request.extensions.get("timeout") or {}))
+        await asyncio.sleep(self.delay)
+        owner = self
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"[]"
+
+            async def aclose(self):
+                owner.closed.append(True)
+
+        return httpx.Response(200, stream=Body(), request=request)
+
+
+def test_a_canary_is_given_a_connect_timeout_inside_its_own_bound():
+    from shared import ha_auth
+
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1, timeout=30.0)
+        await stack.channel.request("GET", "/api/states")
+        inner = RecordingTransport()
+        stack.channel._transport._inner = inner
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # canary
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # open
+        await stack.channel.aclose()
+        return inner.timeouts
+
+    canary, plain = run(scenario())
+    assert canary["connect"] <= ha_auth.CANARY_TIMEOUT / 2
+    assert plain["connect"] == 30.0, "an ordinary request keeps the channel's timeout"
+
+
+def test_the_response_of_a_canary_whose_caller_went_away_is_closed():
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        inner = RecordingTransport(delay=0.3)
+        stack.channel._transport._inner = inner
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        await asyncio.sleep(0.6)
+        closed = list(inner.closed)
+        await stack.channel.aclose()
+        return closed
+
+    assert run(scenario()) == [True]
+
+
+def test_closing_the_channel_stops_an_in_flight_canary_and_still_settles_it():
+    async def scenario():
+        stack = make_stack(fake=FakeHA(), gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        stack.channel._transport._inner = HangingTransport()
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append(kw["result"])
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        caller = asyncio.ensure_future(stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"}))
+        await asyncio.sleep(0.1)
+        await asyncio.wait_for(stack.channel.aclose(), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        return observed, len(stack.channel._transport._tasks)
+
+    observed, tasks_left = run(scenario())
+    assert observed == ["unreachable_sent"] and tasks_left == 0, "it was cut short after the header, so it counts"
+
+
+def test_an_open_send_cancelled_after_the_header_is_exception_b_and_leaves_the_proof_live():
+    """A5.4: an OPEN send holds no reservation. Cancelling it after the header leaves n and the
+    proof as they were: this is revocation in flight, inside exception (b), and it is pinned here."""
+    async def scenario():
+        fake = FakeHA()
+        stack = make_stack(fake=fake, gate_wait=0.1)
+        await stack.channel.request("GET", "/api/states")
+        await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})  # the route's canary
+        before_n, before_proof = _budget_n(stack), _proven_raw(stack)
+        observed = []
+        original = stack.latch.observe
+
+        async def spy(snapshot, admission, **kw):
+            observed.append((admission.kind, admission.reserved, kw["result"]))
+            return await original(snapshot, admission, **kw)
+
+        stack.latch.observe = spy
+        fake.delay = 0.3
+        await _cancel_midway(stack, "POST", "/api/services/cover/open", {"entity_id": "cover.a"})
+        fake.delay = 0.0
+        after = (_budget_n(stack), _proven_raw(stack))
+        cancelled_only = list(observed)
+        follow_up = await stack.channel.request("POST", "/api/services/cover/open", json={"entity_id": "cover.a"})
+        await stack.channel.aclose()
+        return before_n, before_proof, after, cancelled_only, follow_up.status_code
+
+    before_n, before_proof, after, observed, follow_up = run(scenario())
+    assert observed == [("open", False, "unreachable_sent")]
+    assert after == (before_n, before_proof), "nothing counted, and the proof is as live as before"
+    assert follow_up == 200
+
+
+def test_a_refused_origin_gives_a_reserved_canary_back():
+    """A4: only something before the Authorization header is attached refunds."""
     async def refused_origin():
         stack = make_stack(gate_wait=0.1)
         await stack.channel.request("GET", "/api/states")
-        before = budget(stack)
+        before = _budget_n(stack)
         request = httpx.Request("POST", "https://other-host.example.invalid/api/services/cover/open", json={"entity_id": "cover.a"},
                                 extensions={"athena_ha_digest": stack.creds.digest})
         with pytest.raises(RuntimeError, match="not addressed"):
             await stack.channel._transport.handle_async_request(request)
         await stack.channel.aclose()
-        return budget(stack) - before
+        return _budget_n(stack) - before
 
-    assert run(cancelled()) == 1, "cancelled after the header: still counted"
     assert run(refused_origin()) == 0, "refused before the header: given back"
