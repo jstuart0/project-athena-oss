@@ -57,6 +57,10 @@ class RuntimeContext:
     # Home Assistant area registry (optional: not in _REQUIRED_SINGLETONS; a
     # deployment with no HA token or HA_AREAS=off gets a disabled registry)
     ha_registry: Optional[Any] = None
+    # Home Assistant link status (optional: shared.ha_link). The monitor is
+    # fed by the HA REST clients; the publisher serves the merged view.
+    ha_link: Optional[Any] = None
+    ha_link_publisher: Optional[Any] = None
     # The room vocabulary (orchestrator.room_directory.RoomDirectoryProvider);
     # optional: readers fall back to the generic room words without it
     room_directory: Optional[Any] = None
@@ -250,6 +254,20 @@ def get_ha_registry() -> Optional[Any]:
     return _ctx.ha_registry
 
 
+def set_ha_link(c: Any) -> None:
+    _ctx.ha_link = c
+
+def get_ha_link() -> Optional[Any]:
+    return _ctx.ha_link
+
+
+def set_ha_link_publisher(c: Any) -> None:
+    _ctx.ha_link_publisher = c
+
+def get_ha_link_publisher() -> Optional[Any]:
+    return _ctx.ha_link_publisher
+
+
 def set_room_directory(c: Any) -> None:
     _ctx.room_directory = c
 
@@ -384,6 +402,7 @@ async def close_all() -> None:
                                             an in-flight room-group fetch)
       - ha_registry.close()                (shared.ha_registry: cancels an
                                             in-flight registry fetch)
+      - ha_link_publisher.close()          (shared.ha_link: stops the Redis publish loop)
       - cache_client.close()               (shared.cache)
       - session_manager.close()            (orchestrator.session_manager)
       - rag_client.close()                 (orchestrator.rag_client)
@@ -403,6 +422,7 @@ async def close_all() -> None:
         "ha_registry",
         "ha_client",
         "llm_router",
+        "ha_link_publisher",
         "cache_client",
         "session_manager",
         "rag_client",

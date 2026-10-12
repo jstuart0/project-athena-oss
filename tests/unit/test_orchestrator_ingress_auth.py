@@ -93,8 +93,8 @@ def _chat_body():
     return {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False}
 
 
-# Each: (method, path, body-or-None). Population is 13 (AU1, amended DC12:
-# the original 8 chat/session routes plus warmup + the 4 /admin/* routes).
+# Each: (method, path, body-or-None). Population is 14 (AU1, amended DC12:
+# the original 8 chat/session routes plus warmup + the 5 /admin/* routes).
 _GATED_ROUTES = [
     ("POST", "/query", _query_body()),
     ("POST", "/query/stream", _query_body()),
@@ -109,6 +109,7 @@ _GATED_ROUTES = [
     ("POST", "/admin/reset-circuit-breaker/test-service", None),
     ("POST", "/admin/reset-all-circuits", None),
     ("POST", "/admin/invalidate-model-cache", None),
+    ("GET", "/admin/ha-status", None),
 ]
 
 
@@ -120,8 +121,8 @@ def _hit(client, method, path, body):
     return client.post(path, json=body)
 
 
-def test_AU1_population_is_13():
-    assert len(_GATED_ROUTES) == 13
+def test_AU1_population_is_14():
+    assert len(_GATED_ROUTES) == 14
 
 
 def test_AU1_named_member_delete_sessions_present():
@@ -137,6 +138,7 @@ def test_AU1_named_member_admin_routes_present():
     assert ("POST", "/admin/reset-circuit-breaker/test-service", None) in _GATED_ROUTES
     assert ("POST", "/admin/reset-all-circuits", None) in _GATED_ROUTES
     assert ("POST", "/admin/invalidate-model-cache", None) in _GATED_ROUTES
+    assert ("GET", "/admin/ha-status", None) in _GATED_ROUTES
 
 
 @pytest.mark.parametrize("method,path,body", _GATED_ROUTES)

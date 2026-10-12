@@ -1,7 +1,13 @@
 """Unit tests for health probe endpoints (Phase 1.5 — bare-except cleanup).
 
 Verifies:
-  - /health/ready emits WARNING log when HA or Redis probe raises, and the
+  - No health or probe handler (and not /admin/ha-status) sends anything to
+    Home Assistant: fail-on-call transports sit under both HA REST clients
+    and in place of the registry fetcher, with a positive control proving the
+    fixture can fail.
+  - components.home_assistant is derived from the merged link view, never
+    from a request.
+  - /health/ready emits WARNING log when the HA or Redis probe raises, and the
     response payload still reflects the component as False.
   - /health returns 200 with the documented JSON shape on the happy path.
   - /health/ready returns the documented JSON shape on the happy path.
@@ -21,6 +27,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import unittest.mock as mock
@@ -73,11 +80,11 @@ from httpx import ASGITransport  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-class _BrokenHA:
-    """Simulates a Home Assistant client whose health_check always raises."""
+class _BrokenLinkPublisher:
+    """A link publisher whose view raises, to exercise the probe's warning path."""
 
-    async def health_check(self) -> bool:
-        raise ConnectionError("simulated HA outage")
+    def view(self):
+        raise ConnectionError("simulated link view failure")
 
 
 class _BrokenCache:
@@ -85,11 +92,6 @@ class _BrokenCache:
 
     async def ping(self) -> bool:
         raise ConnectionError("simulated redis outage")
-
-
-class _HealthyHA:
-    async def health_check(self) -> bool:
-        return True
 
 
 class _HealthyCache:
@@ -106,6 +108,25 @@ async def _get(path: str) -> httpx.Response:
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         return await client.get(path)
+
+
+def _monitor_with(*statuses: int):
+    from shared import ha_link
+
+    monitor = ha_link.HALinkMonitor()
+    for status in statuses:
+        monitor.record_response("GET", "/api/states", status)
+    return monitor
+
+
+def _link_publisher(monitor, *, configured: bool = True, registry=None):
+    from shared import ha_link
+    from shared.ha_registry import HARegistry
+
+    publisher = ha_link.HALinkPublisher(
+        monitor, registry if registry is not None else HARegistry(None), None, "pod-test", configured=configured
+    )
+    return monitor, publisher
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +155,7 @@ def reset_runtime():
 
 def test_readiness_probe_logs_warning_on_ha_health_failure():
     """
-    When _runtime.ha_client.health_check() raises, /health/ready must:
+    When the Home Assistant link view raises, /health/ready must:
       (a) set components["home_assistant"] = False in the response, and
       (b) call logger.warning with a message that identifies the probe site
           and passes exc_info so the exception is captured.
@@ -144,7 +165,7 @@ def test_readiness_probe_logs_warning_on_ha_health_failure():
     orchestrator.main.logger directly instead.
     """
     _runtime.set_llm_router(_make_fake_llm())
-    _runtime.set_ha_client(_BrokenHA())
+    _runtime.set_ha_link_publisher(_BrokenLinkPublisher())
     fake_cache = mock.MagicMock()
     fake_cache.ping = mock.AsyncMock(return_value=True)
     _runtime.set_cache_client(fake_cache)
@@ -225,10 +246,7 @@ def test_health_probes_return_unchanged_shape():
     with the documented JSON shapes.  This is the regression guard that no
     HTTP behavior changed as part of Phase 1.5.
     """
-    # /health uses module-level globals (ha_client, llm_router, cache_client)
-    _main_module.ha_client = mock.MagicMock(
-        health_check=mock.AsyncMock(return_value=True)
-    )
+    # /health uses module-level globals (llm_router, cache_client)
     _main_module.llm_router = _make_fake_llm()
     _main_module.cache_client = mock.MagicMock(
         ping=mock.AsyncMock(return_value=True)
@@ -236,7 +254,7 @@ def test_health_probes_return_unchanged_shape():
 
     # /health/ready uses _runtime singletons
     _runtime.set_llm_router(_make_fake_llm())
-    _runtime.set_ha_client(_HealthyHA())
+    _runtime.set_ha_link_publisher(_link_publisher(_monitor_with(200))[1])
     _runtime.set_cache_client(_HealthyCache())
     # Satisfy the remaining required singletons so is_ready() returns True.
     _runtime.set_session_manager(mock.MagicMock())
@@ -317,3 +335,168 @@ def test_gateway_health_reports_ha_registry_at_the_top_level(state, monkeypatch)
     body = TestClient(gw.app).get("/health").json()
     assert body["ha_registry"] == state
     assert "ha_registry" not in body.get("components", {})
+
+
+# ---------------------------------------------------------------------------
+# No probe sends anything to Home Assistant
+# ---------------------------------------------------------------------------
+
+HA_TEST_URL = "https://ha.test"
+HA_TEST_TOKEN = "sekret-token-123"
+
+
+@pytest.fixture
+def ha_traffic(monkeypatch):
+    """Fail-on-call transports under both orchestrator HA REST clients and in
+    place of the registry fetcher. Anything that reaches Home Assistant raises
+    AssertionError AND is appended to ``traffic``, so a handler that swallows
+    the exception still fails the test."""
+    import httpx as _httpx
+    from orchestrator.ha_entity_manager import HAEntityManager
+    from orchestrator.mode_permission import ensure_permission_enforcing
+    from shared import ha_link
+    from shared.ha_client import HomeAssistantClient
+    from shared.ha_registry import HARegistry
+
+    traffic: list = []
+
+    def handler(req):
+        traffic.append(f"{req.method} {req.url}")
+        raise AssertionError(f"unexpected request to Home Assistant: {req.method} {req.url}")
+
+    monkeypatch.setattr(ha_link.httpx, "AsyncHTTPTransport", lambda **kw: _httpx.MockTransport(handler))
+
+    async def fetcher():
+        traffic.append("registry fetch")
+        raise AssertionError("unexpected area registry fetch")
+
+    monitor = ha_link.HALinkMonitor()
+    raw_client = HomeAssistantClient(url=HA_TEST_URL, token=HA_TEST_TOKEN, link_monitor=monitor)
+    registry = HARegistry(fetcher)
+    _monitor, link_publisher = _link_publisher(monitor, registry=registry)
+
+    _runtime.set_ha_link(monitor)
+    _runtime.set_ha_client(ensure_permission_enforcing(raw_client))
+    _runtime.set_entity_manager(HAEntityManager(HA_TEST_URL, HA_TEST_TOKEN, link_monitor=monitor))
+    _runtime.set_ha_registry(registry)
+    _runtime.set_ha_link_publisher(link_publisher)
+    _runtime.set_llm_router(_make_fake_llm())
+    _runtime.set_cache_client(_HealthyCache())
+    return mock.MagicMock(traffic=traffic, raw_client=raw_client, monitor=monitor, publisher=link_publisher)
+
+
+PROBE_ROUTES = ["/health", "/health/ready", "/health/live", "/health/startup", "/admin/ha-status"]
+
+
+def _service_key_headers():
+    from shared.config import get_config
+
+    return {"X-Service-Key": get_config().service_api_key}
+
+
+def test_the_fixture_can_fail_a_request_to_home_assistant_is_counted(ha_traffic):
+    """Positive control: a request through the same fixture IS recorded, so an
+    empty list below means no request, not a blind fixture."""
+    with pytest.raises(AssertionError):
+        asyncio.run(ha_traffic.raw_client.client.get("/api/states"))
+    assert ha_traffic.traffic == [f"GET {HA_TEST_URL}/api/states"]
+
+
+def test_the_fixture_also_catches_the_entity_manager_and_the_registry(ha_traffic):
+    entity_manager = _runtime.get_entity_manager()
+    with pytest.raises(AssertionError):
+        asyncio.run(entity_manager.refresh_entities())
+    with pytest.raises(AssertionError):
+        asyncio.run(_runtime.get_ha_registry()._fetcher())
+    assert len(ha_traffic.traffic) == 2
+
+
+def test_no_probe_route_sends_anything_to_home_assistant(ha_traffic):
+    assert len(PROBE_ROUTES) >= 5
+    for route in PROBE_ROUTES:
+        response = asyncio.run(_get_with_key(route))
+        assert response.status_code in (200, 503), f"{route} -> {response.status_code}"
+        assert ha_traffic.traffic == [], f"{route} sent a request to Home Assistant: {ha_traffic.traffic}"
+
+
+async def _get_with_key(path: str) -> httpx.Response:
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.get(path, headers=_service_key_headers())
+
+
+def test_no_orchestrator_code_calls_a_health_check_method_on_the_ha_client():
+    import ast
+
+    source = open(os.path.join(os.path.dirname(_main_module.__file__), "main.py"), encoding="utf-8").read()
+    calls = [
+        n for n in ast.walk(ast.parse(source))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "health_check"
+    ]
+    assert calls == []
+
+
+def test_home_assistant_is_true_after_a_successful_contact_and_false_after_a_rejected_one(ha_traffic):
+    ha_traffic.monitor.record_response("GET", "/api/states", 200)
+    for route, key in (("/health", "components"), ("/health/ready", "components")):
+        assert asyncio.run(_get(route)).json()[key]["home_assistant"] is True
+    ha_traffic.monitor.record_response("GET", "/api/states", 401)
+    for route, key in (("/health", "components"), ("/health/ready", "components")):
+        assert asyncio.run(_get(route)).json()[key]["home_assistant"] is False
+    assert ha_traffic.traffic == []
+
+
+def test_home_assistant_is_false_before_any_contact_and_when_not_configured():
+    _runtime.set_llm_router(_make_fake_llm())
+    _runtime.set_ha_link_publisher(_link_publisher(_monitor_with())[1])
+    assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is False
+    _runtime.set_ha_link_publisher(_link_publisher(_monitor_with(200), configured=False)[1])
+    assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is False
+
+
+def test_an_unrelated_forbidden_response_does_not_fail_the_link_until_three_in_a_row():
+    _runtime.set_llm_router(_make_fake_llm())
+    monitor = _monitor_with(200, 403)
+    _runtime.set_ha_link_publisher(_link_publisher(monitor)[1])
+    assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is True
+    monitor.record_response("GET", "/api/states", 403)
+    monitor.record_response("GET", "/api/states", 403)
+    assert asyncio.run(_get("/health")).json()["components"]["home_assistant"] is False
+
+
+def test_readiness_is_not_gated_on_home_assistant(ha_traffic):
+    _runtime.set_session_manager(mock.MagicMock())
+    _runtime.set_rag_client(mock.MagicMock())
+    _runtime.set_mode_client(mock.MagicMock())
+    _runtime.set_intent_classifier(mock.MagicMock())
+    ha_traffic.monitor.record_response("GET", "/api/states", 401)
+    response = asyncio.run(_get("/health/ready"))
+    assert response.status_code == 200
+    assert response.json()["components"]["home_assistant"] is False
+
+
+def test_health_never_carries_an_areas_key_or_an_area_name(ha_traffic):
+    import json as _json
+    from shared.ha_registry import RegistrySnapshot
+
+    raw = _json.loads(
+        (__import__("pathlib").Path(__file__).resolve().parents[1] / "fixtures" / "ha_registry" / "house_a.json").read_text()
+    )
+    registry = _runtime.get_ha_registry()
+    registry._snapshot = RegistrySnapshot.from_raw(raw, fetched_at=0.0)
+    registry._state = "ok"
+    ha_traffic.monitor.record_response("GET", "/api/states", 200)
+    body = asyncio.run(_get("/health")).json()
+
+    def keys(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(node, list):
+            for item in node:
+                yield from keys(item)
+
+    assert "areas" not in set(keys(body))
+    assert body["components"]["ha_registry"] == "ok"
+    names = [a["name"] for a in raw["areas"] if isinstance(a, dict) and isinstance(a.get("name"), str)]
+    assert names and not any(name in json.dumps(body) for name in names)

@@ -76,7 +76,7 @@ SRC = REPO_ROOT / "src"
 class TestGuardPassthroughAllowlist:
     def test_guard_passthrough_allowlist_excludes_transport(self):
         assert mp.PermissionEnforcingHAClient._READ_ALLOWLIST == frozenset(
-            {"get_state", "get_states", "health_check", "close", "is_configured"}
+            {"get_state", "get_states", "close", "is_configured"}
         )
 
     def test_guard_exposes_get_states(self):
@@ -101,16 +101,36 @@ class TestGuardPassthroughAllowlist:
 
 
 class TestNoRawHAWriteEndpointsInOrchestrator:
+    # ha_client.py is the one writer. ha_link.py names the same paths only to
+    # decide which *responses* count as link evidence; it holds no client and
+    # sends nothing (test_ha_link.py::TestHALinkChannels pins that no other
+    # HA client exists, and the module is a transport wrapper around the
+    # request it is handed).
+    _PATH_NAMING_ALLOWLIST = {SRC / "shared" / "ha_client.py", SRC / "shared" / "ha_link.py"}
+
     def test_no_raw_ha_write_endpoints_in_orchestrator(self):
         offenders = []
         for root in (SRC / "orchestrator", SRC / "shared"):
             for path in root.rglob("*.py"):
-                if path == SRC / "shared" / "ha_client.py":
+                if path in self._PATH_NAMING_ALLOWLIST:
                     continue
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 if "/api/services" in text or "/api/config/automation" in text:
                     offenders.append(str(path.relative_to(REPO_ROOT)))
         assert offenders == []
+
+    def test_the_allowlisted_link_module_builds_no_client_and_no_request(self):
+        import ast
+
+        tree = ast.parse((SRC / "shared" / "ha_link.py").read_text(encoding="utf-8"))
+        built = sorted(
+            (n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", ""))
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and (n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", ""))
+            in {"AsyncClient", "Client", "Request", "post", "put", "patch", "delete"}
+        )
+        assert built == []
 
 
 class TestNoGuardUnwrapOutsideTests:
@@ -365,7 +385,7 @@ class TestHAClientWriteSurfaceIsIntercepted:
             name for name, member in inspect.getmembers(HomeAssistantClient, predicate=inspect.iscoroutinefunction)
             if not name.startswith("_")
         }
-        write_methods = public_async_methods - {"get_state", "get_states", "health_check", "close"}
+        write_methods = public_async_methods - {"get_state", "get_states", "close"}
         assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
         for name in write_methods:
             assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"
