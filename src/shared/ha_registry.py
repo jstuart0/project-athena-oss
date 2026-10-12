@@ -31,6 +31,7 @@ import re
 import ssl
 import time
 import unicodedata
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -485,6 +486,16 @@ def token_marker_key(token: str, service_api_key: Optional[str]) -> Optional[str
     return digest[:16]
 
 
+def _failure_class(exc: BaseException) -> str:
+    """The closed class of a failed fetch: ``TimeoutError`` is an ``OSError``,
+    so it is tested first."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "unreachable"
+    return "other"
+
+
 class HARegistry:
     """The cached registry snapshot and the one fetch that refreshes it.
 
@@ -506,6 +517,7 @@ class HARegistry:
         min_refresh_interval: float = 60,
         fetch_timeout: float = DEFAULT_FETCH_TIMEOUT,
         monotonic: Callable[[], float] = time.monotonic,
+        wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self._fetcher = fetcher
         self._marker = f"{_MARKER_PREFIX}{token_marker_key}" if token_marker_key else None
@@ -514,6 +526,10 @@ class HARegistry:
         self._min_refresh_interval = min_refresh_interval
         self._fetch_timeout = fetch_timeout
         self._monotonic = monotonic
+        self._wall = wall
+        self._last_success_at: Optional[datetime] = None
+        self._last_failure_at: Optional[datetime] = None
+        self._last_failure_class: Optional[str] = None
         self._snapshot: Optional[RegistrySnapshot] = None
         self._state = STATE_DISABLED if fetcher is None else STATE_UNAVAILABLE
         self._last_attempt: Optional[float] = None
@@ -528,6 +544,23 @@ class HARegistry:
 
     def current(self) -> Optional[RegistrySnapshot]:
         return self._snapshot
+
+    def link_summary(self) -> Dict[str, Any]:
+        """Closed-vocabulary facts for the Home Assistant link status: the
+        state, the area count, and when (wall-clock UTC) a fetch last worked
+        or failed and what class of failure it was. No names, no text."""
+        snap = self._snapshot
+        return {
+            "state": self._state,
+            "areas": snap.counts()["areas"] if snap is not None else None,
+            "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
+            "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
+            "last_failure_class": self._last_failure_class,
+        }
+
+    def _note_failure(self, failure_class: str) -> None:
+        self._last_failure_at = self._wall()
+        self._last_failure_class = failure_class
 
     @property
     def stale(self) -> bool:
@@ -591,16 +624,19 @@ class HARegistry:
             return
         except Exception as exc:
             self._state = STATE_UNAVAILABLE
+            self._note_failure(_failure_class(exc))
             logger.warning("ha_registry_fetch_failed", error_class=type(exc).__name__)
             return
         self._snapshot = snapshot
         self._state = STATE_OK
+        self._last_success_at = self._wall()
         logger.info("ha_registry_refreshed", **snapshot.counts())
         for key, area_ids in snapshot.collisions:
             logger.warning("ha_registry_area_name_collision", area_count=len(area_ids))
 
     async def _latch_refused(self) -> None:
         self._state = STATE_REFUSED
+        self._note_failure("auth")
         logger.error("ha_registry_auth_refused")
         if self._redis is not None and self._marker:
             try:
@@ -623,6 +659,7 @@ class HARegistry:
                 logger.warning("ha_registry_marker_read_failed", error_class=type(exc).__name__)
             if present:
                 self._state = STATE_REFUSED
+                self._note_failure("auth")
                 logger.error("ha_registry_auth_refused_marker_present")
                 return
         self._start_fetch()
