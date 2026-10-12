@@ -414,6 +414,7 @@
         if (status === 'degraded') return { color: 'yellow', pulse: true, title: '' };
         if (status === 'stale') return { color: 'gray', pulse: false, title: 'No recent check' };
         if (status === 'pending' || status === 'disabled') return { color: 'gray', pulse: false, title: '' };
+        if (status === 'unconfigured') return { color: 'gray', pulse: false, title: 'Needs setup' };
         return { color: 'red', pulse: true, title: '' };
     }
 

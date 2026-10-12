@@ -36,10 +36,12 @@ _CORE_SERVICE_NAMES = {
 }
 
 
-# Statuses that say nothing about the service right now: switched off, never
-# checked, or not reached by the checker recently. They are never "needs
-# attention" and never count against the health percentage.
-_NOT_CHECKED_STATUSES = frozenset({"disabled", "pending", "stale"})
+# Statuses that are neither healthy nor a failure: switched off, never checked,
+# not reached by the checker recently, or reachable but not set up ("Needs
+# setup"). They are never "needs attention" and never count against the health
+# percentage. Only a live unhealthy or degraded row (or a live probe that
+# failed) needs attention.
+_NOT_CHECKED_STATUSES = frozenset({"disabled", "pending", "stale", "unconfigured"})
 
 
 def _registry_row_status(svc: RagService, now: datetime) -> str:
@@ -49,9 +51,9 @@ def _registry_row_status(svc: RagService, now: datetime) -> str:
     disabled row is 'disabled' (ATHENA-112/113c), a never-checked one
     'pending', one the checker hasn't reached recently 'stale'. A live
     'unconfigured' (the poller's own "reachable but not configured" state)
-    needs attention but keeps its own literal status string rather than
-    being relabeled 'unhealthy'; the two are different claims (this service
-    isn't set up vs. this service is failing).
+    keeps its own literal status string rather than being relabeled
+    'unhealthy'; the two are different claims (this service isn't set up vs.
+    this service is failing), and only the second needs attention.
     """
     return display_status(svc, now)[0]
 

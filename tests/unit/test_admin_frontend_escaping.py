@@ -1775,7 +1775,7 @@ def _tile(status: str):
     ("disabled", "gray", False, ""),
     ("unhealthy", "red", True, ""),
     ("unreachable", "red", True, ""),
-    ("unconfigured", "red", True, ""),
+    ("unconfigured", "gray", False, "Needs setup"),
 ])
 def test_mission_control_tile_colour_and_pulse(status, color, pulse, title):
     assert _tile(status) == {"color": color, "pulse": pulse, "title": title}

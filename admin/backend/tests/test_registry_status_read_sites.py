@@ -188,11 +188,23 @@ def test_a_live_unhealthy_row_does_produce_a_pending_action(owner_client, db):
     assert [c["name"] for c in body["voice_health"]["critical_services"]] == ["Sports"]
 
 
-def test_a_live_unconfigured_row_still_needs_attention(owner_client, db):
+def test_a_live_unconfigured_row_is_needs_setup_and_raises_no_pending_action(owner_client, db):
     _core_rows(db)
     _add(db, "tesla", health="unconfigured", checked=_recent())
-    names = [c["name"] for c in _dashboard(owner_client)["voice_health"]["critical_services"]]
-    assert names == ["Tesla"]
+    body = _dashboard(owner_client)
+    assert body["voice_health"]["critical_services"] == []
+    assert [a for a in body["pending_actions"] if a["type"] == "unhealthy_services"] == []
+    assert {s["name"]: s["status"] for s in body["services"]}["Tesla"] == "unconfigured"
+    assert body["voice_health"]["total"] == 2
+
+
+@pytest.mark.parametrize("health", ["unhealthy", "degraded"])
+def test_only_a_live_unhealthy_or_degraded_row_needs_attention(owner_client, db, health):
+    _core_rows(db)
+    _add(db, "tesla", health=health, checked=_recent())
+    body = _dashboard(owner_client)
+    assert [c["name"] for c in body["voice_health"]["critical_services"]] == ["Tesla"]
+    assert len([a for a in body["pending_actions"] if a["type"] == "unhealthy_services"]) == 1
 
 
 def test_with_no_live_row_the_voice_health_has_no_percentage_so_the_page_can_show_it_neutral(owner_client, db):
