@@ -231,6 +231,7 @@ REVIEWED_BY_FILE = {
         ("GET", "/api/room-tv/internal/{room_name}"): ("service_or_user", "read"),
     },
     "service_registry.py": {
+        ("GET", "/api/service-registry/home-assistant"): ("user", "read"),
         ("GET", "/api/service-registry/services/{service_name}"): ("user", "read"),
         ("GET", "/api/service-registry/services/{service_name}/url"): ("service_or_user", "read"),
     },
@@ -398,12 +399,12 @@ def test_lists_are_disjoint_and_reasoned():
     public, gated = set(INTENTIONALLY_PUBLIC), set(GATED)
     assert len(public) == 13
     assert len(GUEST_DATA_GATED) == 46
-    assert len(gated) == 139
-    assert sum(len(ops) for ops in REVIEWED_BY_FILE.values()) == 93
+    assert len(gated) == 140
+    assert sum(len(ops) for ops in REVIEWED_BY_FILE.values()) == 94
     assert len(REVIEWED_BY_FILE) == 26
     # No operation under two files, and none already pinned by the
     # guest-data table (a dict merge would hide either).
-    assert len(REVIEWED) == 93
+    assert len(REVIEWED) == 94
     assert not set(REVIEWED) & set(GUEST_DATA_GATED)
     assert public & gated == set()
     assert not USER_ONLY_PINNED & (public | gated)
@@ -465,13 +466,13 @@ def test_gated_named_members():
 
 def test_reviewed_table_totals():
     pins = list(REVIEWED.values())
-    assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 42, "service": 1}
-    assert collections.Counter(perm for _, perm in pins) == {"read": 81, "read:alerts": 1, "write": 10, None: 1}
+    assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 43, "service": 1}
+    assert collections.Counter(perm for _, perm in pins) == {"read": 82, "read:alerts": 1, "write": 10, None: 1}
     grouped = [name for files in REVIEWED_GROUPS.values() for name in files]
     assert sorted(grouped) == sorted(REVIEWED_BY_FILE), "every file is in exactly one group"
     assert tuple(
         sum(len(REVIEWED_BY_FILE[name]) for name in REVIEWED_GROUPS[group]) for group in ("g1", "g2", "g3")
-    ) == (42, 23, 28)
+    ) == (42, 24, 28)
 
 
 # The one non-GET that changes nothing: it answers allow/deny for a URL.

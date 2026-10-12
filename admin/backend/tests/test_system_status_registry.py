@@ -12,6 +12,7 @@ are checked directly only when the registry has no row for them.
 healthy_services/overall_health reuse service_registry._overall_health
 (ATHENA-112's enabled-only rollup) rather than a second implementation.
 """
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +20,14 @@ import pytest
 from app.auth.oidc import get_current_user
 from app.models import RagService
 from main import app
+
+
+def _recent():
+    return datetime.now(timezone.utc) - timedelta(seconds=5)
+
+
+def _long_ago():
+    return datetime.now(timezone.utc) - timedelta(days=16)
 
 
 @pytest.fixture
@@ -44,11 +53,11 @@ def _mock_ok_client():
 def test_registry_rows_populate_services_with_no_direct_probe(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True, health_status="healthy",
+        port=8010, protocol="http", enabled=True, health_status="healthy", last_health_check=_recent(),
     ))
     db.add(RagService(
         name="sports", display_name="Sports", host="sports-svc",
-        port=8017, protocol="http", enabled=True, health_status="unhealthy",
+        port=8017, protocol="http", enabled=True, health_status="unhealthy", last_health_check=_recent(),
         last_error="connection_refused",
     ))
     db.commit()
@@ -69,11 +78,11 @@ def test_registry_rows_populate_services_with_no_direct_probe(owner_client, db):
 def test_disabled_row_reads_disabled_and_is_excluded_from_counts(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True, health_status="healthy",
+        port=8010, protocol="http", enabled=True, health_status="healthy", last_health_check=_recent(),
     ))
     db.add(RagService(
         name="tesla", display_name="Tesla", host="tesla-svc",
-        port=8028, protocol="http", enabled=False, health_status="unhealthy",
+        port=8028, protocol="http", enabled=False, health_status="unhealthy", last_health_check=_recent(),
     ))
     db.commit()
 
@@ -114,7 +123,7 @@ def test_null_health_status_reads_pending(owner_client, db):
 def test_registry_row_for_gateway_skips_the_direct_probe(owner_client, db):
     db.add(RagService(
         name="gateway", display_name="Gateway", host="athena-gateway",
-        port=8000, protocol="http", enabled=True, health_status="healthy",
+        port=8000, protocol="http", enabled=True, health_status="healthy", last_health_check=_recent(),
     ))
     db.commit()
 
@@ -145,7 +154,7 @@ def test_no_registry_rows_falls_back_to_direct_checks_for_all_four(owner_client,
 def test_no_healthy_services_reads_unhealthy_not_a_stale_critical_label(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True, health_status="unhealthy",
+        port=8010, protocol="http", enabled=True, health_status="unhealthy", last_health_check=_recent(),
     ))
     db.commit()
 
@@ -162,3 +171,69 @@ def test_no_healthy_services_reads_unhealthy_not_a_stale_critical_label(owner_cl
     data = response.json()
     assert data["healthy_services"] == 0
     assert data["overall_health"] == "unhealthy"
+
+
+# -- r3: a row the checker hasn't reached recently is not healthy -------------------------
+
+
+
+def _add(db, name, *, health, checked, enabled=True):
+    db.add(RagService(
+        name=name, display_name=name.title(), host=f"{name}-svc", port=8000, protocol="http",
+        enabled=enabled, health_status=health, last_health_check=checked,
+    ))
+    db.commit()
+
+
+def _status(owner_client):
+    with patch("main.httpx.AsyncClient", return_value=_mock_ok_client()):
+        return owner_client.get("/api/status").json()
+
+
+def _register_direct_check_names(db, checked):
+    for name in ("gateway", "orchestrator", "ollama", "searxng"):
+        _add(db, name, health="healthy", checked=checked)
+
+
+def test_a_stale_enabled_row_with_a_cached_healthy_reads_stale_and_not_healthy(owner_client, db):
+    _add(db, "weather", health="healthy", checked=_long_ago())
+    row = {s["name"]: s for s in _status(owner_client)["services"]}["weather"]
+    assert row["status"] == "stale" and row["monitoring"] == "stale"
+    assert row["healthy"] is False
+
+
+def test_a_disabled_row_reads_disabled_with_monitoring_off_and_is_not_healthy(owner_client, db):
+    _add(db, "tesla", health="healthy", checked=_long_ago(), enabled=False)
+    row = {s["name"]: s for s in _status(owner_client)["services"]}["tesla"]
+    assert (row["status"], row["monitoring"], row["healthy"]) == ("disabled", "off", False)
+
+
+def test_a_live_healthy_row_reports_monitoring_live(owner_client, db):
+    _add(db, "weather", health="healthy", checked=_recent())
+    row = {s["name"]: s for s in _status(owner_client)["services"]}["weather"]
+    assert (row["status"], row["monitoring"], row["healthy"]) == ("healthy", "live", True)
+
+
+def test_all_registry_rows_stale_and_no_direct_checks_is_unknown(owner_client, db):
+    _register_direct_check_names(db, _long_ago())
+    _add(db, "weather", health="healthy", checked=_long_ago())
+    data = _status(owner_client)
+    assert data["overall_health"] == "unknown"
+    assert data["healthy_services"] == 0
+
+
+def test_one_live_healthy_row_beside_a_stale_one_is_degraded(owner_client, db):
+    _register_direct_check_names(db, _long_ago())
+    _add(db, "weather", health="healthy", checked=_recent())
+    data = _status(owner_client)
+    assert data["overall_health"] == "degraded"
+    assert data["healthy_services"] == 1
+
+
+def test_a_direct_check_counts_as_live(owner_client, db):
+    _add(db, "weather", health="healthy", checked=_long_ago())  # stale
+    data = _status(owner_client)  # gateway/orchestrator/ollama checked directly (mock answers 200)
+    by_name = {s["name"]: s for s in data["services"]}
+    assert by_name["gateway"]["healthy"] is True
+    assert data["overall_health"] == "degraded"
+    assert data["healthy_services"] >= 2

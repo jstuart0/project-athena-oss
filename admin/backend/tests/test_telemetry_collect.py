@@ -107,6 +107,29 @@ def test_custom_registry_name_is_counted_not_named(db):
     assert b"acme-private-svc" not in payload.model_dump_json().encode()
 
 
+def test_a_row_the_checker_has_not_reached_recently_is_not_counted_healthy(db):
+    stale = NOW - timedelta(days=16)
+    add_service(db, "athena-orchestrator", checked=NOW)                      # core, live healthy
+    add_service(db, "athena-gateway", checked=stale)                         # core, healthy long ago
+    add_service(db, "weather", host="athena-rag-weather", checked=NOW)       # rag, live healthy
+    add_service(db, "sports", host="athena-rag-sports", checked=stale)       # rag, stale
+    add_service(db, "news", host="athena-rag-news", checked=None)            # rag, never checked
+    add_service(db, "redis", service_type="infrastructure", checked=stale)   # infrastructure, stale
+    db.commit()
+    facts = _collect(db)
+    assert (facts.core_enabled, facts.core_healthy) == (2, 1)
+    assert sorted(facts.rag_enabled) == ["news", "sports", "weather"]
+    assert sorted(facts.rag_healthy) == ["weather"]
+    assert list(facts.infrastructure_healthy) == []
+
+
+def test_the_canonical_seed_still_counts_two_core_one_healthy(db):
+    seed_canonical(db, NOW)
+    db.commit()
+    facts = _collect(db)
+    assert (facts.core_enabled, facts.core_healthy) == (2, 1)
+
+
 def test_intent_metrics_window_is_strictly_inside_30_days(db):
     for i in range(150):
         db.add(IntentMetric(intent="control", confidence=0.9, created_at=NOW - timedelta(days=29, minutes=i)))

@@ -12,6 +12,7 @@ RAG_HOST/RAG_SERVICE_HOST -> unconfigured) and the dashboard route's
 import asyncio
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -193,6 +194,10 @@ def _mock_ok_client():
     return mock_client
 
 
+def _fresh():
+    return datetime.now(timezone.utc)
+
+
 @pytest.fixture(autouse=True)
 def _allow_gateway_orchestrator_probe(monkeypatch):
     """Gateway/Orchestrator's SSRF gate is not what these tests exercise --
@@ -221,7 +226,7 @@ def test_dashboard_shows_only_core_when_no_rag_rows_exist(owner_client, db):
 def test_dashboard_reads_healthy_rag_registry_row_from_cache_no_probe(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", service_type="rag", enabled=True, health_status="healthy",
+        port=8010, protocol="http", service_type="rag", enabled=True, health_status="healthy", last_health_check=_fresh(),
     ))
     db.commit()
 
@@ -243,7 +248,7 @@ def test_dashboard_reads_healthy_rag_registry_row_from_cache_no_probe(owner_clie
 def test_dashboard_reads_unhealthy_rag_registry_row_from_cache(owner_client, db):
     db.add(RagService(
         name="sports", display_name="Sports", host="sports-svc",
-        port=8017, protocol="http", service_type="rag", enabled=True, health_status="unhealthy",
+        port=8017, protocol="http", service_type="rag", enabled=True, health_status="unhealthy", last_health_check=_fresh(),
         last_error="connection_refused",
     ))
     db.commit()
@@ -264,7 +269,7 @@ def test_dashboard_excludes_disabled_rag_row_entirely(owner_client, db):
     enabled=True, so a disabled row simply never reaches the response."""
     db.add(RagService(
         name="dining", display_name="Dining", host="dining-svc",
-        port=8019, protocol="http", service_type="rag", enabled=False, health_status="unhealthy",
+        port=8019, protocol="http", service_type="rag", enabled=False, health_status="unhealthy", last_health_check=_fresh(),
     ))
     db.commit()
 
@@ -278,6 +283,8 @@ def test_dashboard_excludes_disabled_rag_row_entirely(owner_client, db):
 
 
 def test_dashboard_reads_pending_for_null_health_status_rag_row(owner_client, db):
+    """A never-checked row is 'pending': shown on the grid, but neither healthy
+    nor a problem, so it is out of the total and the attention list."""
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
         port=8010, protocol="http", service_type="rag", enabled=True, health_status=None,
@@ -288,8 +295,9 @@ def test_dashboard_reads_pending_for_null_health_status_rag_row(owner_client, db
         response = owner_client.get("/api/dashboard")
 
     data = response.json()
-    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    assert statuses.get("Weather") == "pending"
+    assert {s["name"]: s["status"] for s in data["services"]}["Weather"] == "pending"
+    assert "Weather" not in {s["name"] for s in data["voice_health"]["critical_services"]}
+    assert data["voice_health"]["total"] == 2  # the two core services only
 
 
 def test_dashboard_unconfigured_rag_row_counts_as_attention_not_unhealthy(owner_client, db):
@@ -302,7 +310,7 @@ def test_dashboard_unconfigured_rag_row_counts_as_attention_not_unhealthy(owner_
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
         port=8010, protocol="http", service_type="rag", enabled=True,
-        health_status="unconfigured",
+        health_status="unconfigured", last_health_check=_fresh(),
     ))
     db.commit()
 
@@ -330,7 +338,7 @@ def test_dashboard_core_service_reads_registry_row_no_probe(owner_client, db):
     RAG row -- the live-probe fallback only fires when no row exists."""
     db.add(RagService(
         name="gateway", display_name="Gateway", host="athena-gateway",
-        port=8000, protocol="http", enabled=True, health_status="healthy",
+        port=8000, protocol="http", enabled=True, health_status="healthy", last_health_check=_fresh(),
     ))
     db.commit()
 
@@ -350,9 +358,9 @@ def test_dashboard_registry_driven_scenario_matches_mission_control_spec(owner_c
     disabled, 1 unhealthy) -> total 7 enabled (2 core + 5 enabled RAG),
     healthy 6, attention (critical_services) 1, disabled fully excluded."""
     db.add(RagService(name="gateway", display_name="Gateway", host="h", port=8000,
-                       protocol="http", enabled=True, health_status="healthy"))
+                       protocol="http", enabled=True, health_status="healthy", last_health_check=_fresh()))
     db.add(RagService(name="orchestrator", display_name="Orchestrator", host="h", port=8001,
-                       protocol="http", enabled=True, health_status="healthy"))
+                       protocol="http", enabled=True, health_status="healthy", last_health_check=_fresh()))
     rag_names = ["weather", "sports", "dining", "news", "stocks", "flights"]
     for i, name in enumerate(rag_names):
         is_disabled = name == "flights"
@@ -362,6 +370,7 @@ def test_dashboard_registry_driven_scenario_matches_mission_control_spec(owner_c
             protocol="http", service_type="rag",
             enabled=not is_disabled,
             health_status="unhealthy" if is_unhealthy else "healthy",
+            last_health_check=_fresh(),
         ))
     db.commit()
 

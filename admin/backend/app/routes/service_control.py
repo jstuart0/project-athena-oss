@@ -10,7 +10,7 @@ envelope (D3) with server-resolved per-row managers (D4); lifecycle actions
 route through one audited `_run_action` core (D9/D10/D20).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Response
@@ -25,7 +25,7 @@ from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
 from app.utils.service_auth import control_agent_headers
 from app.utils.rate_limit import service_control_rate_limit_dep
-from app.utils.service_state import derive_run_state
+from app.utils.service_state import apply_monitoring, derive_run_state
 from app.utils.rag_urls import check_ssrf_safe
 from app.routes.service_registry import _SERVICE_NAME_RE
 from app.routes.services import create_audit_log
@@ -110,6 +110,10 @@ class ServiceResponse(BaseModel):
     health_status: Optional[str] = None
     health_message: Optional[str] = None
     last_response_time_ms: Optional[int] = None
+    # Whether the background checker is watching the row (off|pending|stale|live)
+    # and the raw cached status behind a normalized health_status.
+    monitoring: Optional[str] = None
+    last_observed_health: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -619,6 +623,7 @@ async def list_services(
     # the exact same collision the envelope displays (xander P2 fix #1).
     target_counts = _kubernetes_target_counts(db, inv, permissions)
 
+    now = datetime.now(timezone.utc)
     rows = []
     running = stopped = disabled = 0
     for svc, resolution in resolutions:
@@ -668,7 +673,9 @@ async def list_services(
         else:
             stopped += 1
 
-        row = svc.to_dict()
+        # run_state above reads the raw column; the displayed status is
+        # decided once, in service_state.apply_monitoring.
+        row = apply_monitoring(svc.to_dict(), svc, now)
         row['run_state'] = run_state
         row['group'] = group_for(svc)
         row['manager'] = resolution.manager

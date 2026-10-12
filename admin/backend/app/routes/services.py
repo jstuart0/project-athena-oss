@@ -755,7 +755,7 @@ async def check_service_health(
     from shared.config import get_config as _get_config
     import asyncio as _asyncio
     import httpx as _httpx
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
 
     cfg = _get_config()
     semaphore = _asyncio.Semaphore(1)
@@ -777,7 +777,7 @@ async def check_service_health(
     db.query(RagService).filter(RagService.id == svc_id).update(
         {
             RagService.health_status: status,
-            RagService.last_health_check: _dt.utcnow(),
+            RagService.last_health_check: _dt.now(_tz.utc),
             RagService.last_response_time_ms: response_time_ms,
             RagService.last_error: last_error,
         },

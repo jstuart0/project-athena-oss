@@ -5,7 +5,7 @@ Aggregates data from multiple sources in a single request to reduce
 browser polling overhead and provide time-series for sparklines.
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics, RagService
 from app.utils.rag_urls import check_ssrf_safe
+from app.utils.service_state import display_status
 import httpx
 
 logger = structlog.get_logger()
@@ -35,23 +36,24 @@ _CORE_SERVICE_NAMES = {
 }
 
 
-def _registry_row_status(svc: RagService) -> str:
+# Statuses that say nothing about the service right now: switched off, never
+# checked, or not reached by the checker recently. They are never "needs
+# attention" and never count against the health percentage.
+_NOT_CHECKED_STATUSES = frozenset({"disabled", "pending", "stale"})
+
+
+def _registry_row_status(svc: RagService, now: datetime) -> str:
     """Map a registry row to the voice-health card's status vocabulary.
 
-    A disabled row is reported 'disabled' regardless of its last cached
-    health_status (which goes stale the moment the row is disabled and the
-    poller stops touching it) -- same convention as ATHENA-112/113c.
+    The displayed status is decided in ``service_state.display_status``: a
+    disabled row is 'disabled' (ATHENA-112/113c), a never-checked one
+    'pending', one the checker hasn't reached recently 'stale'. A live
     'unconfigured' (the poller's own "reachable but not configured" state)
-    counts as needing attention -- it appears in critical_services and is
-    excluded from healthy_count -- but keeps its own literal status string
-    rather than being relabeled 'unhealthy'; the two are different claims
-    (this service isn't set up vs. this service is failing).
+    needs attention but keeps its own literal status string rather than
+    being relabeled 'unhealthy'; the two are different claims (this service
+    isn't set up vs. this service is failing).
     """
-    if not svc.enabled:
-        return "disabled"
-    if svc.health_status is None:
-        return "pending"
-    return svc.health_status  # healthy | unhealthy | unconfigured
+    return display_status(svc, now)[0]
 
 
 @router.get("")
@@ -71,7 +73,8 @@ async def get_dashboard_data(
     """
     if not current_user.has_permission('read:dashboard'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    now = datetime.utcnow()
+    now = datetime.utcnow()  # naive: only the traffic queries below use it
+    status_now = datetime.now(timezone.utc)
 
     # 1. Voice Health - Check actual service health
     #
@@ -101,7 +104,7 @@ async def get_dashboard_data(
                 if row is not None:
                     service_entries.append({
                         "name": service_label,
-                        "status": _registry_row_status(row),
+                        "status": _registry_row_status(row, status_now),
                         "error": row.last_error,
                     })
                     continue
@@ -128,15 +131,20 @@ async def get_dashboard_data(
         for svc in rag_rows:
             service_entries.append({
                 "name": svc.display_name or svc.name,
-                "status": _registry_row_status(svc),
+                "status": _registry_row_status(svc, status_now),
                 "error": svc.last_error,
             })
 
-        healthy_count = sum(1 for e in service_entries if e["status"] == "healthy")
-        total_count = len(service_entries)
+        # Rows that are off, never checked or not recently checked are neither
+        # healthy nor a problem: they leave the total and the critical list,
+        # and the stale ones are reported on their own.
+        stale_count = sum(1 for e in service_entries if e["status"] == "stale")
+        counted = [e for e in service_entries if e["status"] not in _NOT_CHECKED_STATUSES]
+        healthy_count = sum(1 for e in counted if e["status"] == "healthy")
+        total_count = len(counted)
         critical_services = [
             {"name": e["name"], "status": e["status"], "last_error": e["error"]}
-            for e in service_entries if e["status"] != "healthy"
+            for e in counted if e["status"] != "healthy"
         ]
 
         health_pct = round((healthy_count / total_count * 100) if total_count > 0 else 0)
@@ -144,6 +152,7 @@ async def get_dashboard_data(
     except Exception as e:
         logger.warning("dashboard_voice_health_error", error=str(e))
         healthy_count = 0
+        stale_count = 0
         total_count = len(_CORE_SERVICE_NAMES) + len(rag_rows)
         health_pct = 0
         health_history = [0] * 20
@@ -282,6 +291,7 @@ async def get_dashboard_data(
         "voice_health": {
             "healthy": healthy_count,
             "total": total_count,
+            "stale_count": stale_count,
             "percentage": health_pct,
             "history": health_history,
             "critical_services": critical_services

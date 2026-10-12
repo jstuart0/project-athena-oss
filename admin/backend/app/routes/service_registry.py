@@ -32,7 +32,9 @@ from app.auth.oidc import get_current_user
 from app.utils.service_auth import require_service_or_user_permission, require_user_permission, verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
 from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url, validate_host
-from app.utils.service_state import normalized_health_status
+from app.services import ha_status
+from app.services.ha_status import HAStatus
+from app.utils.service_state import apply_monitoring
 from shared.config import get_config
 import structlog
 
@@ -131,11 +133,11 @@ async def get_all_services(
     """
     services = db.query(RagService).order_by(RagService.name).all()
 
+    now = datetime.now(timezone.utc)
     service_list = []
     enabled_list = []
     for svc in services:
-        d = svc.to_dict()
-        d['health_status'] = normalized_health_status(d.get('enabled', False), d.get('health_status'))
+        d = apply_monitoring(svc.to_dict(), svc, now)
         service_list.append(d)
         if d.get('enabled'):
             enabled_list.append(d)
@@ -154,13 +156,36 @@ async def get_all_services(
 def _overall_health(services: list) -> str:
     """Compute aggregate health over the given services (ATHENA-112: caller
     must pass the ENABLED subset -- this function has no opinion on enabled
-    state itself, it just averages whatever list it's given)."""
+    state itself, it just averages whatever list it's given).
+
+    A row carries ``health_status`` (normalized: ``stale`` and ``pending``
+    are not healthy) and, optionally, ``monitoring`` (absent means live).
+    When no row is live, nothing is currently known, so the answer is
+    ``unknown`` rather than a verdict built from past observations."""
     if not services:
+        return 'unknown'
+    if not any(s.get('monitoring', 'live') == 'live' for s in services):
         return 'unknown'
     healthy = sum(1 for s in services if s.get('health_status') == 'healthy')
     if healthy == len(services):
         return 'healthy'
     return 'degraded' if healthy > 0 else 'unhealthy'
+
+
+# ---------------------------------------------------------------------------
+# GET /home-assistant — Athena's own Home Assistant connection
+# ---------------------------------------------------------------------------
+
+@router.get("/home-assistant", dependencies=[Depends(require_user_permission("read"))])
+async def get_home_assistant_status() -> HAStatus:
+    """What the orchestrator last observed of its Home Assistant connection,
+    merged across replicas, classified for the Dashboard card.
+
+    Passive: nothing is sent to Home Assistant. A registry row is not
+    consulted (an install may not have one). Declared before
+    /services/{service_name} only for readability; the paths don't overlap.
+    """
+    return await ha_status.fetch_ha_link()
 
 
 # ---------------------------------------------------------------------------
@@ -181,9 +206,7 @@ async def get_service(
     svc = db.query(RagService).filter(RagService.name == service_name).first()
     if not svc:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
-    d = svc.to_dict()
-    d['health_status'] = normalized_health_status(d.get('enabled', False), d.get('health_status'))
-    return d
+    return apply_monitoring(svc.to_dict(), svc, datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +576,6 @@ async def check_service_health(
     button. (ATHENA-1 Phase 4; plan §Phase 4 D)
     """
     from app.services.health_poller import _poll_one, _classify_and_sanitize
-    from datetime import datetime
 
     svc = db.query(RagService).filter(RagService.name == service_name).first()
     if not svc:
@@ -584,7 +606,7 @@ async def check_service_health(
     db.query(RagService).filter(RagService.id == svc_id).update(
         {
             RagService.health_status: status,
-            RagService.last_health_check: datetime.utcnow(),
+            RagService.last_health_check: datetime.now(timezone.utc),
             RagService.last_response_time_ms: response_time_ms,
             RagService.last_error: last_error,
             RagService.health_message: health_message,

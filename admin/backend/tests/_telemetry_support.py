@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, List, Tuple
 
@@ -159,11 +160,18 @@ def add_backend(db, model, backend_type, endpoint_url, *, enabled=True):
     db.add(LLMBackend(model_name=model, backend_type=backend_type, endpoint_url=endpoint_url, enabled=enabled))
 
 
-def add_service(db, name, *, service_type=None, host=None, enabled=True, health="healthy"):
+CANONICAL_NOW = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def add_service(db, name, *, service_type=None, host=None, enabled=True, health="healthy",
+                checked=CANONICAL_NOW):
+    """`checked` is when the health poller last reached the row. The default is
+    the canonical collection time, so a seeded row reads as recently checked;
+    pass None for a never-checked row or an older time for a stale one."""
     from app.models import RagService
 
     db.add(RagService(name=name, display_name=name, service_type=service_type, host=host or name,
-                      port=8000, enabled=enabled, health_status=health))
+                      port=8000, enabled=enabled, health_status=health, last_health_check=checked))
 
 
 def seed_canonical(db, now):
@@ -206,14 +214,14 @@ def seed_canonical(db, now):
     add_backend(db, "claude-sonnet-4-20250514", "anthropic", "https://api.anthropic.com")
     add_backend(db, "mixtral:8x7b", "mlx", "http://localhost:8080")
 
-    add_service(db, "weather", host="athena-rag-weather")
-    add_service(db, "sports", host="athena-rag-sports", health="unhealthy")
-    add_service(db, "news", host="athena-rag-news", enabled=False)
-    add_service(db, "acme-internal-rag", service_type="rag")
-    add_service(db, "athena-orchestrator")
-    add_service(db, "athena-gateway", health="unhealthy")
-    add_service(db, "redis", service_type="infrastructure")
-    add_service(db, "qdrant", service_type="infrastructure", health="unhealthy")
+    add_service(db, "weather", host="athena-rag-weather", checked=now)
+    add_service(db, "sports", host="athena-rag-sports", health="unhealthy", checked=now)
+    add_service(db, "news", host="athena-rag-news", enabled=False, checked=now)
+    add_service(db, "acme-internal-rag", service_type="rag", checked=now)
+    add_service(db, "athena-orchestrator", checked=now)
+    add_service(db, "athena-gateway", health="unhealthy", checked=now)
+    add_service(db, "redis", service_type="infrastructure", checked=now)
+    add_service(db, "qdrant", service_type="infrastructure", health="unhealthy", checked=now)
 
     db.add(Feature(name="intent_classification", display_name="x", category="processing", enabled=True))
     db.add(Feature(name="conversation_context", display_name="x", category="processing", enabled=True))

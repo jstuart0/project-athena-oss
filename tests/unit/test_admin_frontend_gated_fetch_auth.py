@@ -60,6 +60,7 @@ GATED_PREFIXES = (
     "/api/voice-config",
     "/api/music-config/browser-playback",
     "/api/service-registry/services/",
+    "/api/service-registry/home-assistant",
     "/api/escalation/metrics",
 )
 
@@ -307,9 +308,11 @@ def test_prefix_list_covers_every_user_only_route():
 def test_prefix_coverage_self_test():
     routes = _user_only_routes()
     without = tuple(p for p in GATED_PREFIXES if p not in (
-        "/api/music-config/browser-playback", "/api/service-registry/services/", "/api/escalation/metrics"))
+        "/api/music-config/browser-playback", "/api/service-registry/services/",
+        "/api/service-registry/home-assistant", "/api/escalation/metrics"))
     assert _uncovered(routes, without) == [
         ("GET", "/api/escalation/metrics/prometheus"),
         ("GET", "/api/music-config/browser-playback"),
+        ("GET", "/api/service-registry/home-assistant"),
         ("GET", "/api/service-registry/services/{service_name}"),
     ]

@@ -399,13 +399,13 @@ def _expected(op, case):
 # B1 -----------------------------------------------------------------------
 
 def test_matrix_population():
-    assert len(OPS) == 93
-    assert len(MATRIX) == 1209
-    assert len(set(MATRIX_IDS)) == 1209
+    assert len(OPS) == 94
+    assert len(MATRIX) == 1222
+    assert len(set(MATRIX_IDS)) == 1222
     pattern = re.compile(r"^g[123]_[a-z_]+_\d+-[a-z_]+$")
     assert all(pattern.match(case_id) for case_id in MATRIX_IDS)
     by_group = {group: sum(1 for op_id, _ in OPS if op_id.startswith(group + "_")) for group in ("g1", "g2", "g3")}
-    assert by_group == {"g1": 42, "g2": 23, "g3": 28}
+    assert by_group == {"g1": 42, "g2": 24, "g3": 28}
     assert OP_ID[("GET", "/api/features/public")].startswith("g2_")
     assert OP_ID[PROGRESS_OP].startswith("g1_")
     assert OP_ID[("GET", "/api/voice-config/running-config")].startswith("g3_")
@@ -456,7 +456,7 @@ def test_first_match_self_test():
 
 def test_expected_pass_codes_are_pinned():
     assert set(EXPECTED_PASS) == set(REVIEWED)
-    assert len(EXPECTED_PASS) == 93
+    assert len(EXPECTED_PASS) == 94
     assert set(_NOT_200) <= set(REVIEWED)
     assert all(reason.strip() for _status, reason in _NOT_200.values())
     assert not [op for op, status in EXPECTED_PASS.items() if status in {401, 403, 422, 503}]

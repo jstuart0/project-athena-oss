@@ -421,6 +421,22 @@ _REST_FAILURE_REASON = {
 }
 
 
+def link_times(view: Mapping[str, Any]) -> Tuple[Optional[datetime], Optional[datetime], bool]:
+    """``(success_at, failure_at, failure_from_registry)``: the newest success
+    (REST or registry) and the newest failure (REST outcome other than ok, or a
+    registry fetch failure), as aware UTC times. The truth table's S and F."""
+    rest = view.get("rest") or {}
+    registry = view.get("registry") or _DISABLED_REGISTRY
+    rest_failed = rest.get("last_outcome") not in (None, OUTCOME_OK)
+    failure_at = _parse_time(rest.get("last_outcome_at")) if rest_failed else None
+    registry_failure_at = _parse_time(registry.get("last_failure_at"))
+    successes = [t for t in (_parse_time(rest.get("last_success_at")), _parse_time(registry.get("last_success_at"))) if t]
+    from_registry = False
+    if registry_failure_at is not None and (failure_at is None or registry_failure_at > failure_at):
+        failure_at, from_registry = registry_failure_at, True
+    return (max(successes) if successes else None), failure_at, from_registry
+
+
 def link_state(view: Mapping[str, Any]) -> Tuple[str, str]:
     """``(state, reason)`` for a view, from the shared truth table. Rows 1-10 of
     the plan are commented in order; the first match wins."""
@@ -428,17 +444,7 @@ def link_state(view: Mapping[str, Any]) -> Tuple[str, str]:
         return STATE_NOT_CONFIGURED, "not_configured"
     rest = view.get("rest") or {}
     registry = view.get("registry") or _DISABLED_REGISTRY
-
-    rest_failed = rest.get("last_outcome") not in (None, OUTCOME_OK)
-    rest_failure_at = _parse_time(rest.get("last_outcome_at")) if rest_failed else None
-    registry_failure_at = _parse_time(registry.get("last_failure_at"))
-    successes = [t for t in (_parse_time(rest.get("last_success_at")), _parse_time(registry.get("last_success_at"))) if t]
-    success_at = max(successes) if successes else None
-
-    failure_from_registry = False
-    failure_at = rest_failure_at
-    if registry_failure_at is not None and (failure_at is None or registry_failure_at > failure_at):
-        failure_at, failure_from_registry = registry_failure_at, True
+    success_at, failure_at, failure_from_registry = link_times(view)
 
     if success_at is None and failure_at is None:
         return STATE_UNKNOWN, "waiting"  # row 2

@@ -11,8 +11,8 @@ import os
 import httpx
 import subprocess
 import base64
-from datetime import timedelta
-from typing import Dict, List, Any
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Any, Optional
 from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +63,7 @@ from app.routes import (
     conversations
 )
 from app.routes import telemetry as telemetry_routes
+from app.utils import service_state
 
 logger = structlog.get_logger()
 
@@ -1104,6 +1105,9 @@ class ServiceStatus(BaseModel):
     status: str
     version: str = "unknown"
     error: str = None
+    # Whether the background checker is watching this service:
+    # off | pending | stale | live (None for services checked directly).
+    monitoring: Optional[str] = None
 
 
 class SystemStatus(BaseModel):
@@ -1267,27 +1271,24 @@ async def get_system_status(
     enabled_health_dicts: List[Dict[str, Any]] = []
     registry_names = set()
 
+    now = datetime.now(timezone.utc)
     for svc in registry_rows:
         registry_names.add(svc.name.lower())
-        if not svc.enabled:
-            # Overrides whatever health_status the poller last cached before
-            # the row was disabled (ATHENA-112: that value is stale).
-            status_str = "disabled"
-        elif svc.health_status is None:
-            status_str = "pending"
-        else:
-            status_str = svc.health_status  # healthy | unhealthy | unconfigured
+        # disabled (ATHENA-112), pending, stale (the checker hasn't reached the
+        # row recently) or the cached healthy | unhealthy | unconfigured.
+        status_str, monitoring = service_state.display_status(svc, now)
         svc_status = ServiceStatus(
             name=svc.name,
             port=svc.port or 0,
             healthy=(status_str == "healthy"),
             status=status_str,
+            monitoring=monitoring,
         )
         if svc.last_error:
             svc_status.error = svc.last_error
         service_statuses.append(svc_status)
         if status_str != "disabled":
-            enabled_health_dicts.append({"health_status": status_str})
+            enabled_health_dicts.append({"health_status": status_str, "monitoring": monitoring})
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         checks = []
@@ -1302,7 +1303,10 @@ async def get_system_status(
 
     for check in checks:
         service_statuses.append(check)
-        enabled_health_dicts.append({"health_status": "healthy" if check.healthy else check.status})
+        # A direct check just ran, so it is live by definition.
+        enabled_health_dicts.append(
+            {"health_status": "healthy" if check.healthy else check.status, "monitoring": "live"}
+        )
 
     healthy_count = sum(1 for d in enabled_health_dicts if d["health_status"] == "healthy")
     total_count = len(enabled_health_dicts)

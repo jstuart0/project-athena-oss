@@ -25,6 +25,7 @@ from app.models import (
 from app.services.service_managers import group_for
 from app.services.telemetry import classify
 from app.services.telemetry.schema import BACKENDS, KNOWN_COMPONENTS, ComponentFact, Facts
+from app.utils.service_state import display_status
 
 AsyncResolver = Callable[[str], Awaitable[List[str]]]
 
@@ -109,7 +110,7 @@ async def _localities(resolutions: List[_Resolution], resolver: AsyncResolver) -
     return [classify.locality(r.backend, r.component, r.raw_model, r.endpoint_url, answered) for r in resolutions]
 
 
-def _services(db: Session):
+def _services(db: Session, now: datetime):
     core_enabled = core_healthy = 0
     rag_enabled: List[str] = []
     rag_healthy: List[str] = []
@@ -118,7 +119,9 @@ def _services(db: Session):
         if not row.enabled:
             continue
         group = group_for(row)
-        healthy = (row.health_status or "").lower() == "healthy"
+        # A row the checker hasn't reached recently (stale) or ever (pending)
+        # is not counted healthy on the strength of an old reading.
+        healthy = display_status(row, now)[0].lower() == "healthy"
         name = (row.name or "").lower()
         if group == "rag":
             rag_enabled.append(name)
@@ -183,7 +186,7 @@ async def collect_facts(
         for r, loc in zip(resolutions, localities)
     )
 
-    core_enabled, core_healthy, rag_enabled, rag_healthy, infra_healthy = _services(db)
+    core_enabled, core_healthy, rag_enabled, rag_healthy, infra_healthy = _services(db, now)
     queries_30d, intent_counts = _usage(db, now)
 
     guest = db.query(GuestModeConfig).order_by(GuestModeConfig.id).first()
