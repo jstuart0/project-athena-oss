@@ -243,7 +243,10 @@ async def _get(
 ) -> Tuple[Optional[int], Optional[bytes]]:
     """``(status, body)``; status None when the request itself failed."""
     try:
-        async with httpx.AsyncClient(timeout=LEG_TIMEOUT_SECONDS, follow_redirects=False, transport=transport) as client:
+        async with httpx.AsyncClient(
+            timeout=LEG_TIMEOUT_SECONDS, follow_redirects=False, transport=transport,
+            trust_env=False,  # a proxy variable must never carry the service key
+        ) as client:
             async with client.stream("GET", url, headers=headers) as response:
                 if response.status_code != 200:
                     return response.status_code, None

@@ -199,6 +199,22 @@ def test_the_clients_do_not_follow_redirects_or_turn_tls_verification_off():
     assert "X-Service-Key" in source and "default_headers" not in source
 
 
+@pytest.mark.parametrize("proxy_var", ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"])
+def test_both_legs_ignore_proxy_variables_so_the_key_never_rides_a_proxy(monkeypatch, proxy_var):
+    seen = []
+    real = httpx.AsyncClient
+
+    def recording(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ha_status.httpx, "AsyncClient", recording)
+    monkeypatch.setenv(proxy_var, "http://proxy.invalid:3128")
+    fetch(Legs())
+    assert len(seen) == 2
+    assert all(kwargs.get("trust_env") is False for kwargs in seen), seen
+
+
 def test_the_body_cap_is_64_kib():
     assert ha_status.MAX_BODY_BYTES == 64 * 1024
 
