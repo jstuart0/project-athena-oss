@@ -13,21 +13,15 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
 import structlog
-import httpx
-import os
 
 from app.database import get_db
 from app.models import RoomTVConfig, TVAppConfig, TVFeatureFlag
 from app.auth.oidc import get_current_user
+from app.services import ha_access
 from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/room-tv", tags=["room-tv"])
-
-# Home Assistant configuration
-HA_URL = os.getenv("HA_URL", "http://localhost:8123")
-HA_TOKEN = os.getenv("HA_TOKEN", "")
-
 
 # Pydantic models
 class RoomTVConfigCreate(BaseModel):
@@ -331,21 +325,12 @@ async def discover_apple_tvs(
 
     Returns media_player entities with 10+ apps in source_list (Apple TVs).
     """
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(
-                f"{HA_URL}/api/states",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"}
-            )
-            response.raise_for_status()
-            entities = response.json()
-
-    except httpx.HTTPError as e:
-        logger.error("ha_discovery_failed", error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant connection failed: {str(e)}")
+        response = await ha_access.channel().request("GET", "/api/states", timeout=10.0)
+        response.raise_for_status()
+        entities = response.json()
+    except Exception as e:
+        raise ha_access.http_error(e)
 
     # Find Apple TVs (media_players with 10+ source apps)
     apple_tvs = []
@@ -407,21 +392,12 @@ async def sync_apps_from_device(
 
     Adds any new apps found on the device that aren't in the database.
     """
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(
-                f"{HA_URL}/api/states/{entity_id}",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"}
-            )
-            response.raise_for_status()
-            entity = response.json()
-
-    except httpx.HTTPError as e:
-        logger.error("ha_app_sync_failed", error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant connection failed: {str(e)}")
+        response = await ha_access.channel().request("GET", f"/api/states/{entity_id}", timeout=10.0)
+        response.raise_for_status()
+        entity = response.json()
+    except Exception as e:
+        raise ha_access.http_error(e)
 
     source_list = entity.get("attributes", {}).get("source_list", [])
     if not source_list:
@@ -477,9 +453,6 @@ async def launch_app_on_tv(
 
     Optionally sends a 'select' command after launch to bypass profile screens.
     """
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     # Get room config
     config = db.query(RoomTVConfig).filter(
         RoomTVConfig.room_name == room_name.lower(),
@@ -494,47 +467,45 @@ async def launch_app_on_tv(
     delay_ms = app_config.profile_select_delay_ms if app_config else 1500
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            # Launch the app
-            response = await client.post(
-                f"{HA_URL}/api/services/media_player/select_source",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"},
+        channel = ha_access.channel()
+        # Launch the app
+        response = await channel.request(
+            "POST", "/api/services/media_player/select_source", timeout=10.0,
+            json={
+                "entity_id": config.media_player_entity_id,
+                "source": app_name,
+            }
+        )
+        response.raise_for_status()
+
+        result = {
+            "status": "launched",
+            "room": room_name,
+            "app": app_name,
+            "entity_id": config.media_player_entity_id,
+        }
+
+        # Send select command after delay if requested
+        if send_select and app_config and app_config.has_profile_screen:
+            import asyncio
+            await asyncio.sleep(delay_ms / 1000)
+
+            response = await channel.request(
+                "POST", "/api/services/remote/send_command", timeout=10.0,
                 json={
-                    "entity_id": config.media_player_entity_id,
-                    "source": app_name,
+                    "entity_id": config.remote_entity_id,
+                    "command": "select",
                 }
             )
             response.raise_for_status()
+            result["profile_select_sent"] = True
 
-            result = {
-                "status": "launched",
-                "room": room_name,
-                "app": app_name,
-                "entity_id": config.media_player_entity_id,
-            }
+        logger.info("tv_app_launched", room=room_name, app=app_name)
+        return result
 
-            # Send select command after delay if requested
-            if send_select and app_config and app_config.has_profile_screen:
-                import asyncio
-                await asyncio.sleep(delay_ms / 1000)
-
-                response = await client.post(
-                    f"{HA_URL}/api/services/remote/send_command",
-                    headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                    json={
-                        "entity_id": config.remote_entity_id,
-                        "command": "select",
-                    }
-                )
-                response.raise_for_status()
-                result["profile_select_sent"] = True
-
-            logger.info("tv_app_launched", room=room_name, app=app_name)
-            return result
-
-    except httpx.HTTPError as e:
-        logger.error("tv_app_launch_failed", room=room_name, app=app_name, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant call failed: {str(e)}")
+    except Exception as e:
+        logger.error("tv_app_launch_failed", room=room_name, app=app_name)
+        raise ha_access.http_error(e)
 
 
 @router.post("/control/{room_name}/power")
@@ -548,9 +519,6 @@ async def power_control(
     if action not in ("on", "off"):
         raise HTTPException(status_code=400, detail="Action must be 'on' or 'off'")
 
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     config = db.query(RoomTVConfig).filter(
         RoomTVConfig.room_name == room_name.lower(),
         RoomTVConfig.enabled == True
@@ -560,21 +528,19 @@ async def power_control(
         raise HTTPException(status_code=404, detail="Room TV config not found")
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            service = "turn_on" if action == "on" else "turn_off"
-            response = await client.post(
-                f"{HA_URL}/api/services/media_player/{service}",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                json={"entity_id": config.media_player_entity_id}
-            )
-            response.raise_for_status()
+        service = "turn_on" if action == "on" else "turn_off"
+        response = await ha_access.channel().request(
+            "POST", f"/api/services/media_player/{service}", timeout=10.0,
+            json={"entity_id": config.media_player_entity_id}
+        )
+        response.raise_for_status()
 
         logger.info("tv_power_control", room=room_name, action=action)
         return {"status": "success", "room": room_name, "action": action}
 
-    except httpx.HTTPError as e:
-        logger.error("tv_power_control_failed", room=room_name, action=action, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant call failed: {str(e)}")
+    except Exception as e:
+        logger.error("tv_power_control_failed", room=room_name, action=action)
+        raise ha_access.http_error(e)
 
 
 @router.post("/control/{room_name}/remote")
@@ -590,9 +556,6 @@ async def send_remote_command(
     if command not in valid_commands:
         raise HTTPException(status_code=400, detail=f"Command must be one of: {', '.join(valid_commands)}")
 
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     config = db.query(RoomTVConfig).filter(
         RoomTVConfig.room_name == room_name.lower(),
         RoomTVConfig.enabled == True
@@ -602,27 +565,26 @@ async def send_remote_command(
         raise HTTPException(status_code=404, detail="Room TV config not found")
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            import asyncio
-            for i in range(repeat):
-                response = await client.post(
-                    f"{HA_URL}/api/services/remote/send_command",
-                    headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                    json={
-                        "entity_id": config.remote_entity_id,
-                        "command": command,
-                    }
-                )
-                response.raise_for_status()
-                if i < repeat - 1:
-                    await asyncio.sleep(0.3)  # Small delay between repeats
+        import asyncio
+        channel = ha_access.channel()
+        for i in range(repeat):
+            response = await channel.request(
+                "POST", "/api/services/remote/send_command", timeout=10.0,
+                json={
+                    "entity_id": config.remote_entity_id,
+                    "command": command,
+                }
+            )
+            response.raise_for_status()
+            if i < repeat - 1:
+                await asyncio.sleep(0.3)  # Small delay between repeats
 
         logger.info("tv_remote_command", room=room_name, command=command, repeat=repeat)
         return {"status": "success", "room": room_name, "command": command, "repeat": repeat}
 
-    except httpx.HTTPError as e:
-        logger.error("tv_remote_command_failed", room=room_name, command=command, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant call failed: {str(e)}")
+    except Exception as e:
+        logger.error("tv_remote_command_failed", room=room_name, command=command)
+        raise ha_access.http_error(e)
 
 
 @router.get("/control/{room_name}/state")
@@ -632,9 +594,6 @@ async def get_tv_state(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get current state of a room's Apple TV."""
-    if not HA_TOKEN:
-        raise HTTPException(status_code=500, detail="Home Assistant token not configured")
-
     config = db.query(RoomTVConfig).filter(
         RoomTVConfig.room_name == room_name.lower(),
         RoomTVConfig.enabled == True
@@ -644,13 +603,11 @@ async def get_tv_state(
         raise HTTPException(status_code=404, detail="Room TV config not found")
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(
-                f"{HA_URL}/api/states/{config.media_player_entity_id}",
-                headers={"Authorization": f"Bearer {HA_TOKEN}"}
-            )
-            response.raise_for_status()
-            entity = response.json()
+        response = await ha_access.channel().request(
+            "GET", f"/api/states/{config.media_player_entity_id}", timeout=10.0,
+        )
+        response.raise_for_status()
+        entity = response.json()
 
         attrs = entity.get("attributes", {})
         return {
@@ -666,6 +623,6 @@ async def get_tv_state(
             "source_list": attrs.get("source_list", []),
         }
 
-    except httpx.HTTPError as e:
-        logger.error("tv_state_failed", room=room_name, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Home Assistant call failed: {str(e)}")
+    except Exception as e:
+        logger.error("tv_state_failed", room=room_name)
+        raise ha_access.http_error(e)

@@ -191,6 +191,16 @@ def memory_vector_test_env():
         memory_vectors.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _no_home_assistant_access_between_tests():
+    """A test that installs or starts the Home Assistant stack leaves nothing
+    behind: no resolver task, no channel, no latch."""
+    from app.services import ha_access
+
+    yield
+    ha_access.reset_for_test()
+
+
 @pytest.fixture(scope="function")
 def db():
     """Create fresh database for each test."""

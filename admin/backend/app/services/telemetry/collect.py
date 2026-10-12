@@ -22,10 +22,12 @@ from app.models import (
     CalendarSource, CloudLLMProvider, ComponentModelAssignment, Device, Feature, GuestModeConfig, IntentMetric,
     LiveKitConfig, LLMBackend, Memory, RagService, User, VoiceInterface,
 )
+from app.services.ha_access import lookup_from_db
 from app.services.service_managers import group_for
 from app.services.telemetry import classify
 from app.services.telemetry.schema import BACKENDS, KNOWN_COMPONENTS, ComponentFact, Facts
 from app.utils.service_state import display_status
+from shared.ha_credentials import resolve
 
 AsyncResolver = Callable[[str], Awaitable[List[str]]]
 
@@ -210,7 +212,7 @@ async def collect_facts(
         )),
         modules_enabled=tuple(modules),
         flags_enabled=tuple(sorted(n for (n,) in db.query(Feature.name).filter(Feature.enabled == True).all())),  # noqa: E712
-        ha_configured=bool(env.get("HA_URL") and env.get("HA_TOKEN")),
+        ha_configured=resolve(lookup_from_db(db), env, previous=None, service_api_key=None).configured,
         wyoming_devices=db.query(Device).filter(Device.device_type == "wyoming").count(),
         jetson_devices=db.query(Device).filter(Device.device_type == "jetson").count(),
         livekit_enabled=db.query(LiveKitConfig).filter(LiveKitConfig.enabled == True).count() > 0,  # noqa: E712

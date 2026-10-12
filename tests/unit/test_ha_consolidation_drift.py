@@ -7,10 +7,9 @@ population, has a floor and a named member so it can't pass on an empty scan, an
 has a negative control: the detector is run on planted source for each form it
 claims to catch.
 
-Parts of the consolidation land in the admin-backend phase. Until then the
-admin modules still hold their old code, and ``PENDING_PHASE_3`` names each such
-``(file, function)`` per class. The admin phase deletes the entries and asserts
-the dict is empty, so a pending entry can't outlive the work it stands for.
+The admin-backend modules joined the shared path in the last phase, so the old
+``PENDING_PHASE_3`` allowance is empty and ``test_no_admin_module_is_left_pending``
+keeps it that way.
 """
 from __future__ import annotations
 
@@ -27,31 +26,13 @@ SCAN_ROOTS = ("src", "admin/backend/app", "admin/backend/main.py", "apps")
 HA_ENV_NAMES = ("HA_URL", "HA_TOKEN", "HA_WS_URL")
 ADMIN_ROUTES = "admin/backend/app/routes/"
 
-# Admin-backend modules the admin phase brings onto the shared path. Each entry is
-# (file relative to the repo root, qualified function), per test class.
-PENDING_PHASE_3: Dict[str, Set[Tuple[str, str]]] = {
-    "TestCredentialReaders": {
-        (ADMIN_ROUTES + "room_tv.py", "<module>"),
-        (ADMIN_ROUTES + "room_audio.py", "<module>"),
-        (ADMIN_ROUTES + "ha_pipelines.py", "<module>"),
-        (ADMIN_ROUTES + "music_config.py", "<module>"),
-        ("admin/backend/app/services/telemetry/collect.py", "collect_facts"),
-    },
-    "TestBearerSites": {
-        (ADMIN_ROUTES + "room_tv.py", name)
-        for name in ("discover_apple_tvs", "get_tv_state", "launch_app_on_tv", "power_control", "send_remote_command", "sync_apps_from_device")
-    } | {(ADMIN_ROUTES + "room_audio.py", name) for name in ("discover_media_players", "test_room_audio")},
-    "TestWebSocketAuth": {
-        (ADMIN_ROUTES + "ha_pipelines.py", "ha_websocket_command"),
-        (ADMIN_ROUTES + "ha_pipelines.py", "<module>"),
-    },
-    "TestConstructionSites": {
-        ("admin/backend/app/services/ha_access.py", "init"),
-        ("admin/backend/app/services/ha_access.py", "ws_session"),
-    },
-    "TestVocabularyOwner": {("admin/backend/app/services/ha_status.py", "<module>")},
-    "TestKeyNameLiteral": set(),
-}
+# Phase 3 brought the admin modules onto the shared path; nothing is pending.
+# ``test_no_admin_module_is_left_pending`` fails if an entry is ever added back.
+PENDING_PHASE_3: Dict[str, Set[Tuple[str, str]]] = {}
+
+# The one place a ``ha_ws_session(profile=...)`` call may pass a parameter rather
+# than a profile constant: admin's door, which refuses anything but PIPELINES.
+PROFILE_PARAMETER_SITE = ("admin/backend/app/services/ha_access.py", "ws_session")
 
 
 # -- scanning ------------------------------------------------------------------------------------
@@ -337,10 +318,6 @@ def channel_request_sites(tree: ast.AST) -> Set[str]:
     return found
 
 
-def with_pending(cls: str, allowed: Set[Tuple[str, str]]) -> Set[Tuple[str, str]]:
-    return allowed | PENDING_PHASE_3.get(cls, set())
-
-
 # ---------------------------------------------------------------------------------------------------
 # One credential reader
 # ---------------------------------------------------------------------------------------------------
@@ -354,12 +331,12 @@ class TestCredentialReaders:
 
     def test_only_the_resolver_and_the_pinned_exception_read_the_environment(self):
         found = shipped_population(env_readers, ('HA_',))
-        assert found == with_pending("TestCredentialReaders", self.ALLOWED), sorted(found ^ with_pending("TestCredentialReaders", self.ALLOWED))
+        assert found == self.ALLOWED, sorted(found ^ self.ALLOWED)
         assert len(found) >= 2 and ("src/shared/ha_credentials.py", "resolve") in found
 
     def test_the_names_appear_as_strings_only_where_they_are_read(self):
         files = {rel for rel, _ in shipped_population(ha_name_literals, ('HA_',))}
-        allowed = {rel for rel, _ in with_pending("TestCredentialReaders", self.ALLOWED)}
+        allowed = {rel for rel, _ in self.ALLOWED}
         assert files == allowed, sorted(files ^ allowed)
 
     def test_the_cached_config_has_no_field_for_them(self):
@@ -393,7 +370,7 @@ class TestCredentialReaders:
 class TestKeyNameLiteral:
     def test_the_key_name_is_written_once(self):
         found = shipped_population(key_name_literals, ('home-assistant',))
-        expected = with_pending("TestKeyNameLiteral", {("src/shared/ha_credentials.py", "<module>")})
+        expected = {("src/shared/ha_credentials.py", "<module>")}
         assert found == expected, sorted(found ^ expected)
 
     def test_negative_control(self):
@@ -438,12 +415,10 @@ class TestBearerSites:
 
     def test_the_header_is_built_in_the_transport_and_nowhere_else_that_is_not_classified(self):
         found = self.sites()
-        ha_pending = {site for site in with_pending("TestBearerSites", set())}
-        unclassified = set(found) - self.HA - set(self.JARVIS_BEARER) - set(self.NON_HA) - ha_pending
+        unclassified = set(found) - self.HA - set(self.JARVIS_BEARER) - set(self.NON_HA)
         assert unclassified == set(), f"a new Bearer site: classify it or route it through HATransport: {sorted(unclassified)}"
         assert self.HA <= set(found), "the transport must still build the header"
         assert {site: found[site] for site in self.JARVIS_BEARER} == self.JARVIS_BEARER
-        assert ha_pending <= set(found) or ha_pending == set(), sorted(ha_pending - set(found))
 
     def test_the_non_ha_allowlist_has_no_dead_entries(self):
         assert set(self.NON_HA) <= set(self.sites()), sorted(set(self.NON_HA) - set(self.sites()))
@@ -479,26 +454,23 @@ class TestWebSocketAuth:
 
     def test_the_auth_frame_is_built_in_ha_ws_only(self):
         found = shipped_population(auth_frame_sites, ('access_token',))
-        expected = with_pending("TestWebSocketAuth", {("src/shared/ha_ws.py", "_handshake")})
+        expected = {("src/shared/ha_ws.py", "_handshake")}
         assert found <= expected and ("src/shared/ha_ws.py", "_handshake") in found, sorted(found ^ expected)
 
     def test_the_websocket_path_is_written_in_the_resolver_only(self):
         found = shipped_population(websocket_path_literals, ('/api/websocket',))
-        expected = with_pending("TestWebSocketAuth", {("src/shared/ha_credentials.py", "<module>")})
+        expected = {("src/shared/ha_credentials.py", "<module>")}
         assert found <= expected and ("src/shared/ha_credentials.py", "<module>") in found, sorted(found ^ expected)
 
     def test_the_derived_websocket_url_is_read_by_the_handshake_only(self):
         found = shipped_population(ws_url_reads, ('ws_url', 'websocket_url'))
         files = {rel for rel, _ in found}
-        allowed = {"src/shared/ha_credentials.py", "src/shared/ha_ws.py"} | {rel for rel, _ in PENDING_PHASE_3["TestWebSocketAuth"]}
+        allowed = {"src/shared/ha_credentials.py", "src/shared/ha_ws.py"} 
         assert files <= allowed and "src/shared/ha_ws.py" in files, sorted(files ^ allowed)
 
     def test_the_websockets_package_is_used_by_ha_ws_and_the_music_assistant_proxies_only(self):
         found = shipped_population(websocket_library_users, ('websockets', 'ws_connect'))
-        expected = with_pending(
-            "TestWebSocketAuth",
-            {("src/shared/ha_ws.py", "_default_connect")} | self.GATEWAY_MUSIC_ASSISTANT | self.JARVIS_WEBSOCKETS,
-        )
+        expected = {("src/shared/ha_ws.py", "_default_connect")} | self.GATEWAY_MUSIC_ASSISTANT | self.JARVIS_WEBSOCKETS
         assert found <= expected, f"a new websocket user: {sorted(found - expected)}"
         assert ("src/shared/ha_ws.py", "_default_connect") in found
         assert self.GATEWAY_MUSIC_ASSISTANT <= found, sorted(self.GATEWAY_MUSIC_ASSISTANT - found)
@@ -530,7 +502,7 @@ class TestWebSocketProfiles:
                     calls += 1
                     profile = next((k.value for k in node.keywords if k.arg == "profile"), None)
                     named = getattr(profile, "id", getattr(profile, "attr", None))
-                    allowed_parameter = (rel, qual) in PENDING_PHASE_3["TestConstructionSites"] and named == "profile"
+                    allowed_parameter = (rel, qual) == PROFILE_PARAMETER_SITE and named == "profile"
                     assert named in self.PROFILE_NAMES or allowed_parameter, (rel, qual, named)
         assert calls >= 1
 
@@ -592,23 +564,14 @@ class TestConstructionSites:
         ("src/gateway/main.py", "lifespan", "GatewayHA"): 1,
         ("src/shared/ha_registry.py", "snapshot_fetcher.fetch", "ha_ws_session"): 1,
         ("src/shared/ha_http.py", "HATransport._prove", "prove_token"): 1,
-    })
-    PENDING_SITES = Counter({
         ("admin/backend/app/services/ha_access.py", "init", "HACredentialResolver"): 1,
         ("admin/backend/app/services/ha_access.py", "init", "HAAuthLatch"): 1,
         ("admin/backend/app/services/ha_access.py", "init", "HAChannel"): 1,
         ("admin/backend/app/services/ha_access.py", "ws_session", "ha_ws_session"): 1,
     })
-
     def test_the_multiset_of_construction_sites_is_exact(self):
         found = construction_population()
-        core = Counter({k: v for k, v in found.items() if not k[0].startswith("admin/backend/")})
-        assert core == self.EXPECTED, {"missing": dict(self.EXPECTED - core), "extra": dict(core - self.EXPECTED)}
-        admin = Counter({k: v for k, v in found.items() if k[0].startswith("admin/backend/")})
-        if PENDING_PHASE_3["TestConstructionSites"]:
-            assert not (admin - self.PENDING_SITES), dict(admin - self.PENDING_SITES)
-        else:
-            assert admin == self.PENDING_SITES, {"missing": dict(self.PENDING_SITES - admin), "extra": dict(admin - self.PENDING_SITES)}
+        assert found == self.EXPECTED, {"missing": dict(self.EXPECTED - found), "extra": dict(found - self.EXPECTED)}
 
     def test_a_latch_is_never_built_without_redis_in_production(self):
         bad = []
@@ -815,6 +778,10 @@ class TestOrchestratorRegistryReads:
         assert self.reads(ast.parse("def h(room_directory):\n    return room_directory.current()\n"), "current") == set()
 
 
+def test_no_admin_module_is_left_pending():
+    assert PENDING_PHASE_3 == {}
+
+
 class TestVocabularyOwner:
     NAMES = ("OUTCOMES", "REGISTRY_STATES", "FAILURE_CLASSES", "CALLERS")
     AUTH_CONSTANTS = (
@@ -864,10 +831,7 @@ class TestVocabularyOwner:
         declares = any(
             re.search(r"Literal\[[^\]]*" + word, source) for word in words
         )
-        if (path, "<module>") in PENDING_PHASE_3["TestVocabularyOwner"]:
-            assert declares, "the pending entry is stale: the classifier no longer declares Literals"
-        else:
-            assert not declares, "ha_status.py must derive its words from shared.ha_link"
+        assert not declares, "ha_status.py must derive its words from shared.ha_link"
 
 
 class TestJarvisWebPinned:

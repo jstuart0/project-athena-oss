@@ -64,6 +64,12 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_room_directory_refresh.py",
     "tests/unit/test_gateway_ha_channel.py",
     "tests/unit/test_ha_client_over_the_channel.py",
+    "admin/backend/tests/test_ha_access.py",
+    "admin/backend/tests/test_ha_key_write_boundary.py",
+    "admin/backend/tests/test_ha_pipelines_routes.py",
+    "admin/backend/tests/test_room_tv_audio_ha_channel.py",
+    "admin/backend/tests/test_ha_status_v1_reader_compat.py",
+    "admin/backend/tests/test_dashboard_not_checked.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

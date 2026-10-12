@@ -198,9 +198,6 @@ LEGACY_PERMISSIONLESS_BY_MODULE = {
         'POST /api/guests',
         'PUT /api/guests/{guest_id}',
     ],
-    'ha_pipelines': [
-        'POST /api/ha-pipelines/pipelines/set-preferred',
-    ],
     'hallucination_checks': [
         'DELETE /api/hallucination-checks/{check_id}',
         'GET /api/hallucination-checks',
@@ -590,4 +587,4 @@ LEGACY_PERMISSIONLESS_BY_MODULE = {
 LEGACY_PERMISSIONLESS = frozenset(
     tuple(op.split(" ", 1)) for ops in LEGACY_PERMISSIONLESS_BY_MODULE.values() for op in ops
 )
-LEGACY_PERMISSIONLESS_COUNT = 454
+LEGACY_PERMISSIONLESS_COUNT = 453

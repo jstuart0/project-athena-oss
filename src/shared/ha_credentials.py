@@ -293,6 +293,14 @@ def ha_url_problem(url: Any, *, source: str) -> Optional[str]:
     return _inspect(url, source)[0]
 
 
+def url_origin(url: Any) -> str:
+    """The origin (scheme, host, effective port) of an admin-style address, or ""
+    for one that isn't a valid address. A token is bound to this: a changed
+    origin means the stored token is no longer the right one to send there."""
+    parsed = _inspect(url, SOURCE_ADMIN)[1]
+    return parsed.origin if parsed else ""
+
+
 def websocket_url(ha_url: str) -> str:
     base = ha_url.strip().rstrip("/")
     if base.startswith("https://"):

@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import structlog
@@ -64,10 +64,6 @@ REASONS = frozenset({
 GATEWAY_VALUES = ("ok", "refused", "unavailable", "disabled", "unknown", "not_checked")
 _GATEWAY_REPORTED = frozenset({"ok", "refused", "unavailable", "disabled"})
 
-Outcome = Literal["ok", "auth_rejected", "forbidden", "ha_error", "timeout", "unreachable", "tls_error", "error"]
-RegistryState = Literal["refused", "unavailable", "ok", "disabled"]
-FailureClass = Literal["auth", "timeout", "unreachable", "other"]
-Coverage = Literal["cluster", "replica"]
 
 
 def _nonneg_int(value: Any) -> Optional[int]:
@@ -102,16 +98,29 @@ class _Section(BaseModel):
         return value
 
 
+def _word_in(allowed: Any, value: Any) -> Any:
+    """``value`` when it is one of the shared vocabulary's words, else an error:
+    an unknown word is a payload this admin build can't read (``orchestrator_outdated``)."""
+    if value not in allowed:
+        raise ValueError("not a word of the shared vocabulary")
+    return value
+
+
 def _real_bool(value: Any) -> bool:
     return value is True
 
 
 class _Rest(_Section):
-    last_outcome: Optional[Outcome]
+    last_outcome: Optional[str]
     last_outcome_at: Optional[str]
     last_success_at: Optional[str]
     consecutive_failures: Optional[int]
     ban_suspected: bool = False
+
+    @field_validator("last_outcome", mode="after")
+    @classmethod
+    def _outcome(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _word_in(ha_link.OUTCOMES, value)
 
     @field_validator("ban_suspected", mode="before")
     @classmethod
@@ -120,12 +129,22 @@ class _Rest(_Section):
 
 
 class _Registry(_Section):
-    state: RegistryState
+    state: str
     areas: Optional[int]
     last_success_at: Optional[str]
     last_failure_at: Optional[str]
-    last_failure_class: Optional[FailureClass]
+    last_failure_class: Optional[str]
     ban_suspected: bool = False
+
+    @field_validator("state", mode="after")
+    @classmethod
+    def _state(cls, value: str) -> str:
+        return _word_in(ha_link.REGISTRY_STATES, value)
+
+    @field_validator("last_failure_class", mode="after")
+    @classmethod
+    def _failure_class(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _word_in(ha_link.FAILURE_CLASSES, value)
 
     @field_validator("ban_suspected", mode="before")
     @classmethod
@@ -142,7 +161,9 @@ class _Auth(BaseModel):
 
     latched: bool = False
     latched_at: Optional[str] = None
+    next_probe_at: Optional[str] = None
     banned_at: Optional[str] = None
+    failures: Dict[str, int] = {}
     budget_spent: bool = False
     budget_spent_at: Optional[str] = None
 
@@ -151,10 +172,20 @@ class _Auth(BaseModel):
     def _flag(cls, value: Any) -> bool:
         return _real_bool(value)
 
-    @field_validator("latched_at", "banned_at", "budget_spent_at", mode="before")
+    @field_validator("latched_at", "next_probe_at", "banned_at", "budget_spent_at", mode="before")
     @classmethod
     def _time(cls, value: Any) -> Optional[str]:
         return _iso_or_none(value)
+
+    @field_validator("failures", mode="before")
+    @classmethod
+    def _failures(cls, value: Any) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            caller: count for caller, count in value.items()
+            if caller in ha_link.CALLERS and _nonneg_int(count) is not None
+        }
 
 
 class _Payload(BaseModel):
@@ -208,6 +239,9 @@ class HAStatus(BaseModel):
     checked_at: str
     gateway: str = "not_checked"
     gateway_sampled: bool = True
+    token_withheld: bool = False
+    next_retry_at: Optional[str] = None
+    auth_failures: List[Dict[str, Any]] = []
 
 
 def _gateway(value: Any) -> str:
@@ -247,6 +281,13 @@ def classify(
     if payload.auth is not None:
         view["auth"] = payload.auth.model_dump()
     state, reason = ha_link.link_state(view)
+    auth = payload.auth
+    token_withheld = bool(auth and (auth.latched or auth.budget_spent) and reason == "token_rejected")
+    next_retry_at = auth.next_probe_at if auth and not auth.budget_spent else None
+    auth_failures = (
+        [{"caller": caller, "count": auth.failures[caller]} for caller in ha_link.CALLERS if caller in auth.failures]
+        if auth else []
+    )
     success_at, failure_at, _ = ha_link.link_times(view)
     failure_is_newest = failure_at is not None and (success_at is None or failure_at > success_at)
     newest = failure_at if failure_is_newest else success_at
@@ -260,6 +301,9 @@ def classify(
         replicas_reporting=payload.replicas_reporting,
         checked_at=checked_at,
         gateway=gateway,
+        token_withheld=token_withheld,
+        next_retry_at=next_retry_at if token_withheld else None,
+        auth_failures=auth_failures,
     )
 
 

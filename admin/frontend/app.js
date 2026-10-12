@@ -1887,13 +1887,16 @@ async function saveExternalApiKey(event, existingServiceName = '') {
     };
 
     try {
-        await apiRequest(`/api/external-api-keys${existingServiceName ? `/${existingServiceName}` : ''}`, {
+        const saved = await apiRequest(`/api/external-api-keys${existingServiceName ? `/${existingServiceName}` : ''}`, {
             method: existingServiceName ? 'PUT' : 'POST',
             body: JSON.stringify(payload)
         });
         closeModal('external-api-key-modal');
         loadExternalApiKeys();
         showSuccess(`API key ${existingServiceName ? 'updated' : 'created'} successfully`);
+        if (saved && saved.token_cleared) {
+            showError('The token was cleared because the address changed. Enter the token again.');
+        }
     } catch (error) {
         showError(`Failed to save API key: ${error.message}`);
     }

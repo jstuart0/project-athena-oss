@@ -4,6 +4,7 @@ The fixture is the orchestrator's (tests/fixtures/ha_link/truth_table.json);
 the same file drives `shared.ha_link.link_state` there, so the orchestrator's
 /health bool and this card can't disagree. Time is injected.
 """
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,7 @@ NOW = datetime(2026, 10, 11, 12, 5, 0, tzinfo=timezone.utc)
 
 
 def payload(case, **extra):
-    return {**case["view"], "coverage": "cluster", "coverage_reason": None, "replicas_reporting": 2,
+    return {**copy.deepcopy(case["view"]), "coverage": "cluster", "coverage_reason": None, "replicas_reporting": 2,
             "observed_at": "2026-10-11T12:05:00+00:00", **extra}
 
 
@@ -168,3 +169,86 @@ def test_free_text_is_never_passed_through():
     status = ha_status.classify(p, None, "<img src=x>", NOW)
     blob = status.model_dump_json()
     assert "<img" not in blob and status.coverage is None
+
+
+# -- the shared sign-in state (token_withheld, next_retry_at, auth_failures) ----------------------------
+
+
+def _with_auth(case_id, **auth):
+    base = _case(case_id)
+    return payload({**base, "view": {**base["view"], "auth": {**base["view"]["auth"], **auth}}})
+
+
+def test_a_latched_token_is_withheld_and_names_when_the_next_try_is():
+    p = _with_auth("latched_newer_than_success", next_probe_at="2026-10-11T12:30:00+00:00")
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert (status.reason, status.token_withheld) == ("token_rejected", True)
+    assert status.next_retry_at == "2026-10-11T12:30:00+00:00"
+
+
+def test_a_spent_budget_is_withheld_with_no_next_try():
+    p = _with_auth("budget_spent_newer_than_success", next_probe_at="2026-10-11T12:30:00+00:00")
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert (status.reason, status.token_withheld) == ("token_rejected", True)
+    assert status.next_retry_at is None, "a spent budget is not retried until a new token is saved"
+
+
+def test_a_latch_with_a_ban_newest_has_no_token_withheld():
+    p = payload(_case("ban_beats_token_rejected_when_newest"))
+    assert p["auth"]["latched"] is True
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert (status.reason, status.token_withheld, status.next_retry_at) == ("ip_banned", False, None)
+
+
+def test_a_connected_card_never_reports_a_withheld_token():
+    status = ha_status.classify(payload(_case("connected_rest_and_registry")), None, "ok", NOW)
+    assert (status.token_withheld, status.next_retry_at, status.auth_failures) == (False, None, [])
+
+
+def test_auth_failures_follow_the_callers_order_and_drop_bad_entries():
+    p = _with_auth("latched_newer_than_success", failures={
+        "admin_ws": 1, "gateway_rest": 2, "orchestrator_rest": 3, "intruder": 5,
+        "orchestrator_registry": -1, "gateway_registry": "7", "admin_rest": True,
+    })
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert status.auth_failures == [
+        {"caller": "orchestrator_rest", "count": 3},
+        {"caller": "gateway_rest", "count": 2},
+        {"caller": "admin_ws", "count": 1},
+    ]
+
+
+def test_auth_failures_are_in_the_callers_order_not_sorted_either_way():
+    p = _with_auth("latched_newer_than_success", failures={"admin_ws": 1, "orchestrator_registry": 4, "admin_rest": 2})
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert [f["caller"] for f in status.auth_failures] == ["orchestrator_registry", "admin_rest", "admin_ws"]
+
+
+@pytest.mark.parametrize("failures", [None, [], "x", 4])
+def test_a_failures_value_that_is_not_an_object_reads_as_none(failures):
+    status = ha_status.classify(_with_auth("latched_newer_than_success", failures=failures), None, "ok", NOW)
+    assert status.auth_failures == [] and status.reason == "token_rejected"
+
+
+@pytest.mark.parametrize("auth", ["x", 5, [], {"latched": "yes", "budget_spent": 1, "latched_at": 9}])
+def test_a_malformed_auth_section_never_reads_orchestrator_outdated(auth):
+    p = payload(_case("connected_rest_and_registry"), auth=auth)
+    status = ha_status.classify(p, None, "ok", NOW)
+    assert status.reason != "orchestrator_outdated" and status.token_withheld is False
+
+
+def test_the_classifier_words_are_the_shared_vocabulary():
+    from shared import ha_link
+
+    for word in sorted(ha_link.OUTCOMES):
+        p = good()
+        p["rest"]["last_outcome"] = word
+        assert ha_status.classify(p, None, "ok", NOW).reason != "orchestrator_outdated", word
+    for word in ha_link.REGISTRY_STATES:
+        p = good()
+        p["registry"]["state"] = word
+        assert ha_status.classify(p, None, "ok", NOW).reason != "orchestrator_outdated", word
+    for bad in ("zzz", "AUTH_REJECTED"):
+        p = good()
+        p["rest"]["last_outcome"] = bad
+        assert ha_status.classify(p, None, "ok", NOW).reason == "orchestrator_outdated"

@@ -39,6 +39,13 @@ def derive_run_state(
     return 'stopped'
 
 
+# Statuses that are neither healthy nor a failure: switched off, never checked,
+# not reached by the checker recently, or reachable but not set up ("Needs
+# setup"). They are never "needs attention" and never count against the health
+# percentage. Only a live unhealthy or degraded row (or a live probe that
+# failed) needs attention.
+NOT_CHECKED_STATUSES = frozenset({"disabled", "pending", "stale", "unconfigured"})
+
 STALE_GRACE_SECONDS = 30
 
 

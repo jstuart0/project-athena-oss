@@ -161,6 +161,34 @@ def test_home_assistant_configured(db, env, expected):
     assert _collect(db, env=env).ha_configured is expected
 
 
+def _ha_key(db, owner, *, url="https://ha.example.invalid", token="long-lived-token", enabled=True):
+    from app.models import ExternalAPIKey
+    from app.utils.encryption import encrypt_value
+
+    db.add(ExternalAPIKey(
+        service_name="home-assistant", api_name="Home Assistant", api_key_encrypted=encrypt_value(token),
+        endpoint_url=url, enabled=enabled, created_by_id=owner.id,
+    ))
+    db.commit()
+
+
+def test_home_assistant_configured_by_the_admin_key_alone(db, test_user):
+    _ha_key(db, test_user)
+    assert _collect(db, env={}).ha_configured is True
+
+
+def test_a_disabled_admin_key_falls_back_to_the_environment(db, test_user):
+    _ha_key(db, test_user, enabled=False)
+    assert _collect(db, env={}).ha_configured is False
+    assert _collect(db, env={"HA_URL": "http://ha.example.lan:8123", "HA_TOKEN": "t"}).ha_configured is True
+
+
+def test_an_admin_key_with_a_refused_address_is_not_configured_and_does_not_fall_through(db, test_user):
+    _ha_key(db, test_user, url="http://169.254.169.254")
+    env = {"HA_URL": "http://ha.example.lan:8123", "HA_TOKEN": "t"}
+    assert _collect(db, env=env).ha_configured is False
+
+
 def test_dns_is_resolved_once_per_host_and_times_out_to_unknown(db, monkeypatch):
     calls = []
 

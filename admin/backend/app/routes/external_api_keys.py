@@ -17,6 +17,8 @@ from app.auth.oidc import get_current_user
 from app.models import User, ExternalAPIKey
 from app.utils.encryption import encrypt_value, decrypt_value
 from app.utils.service_auth import verify_service_api_key
+from app.services import ha_access
+from shared.ha_credentials import HA_KEY_SERVICE, ha_url_problem, url_origin
 
 logger = structlog.get_logger()
 
@@ -62,6 +64,7 @@ class ExternalAPIKeyResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_used: Optional[datetime]
+    token_cleared: Optional[bool] = None
 
     # OAuth fields (masked)
     client_id_masked: Optional[str] = None
@@ -80,6 +83,15 @@ class ExternalAPIKeyResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+def _check_ha_address(service_name: str, endpoint_url: Optional[str]) -> None:
+    """The Home Assistant key's address must be one Athena may send a token to."""
+    if service_name != HA_KEY_SERVICE:
+        return
+    problem = ha_url_problem(endpoint_url, source="admin")
+    if problem is not None:
+        raise HTTPException(status_code=422, detail=f"Home Assistant address isn't allowed: {problem}")
 
 
 def _mask_key(encrypted: str) -> str:
@@ -130,6 +142,8 @@ async def create_external_api_key(
     """Create a new external API key (encrypted at rest)."""
     if not current_user.has_permission('manage_secrets'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    _check_ha_address(key_data.service_name, key_data.endpoint_url)
 
     # Check for existing key with same service_name and key_type
     existing_query = db.query(ExternalAPIKey).filter_by(service_name=key_data.service_name)
@@ -188,6 +202,8 @@ async def create_external_api_key(
         key_type=new_key.key_type,
         user=current_user.username
     )
+    if new_key.service_name == HA_KEY_SERVICE:
+        await ha_access.key_saved(new_key)
     return _to_response(new_key)
 
 
@@ -236,6 +252,16 @@ async def update_external_api_key(
     if not key:
         raise HTTPException(status_code=404, detail=f"API key '{service_name}' not found")
 
+    token_cleared = False
+    if service_name == HA_KEY_SERVICE:
+        _check_ha_address(service_name, key_data.endpoint_url)
+        # A token belongs to the address it was saved with. A new origin with no
+        # new token must not send the old token to the new host.
+        origin_changed = url_origin(key.endpoint_url) != url_origin(key_data.endpoint_url)
+        if origin_changed and not key_data.api_key:
+            key.api_key_encrypted = encrypt_value("")
+            token_cleared = True
+
     # Update basic fields
     key.api_name = key_data.api_name
     key.endpoint_url = key_data.endpoint_url
@@ -273,9 +299,15 @@ async def update_external_api_key(
         "external_api_key_updated",
         service_name=key.service_name,
         key_type=key.key_type,
-        user=current_user.username
+        user=current_user.username,
+        token_cleared=token_cleared,
     )
-    return _to_response(key)
+    if key.service_name == HA_KEY_SERVICE:
+        await ha_access.key_saved(key)
+    response = _to_response(key)
+    if token_cleared:
+        response.token_cleared = True
+    return response
 
 
 @router.delete("/{service_name}")

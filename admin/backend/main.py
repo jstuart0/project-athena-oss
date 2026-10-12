@@ -32,6 +32,7 @@ from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.services import conversation_capture, memory_vectors, telemetry
 from app.utils import exit_guard
+from app.services import ha_access
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -765,6 +766,10 @@ async def startup_event():
     else:
         start_health_polling(redis_client=redis_client)
 
+    # The one Home Assistant access every admin route shares: credentials, the
+    # failed sign-in gate (Redis-backed outside DEV_MODE) and the channel.
+    await ha_access.init(None if DEV_MODE else redis_client)
+
     # ATHENA-55 Phase 3: wire the Redis client into the WebSocket layer for
     # single-use jti enforcement.  DEV_MODE has no Redis client; the websocket
     # module uses an in-memory fallback when configure_redis is not called.
@@ -843,6 +848,7 @@ async def shutdown_event():
     logger.info("athena_admin_shutdown")
     await stop_background_sync()
     await stop_health_polling()
+    await ha_access.close()
     await memory_vectors.stop_vector_store_maintenance()
     await conversation_capture.stop_retention_loop()
     await telemetry.stop_telemetry()
