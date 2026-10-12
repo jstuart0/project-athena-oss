@@ -233,7 +233,7 @@ class Source:
         return self.lookup
 
 
-def public_dns(addresses=("192.168.1.9",)):
+def public_dns(addresses=("10.20.30.9",)):
     calls = []
 
     async def lookup(host, port, **kw):
@@ -372,7 +372,7 @@ def test_snapshot_for_returns_the_current_and_the_previous_snapshot_only():
 
 @pytest.mark.parametrize("address,blocked", [
     ("169.254.169.254", True), ("::ffff:169.254.169.254", True), ("fd00:ec2::254", True), ("fe80::1", True),
-    ("224.0.0.1", True), ("0.0.0.0", True), ("192.168.1.9", False), ("10.0.0.5", False), ("93.184.216.34", False),
+    ("224.0.0.1", True), ("0.0.0.0", True), ("10.20.30.9", False), ("10.0.0.5", False), ("93.184.216.34", False),
 ])
 def test_a_name_resolving_to_a_blocked_address_is_rejected(address, blocked):
     async def scenario():
@@ -386,7 +386,7 @@ def test_a_name_resolving_to_a_blocked_address_is_rejected(address, blocked):
 
 def test_any_blocked_address_among_several_rejects_the_name():
     async def scenario():
-        r = resolver(Source(), dns=public_dns(("192.168.1.9", "169.254.169.254")))
+        r = resolver(Source(), dns=public_dns(("10.20.30.9", "169.254.169.254")))
         await r.start()
         return r.current().problem
 
@@ -403,7 +403,7 @@ def test_numeric_hosts_are_names_the_resolver_judges_by_what_they_resolve_to(url
 
     c, calls = run(scenario("169.254.169.254"))
     assert (c.configured, c.problem) == (False, "blocked_address") and len(calls) == 1
-    c, _ = run(scenario("192.168.7.7"))
+    c, _ = run(scenario("10.20.30.7"))
     assert c.configured is True
 
 
@@ -421,7 +421,7 @@ def test_a_name_resolving_to_loopback_is_blocked_only_inside_a_pod(monkeypatch):
 def test_a_literal_ip_and_an_environment_url_skip_the_lookup():
     async def scenario():
         dns = public_dns()
-        r = resolver(Source(KeyLookup.found("http://192.168.1.10:8123", TOKEN)), dns=dns)
+        r = resolver(Source(KeyLookup.found("http://10.20.30.10:8123", TOKEN)), dns=dns)
         await r.start()
         e = resolver(Source(KeyLookup.absent()), env={"HA_URL": "http://ha.example.invalid", "HA_TOKEN": "t"}, dns=dns)
         await e.start()
@@ -439,7 +439,7 @@ def test_a_failing_lookup_keeps_the_previous_snapshot_and_logs_once():
         async def dns(host, port, **kw):
             if state["fail"]:
                 raise OSError("name resolution failed")
-            return [(2, 1, 6, "", ("192.168.1.9", 0))]
+            return [(2, 1, 6, "", ("10.20.30.9", 0))]
 
         r = resolver(source, dns=dns)
         await r.start()
@@ -465,7 +465,7 @@ def test_a_cold_start_with_a_failing_lookup_is_dns_unavailable_until_it_recovers
         async def dns(host, port, **kw):
             if state["fail"]:
                 raise asyncio.TimeoutError()
-            return [(2, 1, 6, "", ("192.168.1.9", 0))]
+            return [(2, 1, 6, "", ("10.20.30.9", 0))]
 
         r = resolver(Source(), dns=dns)
         await r.start()

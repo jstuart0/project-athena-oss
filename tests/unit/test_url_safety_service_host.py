@@ -18,7 +18,7 @@ ADMIN_VALIDATORS = ROOT / "admin" / "backend" / "app" / "utils" / "url_validator
 
 ACCEPTED = [
     ("ha.example.invalid", "ha.example.invalid"),
-    ("192.168.1.10", "192.168.1.10"),
+    ("10.20.30.10", "10.20.30.10"),
     ("10.0.0.5", "10.0.0.5"),
     ("172.16.4.2", "172.16.4.2"),
     ("  ha.example.invalid  ", "ha.example.invalid"),
@@ -82,7 +82,7 @@ def test_admin_validate_host_keeps_its_rfc1918_warning():
             seen.append((event, fields))
 
     module.logger = _Log()
-    module.validate_host("192.168.4.4")
+    module.validate_host("10.20.30.4")
     module.validate_host("ha.example.invalid")
     assert [event for event, _ in seen] == ["service_host_is_rfc1918"]
 
@@ -92,7 +92,7 @@ LOCAL_CASES = [
     ("::1", True),
     ("127.0.0.1", True),
     ("10.1.2.3", True),
-    ("192.168.0.9", True),
+    ("10.20.30.19", True),
     ("169.254.1.1", False),
     ("fe80::1", False),
     ("example.com", False),
