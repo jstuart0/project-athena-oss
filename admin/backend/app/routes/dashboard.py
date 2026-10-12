@@ -147,8 +147,10 @@ async def get_dashboard_data(
             for e in counted if e["status"] != "healthy"
         ]
 
-        health_pct = round((healthy_count / total_count * 100) if total_count > 0 else 0)
-        health_history = [health_pct] * 20  # Would need time-series tracking for real history
+        # With nothing live to count there is no percentage (it was 0, which the
+        # page painted red): None says "not known", and the page shows it grey.
+        health_pct = round(healthy_count / total_count * 100) if total_count > 0 else None
+        health_history = [health_pct or 0] * 20  # Would need time-series tracking for real history
     except Exception as e:
         logger.warning("dashboard_voice_health_error", error=str(e))
         healthy_count = 0

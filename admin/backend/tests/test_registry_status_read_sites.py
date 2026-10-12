@@ -193,3 +193,19 @@ def test_a_live_unconfigured_row_still_needs_attention(owner_client, db):
     _add(db, "tesla", health="unconfigured", checked=_recent())
     names = [c["name"] for c in _dashboard(owner_client)["voice_health"]["critical_services"]]
     assert names == ["Tesla"]
+
+
+def test_with_no_live_row_the_voice_health_has_no_percentage_so_the_page_can_show_it_neutral(owner_client, db):
+    _add(db, "gateway", health="healthy", checked=LONG_AGO, service_type="core")
+    _add(db, "orchestrator", health="healthy", checked=LONG_AGO, service_type="core")
+    _add(db, "weather", health="healthy", checked=LONG_AGO)
+    voice = _dashboard(owner_client)["voice_health"]
+    assert (voice["total"], voice["healthy"], voice["stale_count"]) == (0, 0, 3)
+    assert voice["percentage"] is None
+    assert voice["critical_services"] == []
+    assert set(voice["history"]) == {0}
+
+
+def test_with_a_live_row_the_percentage_is_a_number(owner_client, db):
+    _core_rows(db)
+    assert _dashboard(owner_client)["voice_health"]["percentage"] == 100

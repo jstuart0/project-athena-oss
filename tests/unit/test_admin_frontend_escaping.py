@@ -1781,11 +1781,6 @@ def test_mission_control_tile_colour_and_pulse(status, color, pulse, title):
     assert _tile(status) == {"color": color, "pulse": pulse, "title": title}
 
 
-def test_the_voice_health_label_counts_the_rows_not_checked_recently():
-    source = MISSION_CONTROL_JS.read_text()
-    assert "${data.percentage}% healthy · ${data.stale_count} not checked recently" in source
-
-
 # -- the escaping gate is not vacuous on the new markup ------------------------------------------------------
 
 def test_the_handler_escaping_gate_fails_once_on_a_planted_bad_handler(tmp_path):
@@ -1803,3 +1798,36 @@ def test_the_handler_escaping_gate_fails_once_on_a_planted_bad_handler(tmp_path)
         handle.write("\nfunction zzPlanted(name) { return `<button onclick=\"zz('${name}')\">x</button>`; }\n")
     planted = subprocess.run([*gate, "--dir", str(scratch)], capture_output=True, text=True, timeout=120)
     assert planted.returncode == 1, planted.stdout + planted.stderr
+
+
+# -- Mission Control's aggregate colour ---------------------------------------------------------------
+
+def _voice_view(data):
+    return _run_node_utc([_extract_block(MISSION_CONTROL_JS, "function voiceHealthView(")], f"voiceHealthView({json.dumps(data)})")
+
+
+def test_the_aggregate_is_grey_and_says_not_checked_when_there_is_no_live_row():
+    view = _voice_view({"healthy": 0, "total": 0, "percentage": None, "stale_count": 3})
+    assert view == {"valueText": "—", "valueClass": "text-gray-400", "label": "Not checked recently", "sparkColor": "#6b7280"}
+    # the old shape (0 for nothing counted) must not be red either
+    assert _voice_view({"healthy": 0, "total": 0, "percentage": 0, "stale_count": 0})["valueClass"] == "text-gray-400"
+    for color in (view["valueClass"], view["sparkColor"]):
+        assert "red" not in color and color != "#ef4444"
+
+
+@pytest.mark.parametrize("healthy,total,pct,value_class,spark", [
+    (10, 10, 100, "text-green-400", "#22c55e"),
+    (9, 10, 90, "text-green-400", "#22c55e"),
+    (7, 10, 70, "text-yellow-400", "#f59e0b"),
+    (6, 10, 60, "text-red-400", "#ef4444"),
+    (0, 4, 0, "text-red-400", "#ef4444"),   # a real 0% of live rows is still red
+])
+def test_the_aggregate_keeps_its_colours_when_rows_are_live(healthy, total, pct, value_class, spark):
+    view = _voice_view({"healthy": healthy, "total": total, "percentage": pct, "stale_count": 0})
+    assert (view["valueClass"], view["sparkColor"], view["valueText"]) == (value_class, spark, f"{healthy}/{total}")
+    assert view["label"] == f"{pct}% healthy"
+
+
+def test_the_aggregate_label_names_the_rows_not_checked_recently():
+    assert _voice_view({"healthy": 5, "total": 5, "percentage": 100, "stale_count": 2})["label"] == \
+        "100% healthy · 2 not checked recently"

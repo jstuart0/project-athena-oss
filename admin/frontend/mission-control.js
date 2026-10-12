@@ -247,6 +247,29 @@
     }
 
     /**
+     * Pure: the voice health card's text and colours. With no live row to count
+     * (every row stale, pending or off) there is no percentage, so the card is
+     * grey and says so rather than showing 0% in red. Rows the checker hasn't
+     * reached recently are out of the count; the label names them.
+     */
+    function voiceHealthView(data) {
+        const total = Number(data.total) || 0;
+        if (total === 0) {
+            return { valueText: '—', valueClass: 'text-gray-400', label: 'Not checked recently', sparkColor: '#6b7280' };
+        }
+        const pct = data.percentage;
+        const label = data.stale_count > 0
+            ? `${pct}% healthy · ${data.stale_count} not checked recently`
+            : `${pct}% healthy`;
+        return {
+            valueText: `${data.healthy}/${total}`,
+            valueClass: pct >= 90 ? 'text-green-400' : pct >= 70 ? 'text-yellow-400' : 'text-red-400',
+            label,
+            sparkColor: pct >= 90 ? '#22c55e' : pct >= 70 ? '#f59e0b' : '#ef4444',
+        };
+    }
+
+    /**
      * Update voice health card.
      */
     function updateVoiceHealth(data) {
@@ -256,16 +279,14 @@
         const labelEl = document.getElementById('voice-health-label');
         const canvas = document.getElementById('voice-health-sparkline');
 
+        const view = voiceHealthView(data);
         if (valueEl) {
-            valueEl.textContent = `${data.healthy}/${data.total}`;
-            valueEl.className = `text-3xl font-bold ${data.percentage >= 90 ? 'text-green-400' : data.percentage >= 70 ? 'text-yellow-400' : 'text-red-400'}`;
+            valueEl.textContent = view.valueText;
+            valueEl.className = `text-3xl font-bold ${view.valueClass}`;
         }
 
         if (labelEl) {
-            // Rows the checker hasn't reached recently are out of the count; say so.
-            labelEl.textContent = data.stale_count > 0
-                ? `${data.percentage}% healthy · ${data.stale_count} not checked recently`
-                : `${data.percentage}% healthy`;
+            labelEl.textContent = view.label;
         }
 
         // Update sparkline
@@ -275,7 +296,7 @@
             } else {
                 state.charts.voiceHealth = Athena.charts.createSparkline(canvas, {
                     data: data.history,
-                    color: data.percentage >= 90 ? '#22c55e' : data.percentage >= 70 ? '#f59e0b' : '#ef4444'
+                    color: view.sparkColor
                 });
             }
         }
