@@ -66,6 +66,7 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_room_directory_refresh.py",
     "tests/unit/test_gateway_ha_channel.py",
     "tests/unit/test_ha_client_over_the_channel.py",
+    "tests/unit/test_ha_docs_match_constants.py",
     "tests/unit/test_admin_frontend_status_vocab.py",
     "tests/unit/test_admin_frontend_script_order.py",
     "tests/unit/test_admin_frontend_voice_config_ha.py",
@@ -113,8 +114,11 @@ NAMED_MEMBERS = (
 SOURCES_READ_BY_TESTS = {
     "frontend-escaping.yml": (
         "admin/backend/app/services/ha_status.py",
+        "admin/backend/app/services/health_poller.py",
         "admin/backend/app/utils/service_state.py",
         "src/shared/ha_link.py",
+        "tests/unit/frontend_node.py",
+        "tests/fixtures/admin_frontend/app_ha_block_9e80241.js",
     ),
     "telemetry.yml": (
         "admin/backend/app/services/ha_access.py",
@@ -288,6 +292,17 @@ def campaign_diff() -> Optional[Set[str]]:
     return {line for line in out.splitlines() if (ROOT / line).exists()}
 
 
+def campaign_added_tests() -> Optional[Set[str]]:
+    """Test files the campaign added since its base; None when the base isn't in this checkout."""
+    if subprocess.run(["git", "cat-file", "-e", BASE], cwd=ROOT, capture_output=True).returncode != 0:
+        return None
+    out = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=A", BASE, "--", "tests/**/test_*.py", "admin/backend/tests/**/test_*.py"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    return {line for line in out.splitlines() if (ROOT / line).exists()}
+
+
 def source_of(paths: Iterable[str]) -> Dict[str, str]:
     return {p: (ROOT / p).read_text(encoding="utf-8") for p in paths}
 
@@ -297,6 +312,14 @@ def test_the_campaign_tests_are_inside_the_globs_so_a_shallow_checkout_still_fin
     assert existing <= globbed_files(), sorted(existing - globbed_files())
     assert len(existing) >= 8, "the floor: Phase 1 adds at least eight wired files"
     assert set(NAMED_MEMBERS) <= existing
+
+
+def test_campaign_tests_lists_every_test_file_the_campaign_added():
+    added = campaign_added_tests()
+    if added is not None:
+        assert added <= set(CAMPAIGN_TESTS), sorted(added - set(CAMPAIGN_TESTS))
+        assert len(added) >= 20, "the floor: the campaign adds at least twenty test files"
+    assert all((ROOT / p).exists() for p in CAMPAIGN_TESTS if p.startswith("admin/backend/tests/"))
 
 
 def test_every_test_the_campaign_adds_or_touches_is_run_by_a_workflow():

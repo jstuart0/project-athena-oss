@@ -692,9 +692,13 @@ class AthenaConfig(BaseSettings):
     #   circular dependency.  Future path: extract LOCAL_DEV into
     #   src/shared/_env_flags.py, importable from both modules.
     #
-    # CONTROL_AGENT_URL (4 sites), HA_URL / HA_TOKEN (10+13 sites),
-    # OIDC_* aliases beyond OIDC_ISSUER / OIDC_CLIENT_ID — runtime-mutable
-    # globals in oidc.py; deferred pending separate analysis.
+    # CONTROL_AGENT_URL (4 sites), OIDC_* aliases beyond OIDC_ISSUER /
+    # OIDC_CLIENT_ID — runtime-mutable globals in oidc.py; deferred pending
+    # separate analysis.
+    #
+    # HA_URL / HA_TOKEN / HA_WS_URL are deliberately not fields: the admin
+    # panel's home-assistant key wins over them and changes at runtime, so
+    # shared.ha_credentials is their only reader (a drift test pins it).
 
 
 @functools.lru_cache(maxsize=1)
