@@ -279,3 +279,42 @@ def test_stream_still_yields_tokens_and_final_stats(monkeypatch):
     final = chunks[-1]
     assert final["done"] is True
     assert final["eval_count"] == 2
+
+
+def test_stream_and_nonstream_agree_on_the_planned_context(monkeypatch):
+    """The context planner sizes both paths from the same inputs (ATHENA-236):
+    with a sticky mark set by a strict call, the long prompt goes out at the
+    same `options.num_ctx` on both, and a model without a mark stays at its row."""
+    captured = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured.append(body)
+        return _stream_response() if body.get("stream") else _nonstream_response()
+
+    monkeypatch.setattr(llm_router_module.httpx, "AsyncClient", _client_factory(handler))
+    router = _make_router()
+    options = {"num_ctx": 2048, "num_predict": 384, "mirostat": 2}
+    long_prompt = "a" * 12919
+
+    def both(model):
+        async def scenario():
+            await router._generate_ollama(
+                endpoint_url="http://ollama.test", model=model, prompt=long_prompt, temperature=0.1,
+                max_tokens=400, timeout=30, keep_alive=-1, ollama_options=options, system_prompt="/no_think",
+            )
+            await _consume_stream(router._generate_ollama_stream(
+                endpoint_url="http://ollama.test", model=model, prompt=long_prompt, temperature=0.1,
+                max_tokens=400, timeout=30, keep_alive=-1, ollama_options=options, system_prompt="/no_think",
+            ))
+        _run(scenario())
+
+    both("llama3.1:8b")
+    router._context_marks.record("qwen3:8b", 2048, 8192)
+    both("qwen3:8b")
+
+    unmarked_plain, unmarked_stream, marked_plain, marked_stream = captured
+    for plain, streamed in ((unmarked_plain, unmarked_stream), (marked_plain, marked_stream)):
+        assert {k: v for k, v in plain.items() if k != "stream"} == {k: v for k, v in streamed.items() if k != "stream"}
+    assert unmarked_plain["options"]["num_ctx"] == 2048
+    assert marked_plain["options"]["num_ctx"] == 8192

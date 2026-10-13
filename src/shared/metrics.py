@@ -140,6 +140,21 @@ if PROMETHEUS_AVAILABLE:
         buckets=[0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 30.0]
     )
 
+    # Ollama context sizing (LLMRouter's planner): outcomes are raised,
+    # over_ceiling, unknown_default, truncation_suspected, rejected_by_backend.
+    LLM_CONTEXT_TOTAL = Counter(
+        'athena_llm_context_total',
+        'Ollama context planning events by call path, outcome and model',
+        ['path', 'outcome', 'model']
+    )
+
+    # The size sent for a model differs from the last size sent for it.
+    LLM_CONTEXT_CHANGES_TOTAL = Counter(
+        'athena_llm_context_changes_total',
+        'Times the num_ctx sent for a model changed from its previous value',
+        ['model']
+    )
+
 else:
     # Fallback stubs when prometheus_client is not available
     class StubMetric:
@@ -168,6 +183,8 @@ else:
     LLM_CALL_DURATION = StubMetric()
     LLM_TOKENS_GENERATED = StubMetric()
     REQUEST_TOTAL_DURATION = StubMetric()
+    LLM_CONTEXT_TOTAL = StubMetric()
+    LLM_CONTEXT_CHANGES_TOTAL = StubMetric()
 
 
 # =============================================================================
@@ -262,6 +279,16 @@ def record_mcp_domain_blocked(domain: str):
 def record_mcp_tool_blocked(tool_name: str, reason: str):
     """Record a blocked MCP tool."""
     MCP_TOOL_BLOCKED.labels(tool_name=tool_name, reason=reason).inc()
+
+
+def record_llm_context(path: str, outcome: str, model: str):
+    """Count one context planning event (labels: call path, outcome, model)."""
+    LLM_CONTEXT_TOTAL.labels(path=path, outcome=outcome, model=model).inc()
+
+
+def record_llm_context_change(model: str):
+    """Count a change in the num_ctx sent for a model."""
+    LLM_CONTEXT_CHANGES_TOTAL.labels(model=model).inc()
 
 
 def record_timing_metrics(timing_data: dict):

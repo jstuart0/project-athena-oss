@@ -21,6 +21,16 @@ from urllib.parse import urlparse
 import structlog
 from shared.admin_url import get_admin_url, path_segment, path_segments
 from shared.config import get_config
+from shared.llm_context import (
+    ContextBudgetExceeded,
+    ContextMarks,
+    ContextPlan,
+    ContextSettings,
+    plan_context,
+    truncation_suspected,
+    valid_ctx,
+)
+from shared.metrics import record_llm_context, record_llm_context_change
 from shared.output_channel import normalize_stop_reason
 from shared.service_key import note_admin_refusal, service_key_headers
 
@@ -174,6 +184,11 @@ def _google_finish_reason(response: Any) -> Optional[str]:
         return None
 
 
+def _compose_ollama_prompt(prompt: str, system_prompt: Optional[str]) -> str:
+    """The prompt text Ollama receives (the `/no_think`-style prefix first)."""
+    return f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+
+
 def _build_ollama_generate_payload(
     model: str,
     prompt: str,
@@ -183,6 +198,7 @@ def _build_ollama_generate_payload(
     ollama_options: Optional[Dict[str, Any]],
     system_prompt: Optional[str],
     stream: bool,
+    context: Optional[ContextPlan] = None,
 ) -> Dict[str, Any]:
     """Build an Ollama `/api/generate` request payload.
 
@@ -196,8 +212,7 @@ def _build_ollama_generate_payload(
     system prompt is also injected upstream, but Ollama's API-level flag is
     what actually disables the thinking generation.
     """
-    if system_prompt:
-        prompt = f"{system_prompt}\n\n{prompt}"
+    prompt = _compose_ollama_prompt(prompt, system_prompt)
 
     options = {
         "temperature": temperature,
@@ -212,6 +227,9 @@ def _build_ollama_generate_payload(
             model=model,
             options=list(ollama_options.keys())
         )
+    # The planned context overrides the row's value, so it is set after the merge.
+    if context is not None and context.send is not None:
+        options["num_ctx"] = context.send
 
     payload = {
         "model": model,
@@ -382,11 +400,124 @@ class LLMRouter:
         self._pricing_cache: Dict[str, Dict[str, Any]] = {}
         self._pricing_cache_expiry: float = 0
 
+        # Ollama context sizing: sticky per-(model, floor) high-water marks, the
+        # last num_ctx sent per model (for the change counter), and the models
+        # whose invalid row num_ctx has already been reported.
+        self._context_marks = ContextMarks()
+        self._last_sent_context: Dict[str, int] = {}
+        self._invalid_row_ctx_reported: set = set()
+
         logger.info(
             "llm_router_initialized",
             metrics_window_size=metrics_window_size,
             persist_metrics=persist_metrics
         )
+
+    @staticmethod
+    def _context_settings() -> ContextSettings:
+        cfg = get_config()
+        return ContextSettings(
+            mode=cfg.llm_context_guard,
+            ceiling=cfg.llm_context_ceiling,
+            server_default=cfg.llm_server_default_context,
+        )
+
+    def _plan_ollama_context(
+        self,
+        *,
+        path: str,
+        model: str,
+        prompt: str,
+        system_prompt: Optional[str],
+        ollama_options: Optional[Dict[str, Any]],
+        max_tokens: int,
+        require_full_prompt: bool,
+    ) -> ContextPlan:
+        """Plan num_ctx for one generate/stream call; raises before any HTTP
+        request when a strict call can't fit (enforce mode only)."""
+        options = ollama_options or {}
+        row_ctx = options.get("num_ctx")
+        if row_ctx is not None and valid_ctx(row_ctx) is None and model not in self._invalid_row_ctx_reported:
+            self._invalid_row_ctx_reported.add(model)
+            logger.error(
+                "llm_row_num_ctx_invalid",
+                model=model,
+                value_type=type(row_ctx).__name__,
+                note="num_ctx must be a positive integer; the row value is ignored for context planning",
+            )
+        settings = self._context_settings()
+        merged_num_predict = options.get("num_predict")
+        plan = plan_context(
+            prompt_text=_compose_ollama_prompt(prompt, system_prompt),
+            row_ctx=row_ctx,
+            num_predict=merged_num_predict if merged_num_predict is not None else max_tokens,
+            max_tokens=max_tokens,
+            require_full=require_full_prompt,
+            marks=self._context_marks,
+            model=model,
+            settings=settings,
+        )
+        if plan.outcome in ("raised", "over_ceiling", "unknown_default"):
+            record_llm_context(path, plan.outcome, model)
+            logger.info(
+                "llm_context_planned",
+                model=model,
+                path=path,
+                outcome=plan.outcome,
+                mode=settings.mode,
+                estimate=plan.estimate,
+                reserve=plan.reserve,
+                row_ctx=valid_ctx(row_ctx),
+                sent=plan.send,
+                ceiling=settings.ceiling,
+                strict=require_full_prompt,
+            )
+        if require_full_prompt and settings.mode == "enforce" and plan.outcome == "over_ceiling":
+            raise ContextBudgetExceeded(plan, "over_ceiling")
+        return plan
+
+    def _note_sent_context(self, model: str, payload: Dict[str, Any]) -> None:
+        sent = valid_ctx(payload.get("options", {}).get("num_ctx"))
+        if sent is None:
+            return
+        previous = self._last_sent_context.get(model)
+        self._last_sent_context[model] = sent
+        if previous is not None and previous != sent:
+            record_llm_context_change(model)
+
+    def _check_ollama_result(
+        self,
+        *,
+        path: str,
+        model: str,
+        plan: ContextPlan,
+        data: Dict[str, Any],
+        require_full_prompt: bool,
+    ) -> None:
+        """After an Ollama response: mark the sent size sticky (strict calls),
+        and report or raise on a cut-off prompt."""
+        settings = self._context_settings()
+        enforcing = settings.mode == "enforce"
+        if require_full_prompt and enforcing and plan.send is not None:
+            self._context_marks.record(model, plan.floor, plan.send)
+        prompt_eval_count = _count_or_none(data.get("prompt_eval_count"))
+        if not truncation_suspected(plan, prompt_eval_count):
+            return
+        record_llm_context(path, "truncation_suspected", model)
+        logger.warning(
+            "llm_prompt_truncation_suspected",
+            model=model,
+            path=path,
+            estimate=plan.estimate,
+            reserve=plan.reserve,
+            row_ctx=plan.floor,
+            sent=plan.send,
+            prompt_eval_count=prompt_eval_count,
+            load_duration=data.get("load_duration"),
+            strict=require_full_prompt,
+        )
+        if require_full_prompt and enforcing:
+            raise ContextBudgetExceeded(plan, "truncated")
 
     async def _get_backend_config(self, model: str) -> Dict[str, Any]:
         """
@@ -578,6 +709,8 @@ class LLMRouter:
         zone: Optional[str] = None,
         intent: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        *,
+        require_full_prompt: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -593,6 +726,11 @@ class LLMRouter:
             user_id: Optional user ID for user-specific analytics
             zone: Optional zone/location for geographic analytics
             intent: Optional intent classification for categorization
+            require_full_prompt: For callers that act on the answer and bound
+                their own input: Ollama's context is raised to fit the whole
+                prompt, and ContextBudgetExceeded is raised (before the
+                request, or after it if the result shows a cut prompt)
+                instead of returning output from a truncated prompt.
             **kwargs: Additional backend-specific parameters
 
         Returns:
@@ -643,7 +781,7 @@ class LLMRouter:
                     ollama_url = get_config().ollama_url
                     response = await self._generate_ollama(
                         ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
-                        system_prompt=system_prompt
+                        system_prompt=system_prompt, require_full_prompt=require_full_prompt
                     )
 
             elif backend_type == BackendType.MLX or backend_type == "mlx":
@@ -689,7 +827,7 @@ class LLMRouter:
             else:  # OLLAMA (default)
                 response = await self._generate_ollama(
                     endpoint_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
-                    system_prompt=system_prompt
+                    system_prompt=system_prompt, require_full_prompt=require_full_prompt
                 )
 
             return response
@@ -1345,7 +1483,9 @@ class LLMRouter:
         timeout: int,
         keep_alive: int = -1,
         ollama_options: Optional[Dict[str, Any]] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        *,
+        require_full_prompt: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate using Ollama backend.
@@ -1360,7 +1500,18 @@ class LLMRouter:
             keep_alive: How long to keep model loaded (-1=forever)
             ollama_options: Additional Ollama options (num_ctx, num_batch, mirostat, etc.)
             system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
+            require_full_prompt: see `generate`
         """
+        # Planned before the client opens, so a refusal makes no request.
+        plan = self._plan_ollama_context(
+            path="generate",
+            model=model,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            ollama_options=ollama_options,
+            max_tokens=max_tokens,
+            require_full_prompt=require_full_prompt,
+        )
         client = httpx.AsyncClient(
             base_url=endpoint_url,
             timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
@@ -1378,7 +1529,9 @@ class LLMRouter:
             ollama_options=ollama_options,
             system_prompt=system_prompt,
             stream=False,
+            context=plan,
         )
+        self._note_sent_context(model, payload)
 
         try:
             start_time = time.monotonic()
@@ -1386,6 +1539,15 @@ class LLMRouter:
                 response = await client.post("/api/generate", json=payload)
             except httpx.ReadTimeout:
                 elapsed = time.monotonic() - start_time
+                if plan.floor is not None and plan.send is not None and plan.send > plan.floor:
+                    logger.warning(
+                        "ollama_read_timeout_retry_skipped_context_raised",
+                        model=model,
+                        timeout_s=timeout,
+                        elapsed_s=round(elapsed, 2),
+                        note="context was raised, so the model was reloaded; a retry would pay the reload twice",
+                    )
+                    raise
                 if elapsed >= timeout * OLLAMA_READ_TIMEOUT_RETRY_BUDGET_THRESHOLD:
                     logger.warning(
                         "ollama_read_timeout_retry_skipped_budget_exhausted",
@@ -1411,6 +1573,9 @@ class LLMRouter:
 
             response.raise_for_status()
             data = response.json()
+            self._check_ollama_result(
+                path="generate", model=model, plan=plan, data=data, require_full_prompt=require_full_prompt
+            )
 
             # Defense-in-depth: strip any <think>...</think> blocks that may
             # have leaked through (e.g., older Ollama versions that don't
@@ -1466,6 +1631,15 @@ class LLMRouter:
         """
         import json as json_lib
 
+        plan = self._plan_ollama_context(
+            path="stream",
+            model=model,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            ollama_options=ollama_options,
+            max_tokens=max_tokens,
+            require_full_prompt=False,
+        )
         # Payload shape is built by _build_ollama_generate_payload so this
         # stays in parity with _generate_ollama (ATHENA-87 F80).
         payload = _build_ollama_generate_payload(
@@ -1477,7 +1651,9 @@ class LLMRouter:
             ollama_options=ollama_options,
             system_prompt=system_prompt,
             stream=True,
+            context=plan,
         )
+        self._note_sent_context(model, payload)
 
         async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
             async with client.stream("POST", "/api/generate", json=payload) as response:
@@ -1499,6 +1675,9 @@ class LLMRouter:
                             }
 
                         if data.get("done"):
+                            self._check_ollama_result(
+                                path="stream", model=model, plan=plan, data=data, require_full_prompt=False
+                            )
                             # Final stats
                             yield {
                                 "token": "",

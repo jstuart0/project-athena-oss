@@ -70,6 +70,24 @@ logger = logging.getLogger(__name__)
 
 _FANOUT_CONFIRM_THRESHOLD_DEFAULT = 6
 _FANOUT_HARD_LIMIT_DEFAULT = 18
+_LLM_CONTEXT_GUARD_DEFAULT = "enforce"
+_LLM_CONTEXT_CEILING_DEFAULT = 16384
+_LLM_CONTEXT_CEILING_MIN = 2048
+
+
+def _plain_int(value: object) -> Optional[int]:
+    """An int from an int or a digit string (env values arrive as strings);
+    None for a bool, a float, or anything that doesn't parse."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 class AthenaConfig(BaseSettings):
@@ -620,6 +638,19 @@ class AthenaConfig(BaseSettings):
     ha_write_fanout_confirm_threshold: int = Field(default=_FANOUT_CONFIRM_THRESHOLD_DEFAULT, ge=0)
     ha_write_fanout_hard_limit: int = Field(default=_FANOUT_HARD_LIMIT_DEFAULT, ge=0)
 
+    # llm_context_guard / llm_context_ceiling / llm_server_default_context:
+    #   how LLMRouter sizes Ollama's num_ctx for generate calls (see
+    #   shared/llm_context.py). "enforce" applies the plan; "observe" only
+    #   logs and counts what it would do and sends today's options (the
+    #   rollback lever; changing it needs a restart, get_config is cached).
+    #   The ceiling bounds raises only. The server default is the Ollama
+    #   host's own OLLAMA_CONTEXT_LENGTH, which no API reports; 0 = unknown,
+    #   and then the router never sends a size for a model without a row
+    #   num_ctx. Invalid values log one ERROR and fall back (never raise).
+    llm_context_guard: str = Field(default=_LLM_CONTEXT_GUARD_DEFAULT)
+    llm_context_ceiling: int = Field(default=_LLM_CONTEXT_CEILING_DEFAULT)
+    llm_server_default_context: int = Field(default=0)
+
     # sms_default_country_code: the country calling code (1-3 digits, no
     #   "+") prefixed to a booking's national phone number when matching an
     #   incoming SMS to a stay (admin-backend's sms_webhook.to_e164). An
@@ -659,6 +690,59 @@ class AthenaConfig(BaseSettings):
                 len(value),
             )
         return "off"
+
+    @field_validator("llm_context_guard", mode="before")
+    @classmethod
+    def _validate_llm_context_guard(cls, v: object) -> str:
+        value = v.strip().lower() if isinstance(v, str) else ""
+        if value in ("enforce", "observe"):
+            return value
+        if value:
+            logger.error(
+                "llm_context_guard_invalid: LLM_CONTEXT_GUARD must be 'enforce' or 'observe' "
+                "(got %d characters); using enforce",
+                len(value),
+            )
+        return _LLM_CONTEXT_GUARD_DEFAULT
+
+    @field_validator("llm_context_ceiling", mode="before")
+    @classmethod
+    def _validate_llm_context_ceiling(cls, v: object) -> int:
+        value = _plain_int(v)
+        if value is not None and value >= _LLM_CONTEXT_CEILING_MIN:
+            return value
+        logger.error(
+            "llm_context_ceiling_invalid: LLM_CONTEXT_CEILING must be an integer of at least %d; using %d",
+            _LLM_CONTEXT_CEILING_MIN,
+            _LLM_CONTEXT_CEILING_DEFAULT,
+        )
+        return _LLM_CONTEXT_CEILING_DEFAULT
+
+    @field_validator("llm_server_default_context", mode="before")
+    @classmethod
+    def _validate_llm_server_default_context(cls, v: object) -> int:
+        value = _plain_int(v)
+        if value is not None and value >= 0:
+            return value
+        logger.error(
+            "llm_server_default_context_invalid: LLM_SERVER_DEFAULT_CONTEXT must be 0 (unknown) "
+            "or a positive integer; using 0"
+        )
+        return 0
+
+    @model_validator(mode="after")
+    def _warn_ceiling_below_server_default(self) -> "AthenaConfig":
+        # The floor always wins over the ceiling (the ceiling bounds raises
+        # only), so nothing is clamped; the operator just hears about it.
+        if 0 < self.llm_context_ceiling < self.llm_server_default_context:
+            logger.warning(
+                "llm_context_ceiling_below_server_default: LLM_CONTEXT_CEILING=%d is below "
+                "LLM_SERVER_DEFAULT_CONTEXT=%d; the server default still applies, the ceiling "
+                "only bounds raises above it",
+                self.llm_context_ceiling,
+                self.llm_server_default_context,
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_fanout_limits(self) -> "AthenaConfig":

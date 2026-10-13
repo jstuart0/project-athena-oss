@@ -42,6 +42,8 @@ GLOBS = (
     "tests/unit/test_admin_frontend_*.py",
     "tests/unit/test_campaign_ci_wiring.py",
     "tests/unit/test_stuck_sensor_detection.py",
+    "tests/unit/test_llm_context_plan.py",
+    "tests/unit/test_llm_router_context_wiring.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
