@@ -667,7 +667,7 @@ class SmartHomeController:
         # SKIP if there's an exclusion pattern (e.g., "except bedroom") - let exclusion logic handle it
         # Check for various exclusion patterns including "everything but" and "all but"
         import re
-        has_exclusion_keywords = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding'])
+        has_exclusion_keywords = self._defers_to_exclusion_logic(query_lower)
         # Also check for "everything but X" or "all lights but X" patterns
         if not has_exclusion_keywords:
             has_exclusion_keywords = bool(re.search(r'(everything|all\s+(the\s+)?lights?)\s+but\s+', query_lower))
@@ -935,7 +935,7 @@ class SmartHomeController:
                             'kill all the lights', 'kill all lights', 'kill all',  # Round 12 exclusion support
                             'everything off', 'all off', 'yo everything off']  # Round 14
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
-        has_exclusion_in_query = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding', ' but '])
+        has_exclusion_in_query = self._defers_to_exclusion_logic(query_lower)
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
             room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             logger.info(f"Fast path 'lights out' or 'kill lights': has_room={bool(room_fields.get('room'))}")
@@ -1401,8 +1401,9 @@ Return JSON with this structure:
     "color_description": "brief description of the colors chosen"
 }}
 
-EXCLUSIONS: When user says "except [room]" or "but not [room]", set room="whole_house" and excluded_rooms=["room_name"].
+EXCLUSIONS: When user says "except [room]", "except for [room]", "but not [room]", "but [room]", "other than [room]", "excepting [room]", "excluding [room]", "apart from [room]", "aside from [room]", "besides [room]", "not including [room]" or "not the [room]", set room="whole_house" and excluded_rooms=["room_name"].
 Example: "turn on all lights except the bedroom" -> room="whole_house", excluded_rooms=["bedroom"]
+Example: "turn off every light apart from the kitchen" -> room="whole_house", excluded_rooms=["kitchen"]
 
 DEVICE TYPE DETECTION:
 - climate: thermostat, temperature setting, HVAC, heating, cooling
@@ -1791,6 +1792,16 @@ Return ONLY valid JSON."""
 
     def _explicit_whole_house(self, query: str):
         return room_context.explicit_whole_house(query, self._directory())
+
+    def _defers_to_exclusion_logic(self, query: str) -> bool:
+        """True when a whole-house fast path must leave the utterance to the
+        model: it holds an exclusion phrase, or a word that may carry one
+        ("without", "leave"...) and no excluded room was parsed from it."""
+        if room_context.has_exclusion(query):
+            return True
+        if not room_context.has_exclusion_deferral_word(query):
+            return False
+        return not self._room_fields(query, whole_house=True, multi=True).get("excluded_rooms")
 
     def _room_fields(self, query: str, *, whole_house: bool, multi: bool) -> Dict:
         """The room part of an intent, from what the utterance says and

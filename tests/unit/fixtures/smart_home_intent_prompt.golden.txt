@@ -20,8 +20,9 @@ Return JSON with this structure:
     "color_description": "brief description of the colors chosen"
 }
 
-EXCLUSIONS: When user says "except [room]" or "but not [room]", set room="whole_house" and excluded_rooms=["room_name"].
+EXCLUSIONS: When user says "except [room]", "except for [room]", "but not [room]", "but [room]", "other than [room]", "excepting [room]", "excluding [room]", "apart from [room]", "aside from [room]", "besides [room]", "not including [room]" or "not the [room]", set room="whole_house" and excluded_rooms=["room_name"].
 Example: "turn on all lights except the bedroom" -> room="whole_house", excluded_rooms=["bedroom"]
+Example: "turn off every light apart from the kitchen" -> room="whole_house", excluded_rooms=["kitchen"]
 
 DEVICE TYPE DETECTION:
 - climate: thermostat, temperature setting, HVAC, heating, cooling

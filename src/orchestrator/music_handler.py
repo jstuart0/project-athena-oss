@@ -28,6 +28,7 @@ from shared.admin_url import get_admin_url
 from shared.config import get_config
 from shared.service_key import note_admin_refusal, service_key_headers
 from orchestrator.follow_me_audio import get_most_recent_room
+from orchestrator.room_context import EXCLUSION_PHRASES
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # MusicHandler.__init__ (not at module scope) so callers that only need
 # this module's pure helpers don't pull in
@@ -35,6 +36,13 @@ from orchestrator.follow_me_audio import get_most_recent_room
 # as a hard import-time dependency.
 
 logger = structlog.get_logger()
+
+# The exclusion vocabulary is room_context's: longest phrase first so that
+# "but not" wins over "but" and "excepting" over "except".
+_EXCLUSION_ALTERNATION = "|".join(
+    r"\s+".join(re.escape(word) for word in phrase)
+    for phrase in sorted(EXCLUSION_PHRASES, key=lambda p: (-len(" ".join(p)), p))
+)
 
 # Music Assistant configuration status cache
 _ma_config_checked: bool = False
@@ -893,8 +901,8 @@ class MusicHandler:
 
         # Patterns for exclusion
         patterns = [
-            r'(?:everywhere|all rooms?)\s+(?:except|but|but not|other than)\s+(?:the\s+)?(.+?)(?:\s+play|\s+$|$)',
-            r'(?:except|but|but not|other than)\s+(?:the\s+)?(.+?)(?:\s+play|\s|$)',
+            rf'(?:everywhere|all rooms?)\s+(?:{_EXCLUSION_ALTERNATION})\s+(?:the\s+)?(.+?)(?:\s+play|\s+$|$)',
+            rf'(?:{_EXCLUSION_ALTERNATION})\s+(?:the\s+)?(.+?)(?:\s+play|\s|$)',
         ]
 
         for pattern in patterns:

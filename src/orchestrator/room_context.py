@@ -78,9 +78,14 @@ _NON_ROOM_TOKENS = frozenset({
     "is", "are", "what", "which", "any", "some", "with", "for", "lit", "group", "area",
 })
 
-_EXCLUSION_KEYWORDS: Tuple[Tuple[str, ...], ...] = (
-    ("except",), ("but", "not"), ("other", "than"), ("excluding",), ("but",),
+EXCLUSION_PHRASES: Tuple[Tuple[str, ...], ...] = (
+    ("except",), ("excepting",), ("but", "not"), ("other", "than"), ("excluding",),
+    ("apart", "from"), ("aside", "from"), ("besides",), ("not", "including"), ("not", "the"),
+    ("but",),
 )
+# Words that often carry an exclusion without being one of the phrases above;
+# a fast path that sees one and parsed no excluded room leaves it to the model.
+EXCLUSION_DEFERRAL_WORDS = frozenset({"without", "unless", "minus", "skip", "leave", "keep"})
 _UNIVERSAL_QUANTIFIERS = frozenset({"all", "both", "every", "each"})
 _LIGHT_NOUNS = frozenset({"light", "lights", "lamp", "lamps"})
 _STRIP_DEVICE_NOUNS = frozenset({"light", "lights", "lamp", "lamps", "group", "all"})
@@ -325,10 +330,23 @@ def _singular(token: str) -> Tuple[str, ...]:
 
 def _exclusion_start(toks: Sequence[str]) -> int:
     for i in range(len(toks)):
-        for keyword in _EXCLUSION_KEYWORDS:
+        for keyword in EXCLUSION_PHRASES:
             if tuple(toks[i:i + len(keyword)]) == keyword:
                 return i
     return len(toks)
+
+
+def has_exclusion(query: Optional[str]) -> bool:
+    """True when the utterance contains an exclusion phrase as whole tokens
+    ("button", "butler" and "about" do not contain "but")."""
+    toks = tokens(query or "")
+    return _exclusion_start(toks) < len(toks)
+
+
+def has_exclusion_deferral_word(query: Optional[str]) -> bool:
+    """True when the utterance contains a word that may carry an exclusion
+    ("without", "unless", "minus", "skip", "leave", "keep")."""
+    return any(t in EXCLUSION_DEFERRAL_WORDS for t in tokens(query or ""))
 
 
 def find_room_mentions(query: Optional[str], directory: Optional[RoomDirectory]) -> List[RoomMention]:
@@ -452,6 +470,7 @@ _PLACE_WORDS = frozenset({"in"})
 _PHRASE_END = frozenset({
     "and", "or", "to", "please", "except", "but", "when", "by", "so", "if", "then", "on", "off",
     "with", "until", "for", "at", "from", "after", "before", "while", "now",
+    "apart", "aside", "besides", "excluding", "including",
 })
 _MAX_ROOM_WORDS = 3
 
