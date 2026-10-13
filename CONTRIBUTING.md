@@ -218,6 +218,9 @@ to stay complete — when you add a field, add its row here too.
 | `ha_write_fanout_hard_limit` | `HA_WRITE_FANOUT_HARD_LIMIT` | `18` | The same bound for plain commands; `0` disables; `0 < hard_limit < threshold` logs an ERROR and both fall back to `6`/`18` (non-fatal: every service loading the shared config reads it) |
 | `livekit_user_token_ttl_minutes` | `LIVEKIT_USER_TOKEN_TTL_MINUTES` | `30` | TTL (clamped 1-1440) for browser-facing LiveKit room tokens (jarvis-web voice sessions); server-side Athena participant tokens are unaffected (D27) |
 | `override_max_timeout_minutes` | `OVERRIDE_MAX_TIMEOUT_MINUTES` | `240` | Server-side ceiling on `POST /mode/override`'s `timeout_minutes`, applied regardless of PIN outcome; a requested value above this is clamped, never rejected (ATHENA-69 Pass H2) |
+| `llm_context_guard` | `LLM_CONTEXT_GUARD` | `enforce` | `enforce`\|`observe`; `observe` computes and counts Ollama context sizing but sends today's options and never refuses a call (the rollback); anything else logs an ERROR and uses `enforce`. Read once per process |
+| `llm_context_ceiling` | `LLM_CONTEXT_CEILING` | `16384` | Largest `num_ctx` raised for a call that needs its whole prompt; bounds raises only, never lowers a row or the server default; 2048-131072, else an ERROR and `16384` |
+| `llm_server_default_context` | `LLM_SERVER_DEFAULT_CONTEXT` | `0` | The Ollama host's `OLLAMA_CONTEXT_LENGTH`, which Ollama can't report; `0` = unknown (then no size is sent for a model without a row `num_ctx`); 0-131072, else an ERROR and `0`. Also read by admin-backend when a profile creates a model row |
 
 ## Fetching user-supplied or admin-supplied URLs (SSRF guard)
 

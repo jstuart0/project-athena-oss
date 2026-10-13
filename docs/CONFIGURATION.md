@@ -499,6 +499,192 @@ whenever the currently configured Ollama URL would genuinely be blocked
 Service DNS name with no matching `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`
 entry yet. This is a diagnostic log line only; it never blocks startup.
 
+#### Context window sizing
+
+Ollama's `/api/generate` doesn't fail when a prompt is longer than the context
+window (`num_ctx`). It drops the part that doesn't fit and answers from the
+rest. A smart-home command's intent prompt is about 4,500 tokens, so a model
+running at 2048 used to read only half of it, and then answered with
+well-formed JSON about a command it hadn't fully seen. Athena now sizes the
+window for the calls that act on the answer, and reports it when any other call
+gets a cut prompt.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LLM_SERVER_DEFAULT_CONTEXT` | `0` (unknown) | The context length your Ollama server uses when a request sends none: the value of `OLLAMA_CONTEXT_LENGTH` on the Ollama host. Athena can't read it from Ollama, so you state it. `0` to `131072`; anything else logs `llm_server_default_context_invalid` and is treated as `0`. |
+| `LLM_CONTEXT_CEILING` | `16384` | The largest window Athena raises a model to for a call that needs its whole prompt. It bounds raises only: it never lowers a model's own `num_ctx` or the server default. `2048` to `131072`; anything else logs `llm_context_ceiling_invalid` and uses `16384`. A ceiling below the server default is kept, with one `llm_context_ceiling_below_server_default` warning. |
+| `LLM_CONTEXT_GUARD` | `enforce` | `enforce` applies the sizing below. `observe` computes it, logs it and counts it, but sends exactly the sizes it sent before, never refuses a call and never makes a size sticky. Anything else logs `llm_context_guard_invalid` and uses `enforce`. |
+
+Every service that loads the shared configuration reads them, and the value is
+read once per process, so changing one needs a restart. `observe` is the
+rollback switch for this feature.
+
+**Set `LLM_SERVER_DEFAULT_CONTEXT` to your Ollama host's
+`OLLAMA_CONTEXT_LENGTH`.** A model with no row of its own, and a call whose row
+has no `num_ctx`, runs at the server default. Athena has to know it to avoid
+sending a window smaller than the one the model already gets, and to know what
+a prompt has to fit in. With it unset (`0`), a model without its own `num_ctx`
+gets no size from Athena, and smart-home control refuses any command whose
+prompt it can't show fits in 2048 tokens (see below), which is every command
+that reaches the model. admin-backend reads the same variable when a profile creates a model row, so set
+it on admin-backend before its first start.
+
+**What a call sends.** The floor is the model row's `num_ctx` when it is a
+positive integer (anything else is ignored, logged once per model as
+`llm_row_num_ctx_invalid`), otherwise `LLM_SERVER_DEFAULT_CONTEXT`, otherwise
+unknown.
+
+- *Every ordinary call* sends the floor, or the model's sticky size if that is
+  larger. With no floor it sends nothing, as before. A call never gets less
+  context than it got before this setting existed.
+- *The three smart-home calls whose answer is acted on* (intent extraction,
+  sequence extraction and motion-control extraction) ask for their whole prompt. Athena estimates it
+  (UTF-8 bytes divided by 2.8, plus 32), adds the output reserve (the row's
+  `num_predict`, else the call's `max_tokens`, else 512), rounds up to a power
+  of two of at least 2048, and sends the largest of that (up to the ceiling),
+  the floor and the sticky size. A prompt that doesn't fit is refused before
+  any request: because it needs more than the ceiling allows, or because no
+  floor is known and it needs more than 2048 tokens. The command then gets
+  "Sorry, I couldn't work out that command." and nothing is written.
+- *Sticky.* When one of those calls comes back whole, the size it sent becomes
+  that model's minimum for the rest of the process, so a model that serves two
+  kinds of call doesn't reload every time they alternate. The mark is per model
+  and per floor: lowering the row's `num_ctx` starts a fresh mark and takes
+  effect without a restart, and a restart clears every mark. Only those
+  three calls can raise a size, and they bound their own input: a query over
+  1,000 UTF-8 bytes is answered "That's too long for a device command." before
+  any other handling, with no model call, earlier-turn text is cut to 400 bytes
+  each, and each remembered intent field to 100. The limits are in bytes, so
+  whatever the script, those prompts plan to at most 8192 from a 2048 row, and
+  an oversized request can't push a model's memory use up. Streaming calls never
+  raise a size.
+- *A cut prompt is detected.* When Ollama reports a prompt token count that sits
+  on `num_ctx / 2 + 2` while the prompt is estimated larger than the window,
+  or under 35% of the estimate, the response is treated as coming from a cut
+  prompt. An ordinary call logs the warning `llm_prompt_truncation_suspected`
+  and counts it. One of the three smart-home calls discards the answer and acts
+  on nothing.
+- *Their output limit wins.* For those three calls, a row `num_predict` smaller
+  than the call's own `max_tokens` doesn't cut the answer short: the larger of
+  the two is sent, and counted in the output reserve.
+- *A raise is announced.* The first time one of those calls plans a window
+  above the row's `num_ctx` for a model, Athena logs
+  `llm_context_raised_above_row` with the floor and the planned size. Set that
+  row's `num_ctx` to the size it names. Sizes are remembered per process, so
+  with several orchestrator replicas each one raises and reloads on its own.
+- *A startup warning.* With `LLM_SERVER_DEFAULT_CONTEXT` at 0, the orchestrator
+  logs `llm_server_default_context_unset` at startup. A model whose row has no
+  `num_ctx` then has no known floor, and every one of these calls to it is
+  refused until you set the variable or give the row a `num_ctx`.
+- *An admin-backend outage.* The router keeps the last model configuration it
+  fetched for each model and serves it when admin-backend can't answer (one
+  `model_config_served_stale` warning per model), so a row's `num_ctx` doesn't
+  vanish mid-outage. It is trusted for at most 600 seconds after the last good
+  fetch; after that (`model_config_stale_expired`) the model has no config, and
+  therefore no floor. While it is served, admin-backend is retried every 30
+  seconds, and each stale serve is counted in
+  `athena_llm_context_total{path="admin", outcome="served_stale"}`. A model whose
+  first fetch fails, or whose row isn't found (404), has no floor. A 401 or 403
+  is never served stale: it logs `model_config_fetch_refused` with the status
+  and the model has no floor, so check the service key.
+
+**Only Ollama gets the whole-prompt guarantee.** MLX and cloud backends aren't
+planned or checked. A smart-home model assigned to one of those logs
+`smart_home_full_prompt_guarantee_unavailable` once per process and is called
+once without the demand. Its answer is then checked against your own words
+before anything is written:
+
+- it must be a JSON object, must not have stopped at its token limit, and if the
+  backend reports prompt tokens, the count mustn't be far under the estimate
+  (a cut prompt);
+- any write (anything but a status read) must be a direct command, not a
+  question, and agree with how Athena reads your words: on or off must match, and
+  so must the device when Athena found one. A command that isn't on/off and names
+  no device Athena can classify is refused. A lock or unlock must also be the
+  verb you said, on a device Athena classified as a lock. Status questions pass;
+- a sequence needs a plain command (not a question) with every step on the
+  device Athena found in your words; a motion-control command likewise needs a
+  plain command.
+
+Anything that fails gets "Sorry, I couldn't work out that command." and writes
+nothing, so some phrasings an MLX or cloud model used to get through now ask you
+to say it more plainly. The trade-off shows up as: follow-ups such as "make it a
+bit warmer", writes while the state-question kill switch is on, sequences that
+mix devices, and lock phrasings with no clear lock word. An Ollama model doesn't
+have these limits. On an `auto` backend, those three calls skip MLX and go
+to Ollama. Assign `smart_home_control` to an Ollama model to keep the guarantee.
+
+**An answer that isn't JSON.** On any backend, a complete answer that doesn't
+parse is no longer guessed at from keywords. A sequence or a motion-control
+command is refused. A single command acts only if Athena read it as a plain
+command with an explicit on or off in your words; otherwise it answers with a status read and writes
+nothing. Some phrasings that used to work through keyword guessing now get
+"Sorry, I couldn't work out that command."
+
+**The tool-calling path** (`/api/chat` with tools) sends no `num_ctx`, so it
+runs at the server default. It only reports: when the server default is known
+and a response shows a cut prompt it logs the same warning, and an HTTP 400
+that says the context was exceeded is counted as `rejected_by_backend`. A
+model that serves both tool calls and smart-home generation reloads when calls
+alternate between the two sizes, so give such a model a row `num_ctx` equal to
+the server default; don't set it below, because Ollama refuses a tool prompt
+that doesn't fit with HTTP 400.
+
+**What it costs.** Changing a model's context makes Ollama reload that model's
+runner and drop its prompt cache (a fraction of a second to a few seconds,
+depending on the model), and the key-value cache grows with the window and with
+`OLLAMA_NUM_PARALLEL`. For an 8B model, 8192 instead of 2048 is roughly half a
+gibibyte more. Ollama clamps a window to the model's trained length. A raise
+happens at most once per size and model per process.
+
+**Metrics.** `athena_llm_context_total{path, outcome, model}` counts
+`raised`, `over_ceiling`, `unknown_default`, `truncation_suspected` and
+`rejected_by_backend`; `athena_llm_context_changes_total{model}` counts the
+times the size sent for a model differed from the one before it. A call
+refused after Ollama had already answered keeps its token counts in the usage
+totals and the LLM metrics rows.
+
+**Shipped profiles and rows.** The model rows in the shipped profiles
+(`ollama_qwen_small`, the Ollama row of `mlx_qwen_hybrid`, and
+`safe_fallback`) set `num_ctx` to 8192 and, for the first two, `num_batch` to
+256. They no longer set `num_predict`, `max_tokens` or `mirostat`: a value on
+a model row caps every caller of that model, and output length belongs to the
+caller. Their Ollama timeouts are 90 seconds. The `speed` preset keeps 2048 as
+a floor. A row left at 2048 or 4096 still works for smart-home control while
+`LLM_CONTEXT_GUARD=enforce`, because the call raises the window itself, but a
+row at 8192 avoids the reload.
+
+**Before you switch `LLM_CONTEXT_GUARD` to `enforce`** on an install whose
+profile rows predate this change: set the smart-home model's row `num_ctx` to
+8192 and remove `num_predict` and `mirostat*` from its `ollama_options`, through
+the admin API (a `PUT` on the model configuration) rather than a profile apply.
+Do it before the switch, wait over a minute for each replica's router cache,
+and, if a replica logs `llm_context_raised_above_row`, set that row to the size
+it names. Existing rows aren't changed by an upgrade, and a row at 2048 would
+otherwise make the first command reload the model.
+
+- *First apply never shrinks.* A row a profile creates inherits temperature,
+  `max_tokens`, timeout and keep-alive from the `_default` row, and its
+  `num_ctx` is the largest of the profile's 8192, `LLM_SERVER_DEFAULT_CONTEXT`
+  and the `_default` row's. On an install whose Ollama runs at 65536 and which
+  states it, the new row gets 65536.
+- *Startup never overwrites an active profile.* At startup admin-backend applies
+  `ollama_qwen_small` in `fill_missing_only` mode: it fills a field only when it
+  is empty, leaves an existing active-profile setting alone, and leaves a pending
+  runtime reload pending. A row you edited is untouched. Applying the same model
+  for several components no longer fails the whole seed.
+- *Rows already on your install don't change on upgrade.* Raise a row on the
+  model configuration page (or the admin API), or run a profile apply in
+  `reconcile_profile` mode for rows the profile owns.
+- *`reconcile_profile` resets a profile-created row to the shipped
+  options* (`{"num_ctx": 8192, "num_batch": 256}`). On an install whose server
+  default is larger than 8192, that shrinks the window. Detach the row first
+  (`POST /api/oss-profiles/records/detach` with `record_type` `ModelConfiguration`
+  and the model name as `identifier`), or run reconcile only where the server
+  default is 8192 or less.
+- The standalone `_default` row isn't applied by a profile. A model with no row
+  of its own resolves to it, and it carries no `num_ctx` unless you set one.
+
 ### Redis
 
 | Variable | Default | Description |
@@ -1552,7 +1738,121 @@ sustained rise if you want to notice a caller hammering a write it doesn't
 have. A room light command that drops a light the request may not use
 (see "How a room's lights are chosen") adds one increment for that command,
 plus one for every denial the guard itself raises; so a single guest command
-can count more than once.
+can count more than once. The `ha_write_denied` and `entity_blocked_*` log
+lines carry the domain, service, reason and counts, not entity ids, targets or
+session ids, so a log search by entity id no longer finds them.
+
+#### Doors, locks and covers
+
+An **opening** is an unlock, or opening a garage, gate or door cover (an
+*access cover*). Athena opens at most one door per request, and only one your
+own words name.
+
+**What names a door.** An opening needs an opening verb ("unlock", "open",
+"release") and one of three things:
+
+1. a door noun plus the door's name: "unlock the front door", "open the
+   garage door". The nouns are lock, door and deadbolt for locks, and garage,
+   gate, door and opener for covers;
+2. a bare noun when the house has exactly one door of that kind the request may
+   use: "unlock the door", "open the garage". A modifier that matches nothing
+   ("the side door") is "not found", never the one door;
+3. the answer to a "Which door?" question, or "it" for the door you just
+   opened or asked about.
+
+A room or an area never names a door. "Unlock the kitchen" and "open the garage
+area" write nothing: with one door in that room Athena says "Say 'unlock the
+kitchen door' if you want me to unlock it", and with several it asks "Which
+door: ...?" and lists only those. A name without a door noun ("unlock the
+front") gets the same hint. Rooms come from Home Assistant areas, and locks and
+covers don't inherit the speaker's room.
+
+**What happens otherwise.**
+
+- *Several candidates, no name, or "all the doors".* "Unlock all the doors"
+  writes nothing: Athena says it opens one door at a time and asks which. A
+  command that names no door asks when there are several, gives the hint when
+  there is one, and says "I couldn't find a door to unlock" when the request may
+  use none.
+- *An unknown name.* "I couldn't find a door called X", where X is up to three
+  of your own words.
+- *The answer to "Which door?"* counts for 60 seconds, from the same caller
+  only, and matches by name ("the front door" matches "Front Deadbolt"). On a
+  surface that can't carry a follow-up (Wyoming satellites, or any caller with no
+  device id the gateway believes or no session) Athena still asks, and you say
+  the full command again ("unlock the front door").
+- *Following up.* "Unlock it" works for the door you opened, or asked the
+  status of, in the last 60 seconds, for the same caller. After "lock the front
+  door" it asks which door. With no earlier door in a one-lock house it gives the
+  hint.
+- *The verb has to be clear.* A negation ("don't unlock the door"), both verbs
+  in one command, or no opening verb gets "I'm not sure what to do with the door.
+  Say 'unlock' or 'open' and the door's name." The word "lock" after an opening
+  verb is read as the noun only at the end of the clause ("unlock the front door
+  lock"), so "unlock the lock on the front door" asks you to rephrase.
+- *One opening per request.* "Unlock the front door and open the garage" gets
+  "I can unlock or open one door at a time. Name the door, for example 'unlock
+  the front door'." This is enforced for the whole request by the permission
+  guard, so a second opening is refused even when the first one failed, and by
+  sequences, the automation agent and created automations. A refusal stops the
+  rest of that request's writes.
+- *Groups.* A lock or cover that Home Assistant reports with member entities (a
+  group) is refused for opening, because it would open several doors.
+- *A failed state read.* Before an opening, Athena reads the door's state (up to
+  10 seconds). If that fails it says "I couldn't check that door right now, so I
+  didn't open it."
+- *Nothing scheduled or conditional.* An unlock or door opening in a timed
+  sequence ("unlock the door at six", or after a delay), requested by the
+  automation agent with a time or a condition, or inside an automation it is
+  asked to create, is refused: "I can't schedule an unlock or a door opening, so
+  ask me when you want it." Automations with a templated service or target, or
+  a device-only door step, are refused too ("I can't set that up with a
+  template.").
+- *Guests and degraded mode.* A guest, public or degraded request that touches
+  a restricted door hears the usual refusal for that mode, not the one-door
+  wording.
+
+**Locking, closing and reading status** aren't openings. They may use a room, a
+part of a name or nothing, so "lock up" and "lock the doors" lock every door the
+request may use (the large-write limits still apply), "close the garage" closes
+the garage covers, and "are the doors locked" reports on all of them. Status answers read the door
+outside the permission guard, as before, so a guest or a degraded-mode house
+can still ask whether a door is locked; the opening path's questions and "not
+found" answers list only doors the request may use.
+
+**Which covers are access covers.** Every cover is one except a cover whose
+Home Assistant `device_class` is `awning`, `blind`, `curtain`, `damper`, `shade`,
+`shutter` or `window`. A cover with no `device_class` is a plain window covering
+only when its name says blind, shade, curtain, awning, drape or damper and has no
+door, gate, garage or opener word. A name that says only window or shutter isn't
+enough ("Bay Window" with no class is an access cover): set its `device_class`
+in Home Assistant. "Open the blinds" in a room still opens that room's plain
+covers; a command whose targets include an access cover must be exactly one
+cover, so "the garage door and the blinds" is refused. Window wording still
+closes or reads an unclassified window cover; opening it asks for its name.
+
+**Scenes and scripts.** A scene or script the model picks is activated only
+when every distinguishing word of its name is in what you said, or you said one
+of the built-in phrases for it ("good night"). "Good night" therefore can't
+reach a script called `unlock_all_at_night`; anything else gets "Unknown scene
+or routine." A scene or script you name in full still runs, and Athena can't see
+what it does inside Home Assistant.
+
+**The guard behind it.** The permission guard enforces the same rules when a
+higher layer gets them wrong: an opening call needs one concrete `lock.` or
+`cover.` id (never `all`, an area, device, floor or label), at most one lock, and
+exactly one target when it touches an access cover; `homeassistant.toggle` and
+`homeassistant.turn_on` on anything non-concrete are refused, since Home
+Assistant forwards them to the target's own domain; the model's own
+`decided_*` fields and other server-set fields are stripped from model output.
+
+**Not covered.** Athena guards `lock.*` and `cover.*` entities. An entity that
+opens something but isn't one of those (a `button` or `switch` garage opener, an
+`input_boolean`, an alarm panel being disarmed) and a script or scene that
+unlocks are outside it; keep them out of the guest allowlists (see the `switch`
+note under "Guest floor and allowlist baselines") and out of what you expose to
+Athena. "Lock all the doors except the back door" locks all
+of them (the safe direction).
 
 #### Which room Athena assumes
 
@@ -1615,8 +1915,8 @@ the house, and so does asking about "the house".
 
 **"All the lights"** means every lamp only when the wording says so ("all
 the lights", "the whole house", "everything"); a room named in the same
-sentence wins ("all the lights in the kitchen"), and "except the bedroom"
-leaves that room out. Who reaches every area depends on who is asking: an
+sentence wins ("all the lights in the kitchen"), and a room named in an
+exclusion is left out (see "Leaving rooms out" below). Who reaches every area depends on who is asking: an
 owner whose voice device the gateway trusts, or an owner signed in to Jarvis
 web with a valid service key, reaches every area's lamps. An owner-mode caller
 Athena can't vouch for (an unproven household request, or a service that
@@ -1627,6 +1927,31 @@ light group, as before areas existed. A guest or any other non-owner audience
 if there are none. Lights with no area are included only when
 `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS=true`, and only for the callers that reach
 every area (a trusted owner).
+
+**Leaving rooms out.** With whole-house wording, these phrases introduce rooms
+that are left out, as whole words: "except", "excepting" ("except for"), "but
+not", "other than", "excluding", "apart from", "aside from", "besides", "not
+including", "not the" and a bare "but". "Turn off all the lights apart from the
+den and the study", "everything besides the den" and "all the lights, but not
+the galley" each leave those rooms alone; a list of rooms after the phrase is
+read through "and" and "or". The phrase can lead ("except the galley, turn off
+all the lights") when the sentence has a whole-house cue such as "every light";
+otherwise a leading "besides the den, turn on the kitchen fan" is an opener,
+not an exclusion. "Leave the galley on but turn off the rest" keeps the galley and turns every
+other room off. Words are matched whole, so "button" and "butler" aren't "but".
+
+Other wording that often carries an exclusion ("without", "unless", "minus",
+"skip", "leave", "keep", "exclude", "spare", "save", "ignoring", "accept" as
+speech-to-text hears "except") followed by a room, or by a noun phrase ending in
+on or off ("leave the porch on"), is one Athena can't read for certain. It never
+turns the house off on that: it asks "Which room?". The model's own list of
+excluded rooms is used only when every name in it is a room Athena knows and it
+covers every room you named; otherwise Athena asks. Because the fast path leaves
+any sentence with exclusion wording to the model, "all lights on but dim" is
+slower than it was, not different. Two phrasings are known limits: "all the lights off, the kitchen stays on"
+isn't read as an exclusion (the kitchen is written to), and an exclusion ahead
+of a command for a different room, as in "except in the den, turn off all the
+lights in the kitchen", may not be read as you meant.
 
 **When it doesn't work.** `/health` reports the registry's state
 (`ha_registry` in the gateway, `components.ha_registry` in the orchestrator):

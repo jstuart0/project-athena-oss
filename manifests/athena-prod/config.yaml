@@ -56,6 +56,9 @@ data:
   # HEALTH_POLL_TIMEOUT_SECONDS: ""
   # JARVIS_WEB_URL: ""
   # LIVEKIT_USER_TOKEN_TTL_MINUTES: ""
+  # LLM_CONTEXT_CEILING: ""
+  # LLM_CONTEXT_GUARD: ""
+  # LLM_SERVER_DEFAULT_CONTEXT: ""
   # LLM_SERVICE_URL: ""
   # LOGIN_LOCKOUT_MINUTES: ""
   # LOGIN_LOCKOUT_THRESHOLD: ""
@@ -121,6 +124,11 @@ data:
   # settings reachability check still require it. Uncomment and set, e.g.:
   #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "ollama"
   # See docs/CONFIGURATION.md "Ollama (LLM)" for the full rule.
+  #
+  # Context window: also set LLM_SERVER_DEFAULT_CONTEXT (listed above,
+  # commented out) to the OLLAMA_CONTEXT_LENGTH your Ollama server runs with,
+  # and set it on admin-backend too before its first start. See
+  # docs/CONFIGURATION.md "Context window sizing".
   # ==========================================================================
   OLLAMA_URL: "http://ollama:11434"
 

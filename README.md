@@ -176,12 +176,12 @@ Best for: Home Assistant integration, custom applications, automation scripts.
 Deep Home Assistant integration (4,500+ lines) with:
 
 - **Lights** — on/off, dimming, color (including sports team colors), room-specific and whole-house
-- **Locks** — lock/unlock with 70+ natural language patterns ("lock it down for the night", "did I lock the front door?")
+- **Locks and garage doors** — lock, close and status ("lock it down for the night", "did I lock the front door?"). An unlock or an opening acts on one door you name ("unlock the front door") and asks "Which door?" otherwise
 - **Climate** — thermostat adjustments, fan control
 - **Occupancy** — "Is anyone home?", "Who's in the kitchen?"
 - **Media** — TV control, music playback
 - **Response variety** — randomized response templates to avoid robotic repetition
-- **Smart exclusions** — "Turn off all lights" knows to leave accent lighting alone
+- **Exclusions** — "turn off all the lights except the study" (also "apart from", "besides", "other than") leaves that room alone, and lights that aren't lamps, such as a voice satellite's LED ring, can be excluded by configuration
 
 ## Quick Start
 
