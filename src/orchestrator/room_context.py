@@ -344,9 +344,12 @@ _SCOPE_WORDS = _UNIVERSAL_QUANTIFIERS | _LIGHT_NOUNS | frozenset({
 })
 _OBJECT_FILLER = frozenset({"the", "a", "an", "my", "our", "your", "for"})
 _STATE_WORDS = frozenset({"on", "off", "lit", "dark"})
+_LIST_JOINERS = frozenset({"and", "or"})
 _PLACE_PREPOSITIONS = frozenset({"in", "inside", "at"})
 _TRAILING_DEFERRAL_WORDS = frozenset({"excluded", "excepted"})
-_SKIPPED_AFTER_DEFERRAL = _OBJECT_FILLER | _LIGHT_NOUNS | _PLACE_PREPOSITIONS
+_SKIPPED_AFTER_DEFERRAL = (
+    _OBJECT_FILLER | _LIGHT_NOUNS | _PLACE_PREPOSITIONS | frozenset({"ones", "one", "those", "them", "it"})
+)
 _PLAIN_WORDS = _OBJECT_FILLER | _SCOPE_WORDS | _NON_ROOM_TOKENS | frozenset({"it", "them", "that"})
 
 
@@ -361,6 +364,19 @@ def _phrase_at(toks: Sequence[str], i: int) -> int:
 def _has_whole_house_cue(toks: Sequence[str]) -> bool:
     text = " ".join(toks)
     return bool(WHOLE_HOUSE_ROOM_RE.search(text) or WHOLE_HOUSE_LIGHT_RE.search(text))
+
+
+def _object_chain(toks: Sequence[str], spans: Sequence[Tuple[int, int]], end: int) -> List[Tuple[int, int]]:
+    """The rooms a phrase ending at ``end`` introduces: each room separated
+    from the previous one (or the phrase) only by filler or "and"/"or"
+    ("besides the den and the study")."""
+    chain: List[Tuple[int, int]] = []
+    previous = end
+    for start, stop in sorted(spans):
+        if start >= previous and all(t in _OBJECT_FILLER or t in _LIST_JOINERS for t in toks[previous:start]):
+            chain.append((start, stop))
+            previous = stop
+    return chain
 
 
 def _names_scope_room(toks: Sequence[str], spans: Sequence[Tuple[int, int]],
@@ -391,8 +407,7 @@ def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> T
             i += 1
             continue
         end = i + length
-        objects = [(start, stop) for start, stop in spans
-                   if start >= end and all(t in _OBJECT_FILLER for t in toks[end:start])]
+        objects = _object_chain(toks, spans, end)
         if any(t in _SCOPE_WORDS for t in toks[:i]) or any(e <= i for _, e in spans):
             return i, introduced
         if cue and objects and not _names_scope_room(toks, spans, objects):

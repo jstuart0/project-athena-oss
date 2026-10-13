@@ -552,6 +552,33 @@ def test_only_a_place_word_after_a_scope_makes_a_room_the_target(query):
     assert rc._scan_exclusions(toks, spans)[0] == 0, query
 
 
+def test_every_room_in_a_leading_list_is_introduced_not_just_the_first(monkeypatch):
+    intent, written = _extract_and_write(
+        monkeypatch, "besides the study and the hall, turn off all the lights in the galley", "north_bathroom")
+    assert written and written <= GALLEY_LEAVES | {"light.galley_pair", "light.galley_all"}, written
+
+
+def test_a_leading_list_of_two_rooms_excludes_both(monkeypatch):
+    intent, written = _extract_and_write(monkeypatch, "except the galley and the study, turn off all the lights", "hall")
+    assert not written & GALLEY_LEAVES and "light.study_lamp" not in written, written
+    assert "light.hall_lamp" in written and "light.north_lamp" in written
+
+
+def test_a_leading_list_joined_by_or_before_one_scope_room_writes_that_room_only(monkeypatch):
+    intent, written = _extract_and_write(
+        monkeypatch, "except the study or the hall, turn off every light in the galley", "north_bathroom")
+    assert written and written <= GALLEY_LEAVES | {"light.galley_pair", "light.galley_all"}, written
+
+
+def test_leave_the_ones_in_the_hall_on_spares_the_hall(monkeypatch):
+    query = "turn off all the lights but leave the ones in the hall on"
+    assert rc.has_exclusion_deferral_word(query, HOUSE) is True
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = _model_intent(rig, query, ["hall"])
+    asyncio.run(_execute(rig, intent, query, speaker="study"))
+    assert "light.hall_lamp" not in rig.written and "light.study_lamp" in rig.written, rig.written
+
+
 def test_the_scan_marks_the_scope_room_not_the_leading_object():
     toks = rc.tokens("besides the study turn off all the lights in the galley")
     spans = [(m.start, m.end) for m in rc._chosen_mentions(toks, HOUSE)]
