@@ -2046,7 +2046,7 @@ Return ONLY valid JSON."""
             current_ha_scope,
             ensure_permission_enforcing,
             ha_permission_scope,
-            permission_refusal_message,
+            refusal_message,
         )
 
         ha_client = ensure_permission_enforcing(ha_client)
@@ -2059,10 +2059,7 @@ Return ONLY valid JSON."""
 
             def _finish(result: str) -> str:
                 if len(scope.denials) > n0:
-                    denied_domains = tuple(
-                        d.domain for d in scope.denials[n0:] if d.reason != "halted_after_denial"
-                    )
-                    return permission_refusal_message(denied_domains, scope, partial=scope.allowed_writes > w0)
+                    return refusal_message(scope.denials[n0:], scope, partial=scope.allowed_writes > w0)
                 return result
 
             device_type = intent.get('device_type', 'light')

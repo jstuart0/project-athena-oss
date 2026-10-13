@@ -25,7 +25,7 @@ from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
 from orchestrator import access_target
-from orchestrator.model_safe_errors import model_safe_error, scrub_tool_result
+from orchestrator.model_safe_errors import make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -902,9 +902,18 @@ class AutomationAgent:
         if refusal:
             return refusal
 
+        from orchestrator.mode_permission import HADenial, HAWritePermissionDenied, current_ha_scope, refusal_message
         try:
             await self.ha_client.call_service(domain, service, data)
             return f"Called {domain}.{service} on {entity_id}"
+        except HAWritePermissionDenied as denied:
+            # D20: the guard's refusal as its fixed phrase, relayed to the
+            # model as vetted text; the turn's own answer comes from the scope.
+            phrase = refusal_message(
+                (HADenial(domain=str(domain), service=str(service), targets=(), reason=denied.reason),),
+                current_ha_scope(),
+            )
+            return make_user_safe(phrase, 403) or model_safe_error(denied)
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
             return f"Failed to call {domain}.{service}: {model_safe_error(e)}"

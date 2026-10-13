@@ -17,6 +17,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 if str(SRC) not in sys.path:
@@ -71,6 +72,8 @@ class DoorRig(Rig):
 
     def __init__(self, monkeypatch, states, *, areas=None, placement=None, **kw):
         super().__init__(monkeypatch, states=states, registry=False, **kw)
+        # The guard reads a cover's state to tell a blind from a garage door.
+        self.raw.get_state = AsyncMock(side_effect=lambda entity_id: states[entity_id])
         if areas:
             snapshot = hr.RegistrySnapshot.from_raw(registry_raw(areas, placement or {}), fetched_at=2.0)
             self.registry._snapshot = snapshot
@@ -1961,3 +1964,146 @@ class TestNamePlainRule:
         assert not at.is_access_cover("cover.x", {"friendly_name": "Bay Window", "device_class": "window"})
         for name in ("Living Room Blinds", "Den Blind", "Bedroom Shade", "Hall Curtains", "Patio Awning"):
             assert not at.is_access_cover("cover.x", {"friendly_name": name}), name
+
+
+# Guard-origin refusals (D20): a requirement, never a question, and a guest
+# or public caller hears the guest or public refusal first
+# ---------------------------------------------------------------------------
+
+import contextlib  # noqa: E402
+
+import orchestrator.nodes.route_control as route_control_module  # noqa: E402
+
+NAME_THE_DOOR = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
+
+
+def seed_opened(monkeypatch, *ids):
+    """Make every scope route_control opens start with doors already opened,
+    so the next opening is a second one for the request."""
+    real = route_control_module.ha_permission_scope
+
+    @contextlib.contextmanager
+    def seeded(*args, **kwargs):
+        with real(*args, **kwargs) as scope:
+            scope.opened.update(ids)
+            yield scope
+
+    monkeypatch.setattr(route_control_module, "ha_permission_scope", seeded)
+
+
+def permit_every_entity(monkeypatch):
+    """A guest or public scope whose entity checks all pass, so the only
+    thing left to refuse the write is the one-door rule."""
+    monkeypatch.setattr(mp, "check_entity_permission", lambda entity_id, permissions: True)
+
+
+class TestGuardRefusals:
+    def test_a_second_door_in_one_request_states_the_requirement(self, monkeypatch):
+        door = DoorChat(monkeypatch)
+        seed_opened(monkeypatch, "lock.garden_gate")
+        out = door.say("unlock the front door")
+        assert out.answer == NAME_THE_DOOR == mp.ONE_DOOR_REFUSAL
+        assert "which" not in out.answer.lower() and "?" not in out.answer
+        assert door.openings == []
+        assert door.chat.stored_parameters().get("awaiting_room_choice") is None
+        assert out.error == "permission_denied"
+
+    def test_the_controller_surfaces_the_phrase_and_stores_no_question(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance("unlock the front door")) as scope:
+                scope.opened.add("lock.garden_gate")
+                answer = await rig.controller.execute_intent(lock_intent(room="front_door"), rig.raw, "unlock the front door")
+                return answer, scope
+
+        answer, scope = asyncio.run(go())
+        assert answer == mp.ONE_DOOR_REFUSAL
+        assert [d.reason for d in scope.denials] == [mp.ONE_OPENING_PER_REQUEST]
+        assert scope.room_choice is None and scope.fanout_block is None
+        assert rig.openings == []
+
+    def test_a_guest_hears_the_guest_refusal_not_the_one_door_one(self, monkeypatch):
+        # route_control's intent gate stops a guest's control intent first; this
+        # is the controller and the guard on their own, with the entity checks
+        # passing so only the one-door rule refuses the write.
+        permit_every_entity(monkeypatch)
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+
+        async def go():
+            with mp.ha_permission_scope(guest(), mode="guest") as scope:
+                scope.opened.add("lock.garden_gate")
+                answer = await rig.controller.execute_intent(lock_intent(room="front_door"), rig.raw, "unlock the front door")
+                return answer, scope
+
+        answer, scope = asyncio.run(go())
+        assert rig.openings == []
+        assert [d.reason for d in scope.denials] == [mp.ONE_OPENING_PER_REQUEST]
+        assert answer == "Sorry, I can't control the locks in guest mode."
+
+    def test_a_public_caller_hears_the_public_refusal(self, monkeypatch):
+        # route_control's intent gate stops a public caller before any write;
+        # this is the controller and the guard on their own.
+        permit_every_entity(monkeypatch)
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+
+        async def go():
+            perms = mp.public_permissions()
+            with mp.ha_permission_scope(perms, mode="guest") as scope:
+                scope.opened.add("lock.garden_gate")
+                return await rig.controller.execute_intent(lock_intent(room="front_door"), rig.raw, "unlock the front door")
+
+        assert asyncio.run(go()) == "Sorry, I can't control the locks from here."
+        assert rig.openings == []
+
+    def test_a_degraded_scope_hears_the_degraded_refusal(self, monkeypatch):
+        permit_every_entity(monkeypatch)
+        door = DoorChat(monkeypatch)
+        seed_opened(monkeypatch, "lock.garden_gate")
+        out = door.say("unlock the front door", perms=mp.degraded_permissions(), mode="owner")
+        assert door.openings == []
+        assert "couldn't verify permissions" in out.answer and "one door" not in out.answer
+
+    def test_the_agent_relays_the_phrase_for_the_guard_reason(self, monkeypatch):
+        from orchestrator.automation_agent import AutomationAgent
+
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        agent = AutomationAgent(rig.raw, MagicMock(), admin_client=MagicMock(), entity_manager=rig.manager)
+        agent.ha_client = mp.ensure_permission_enforcing(rig.raw)
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner") as scope:
+                results = [
+                    await agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}, {"query": "unlock the front door"}),
+                    await agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": "lock.back_door"}, {"query": "unlock the back door"}),
+                ]
+                return results, scope
+
+        (first, second), scope = asyncio.run(go())
+        assert first.startswith("Called lock.unlock")
+        assert second == mp.ONE_DOOR_REFUSAL
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+        assert [d.reason for d in scope.denials] == [mp.ONE_OPENING_PER_REQUEST]
+
+    def test_the_agent_relays_the_guest_refusal_to_a_guest(self, monkeypatch):
+        from orchestrator.automation_agent import AutomationAgent
+
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        agent = AutomationAgent(rig.raw, MagicMock(), admin_client=MagicMock(), entity_manager=rig.manager)
+        agent.ha_client = mp.ensure_permission_enforcing(rig.raw)
+
+        async def go():
+            with mp.ha_permission_scope(guest(), mode="guest"):
+                return await agent._exec_ha_service(
+                    {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}, {"query": "unlock the front door"})
+
+        assert asyncio.run(go()) == "Sorry, I can't control the locks in guest mode."
+        assert rig.calls == []
+
+    def test_sequence_pre_authorization_uses_the_phrase_for_a_door_reason(self):
+        decision = mp.HAWriteDecision(allowed=False, denied_targets=("lock.a", "lock.b"), reason=mp.UNLOCK_NEEDS_ONE_LOCK)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner") as owner_scope:
+            assert mp.sequence_refusal_message(decision, owner_scope) == mp.ONE_DOOR_REFUSAL
+        with mp.ha_permission_scope(guest(), mode="guest") as guest_scope:
+            text = mp.sequence_refusal_message(decision, guest_scope)
+        assert "guest mode" in text and "one door" not in text

@@ -710,3 +710,636 @@ class TestReadOnlyScopeDeniesAllFourWriteMethods:
             "call_service", "create_automation", "delete_automation", "disable_automation",
         }
         assert len(covered) >= 4
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-233 (D14): an unlock or a door opening is one concrete door, once
+# per request. Rules A and B are pure; rule C lives on the scope; rule D is
+# the automation config.
+# ---------------------------------------------------------------------------
+
+NEEDS_NAMED = mp.OPENING_NEEDS_NAMED_TARGET
+ONE_LOCK = mp.UNLOCK_NEEDS_ONE_LOCK
+ONE_PER_REQUEST = mp.ONE_OPENING_PER_REQUEST
+TEMPLATED = mp.TEMPLATED_SERVICE
+
+GARAGE_STATE = {"state": "closed", "attributes": {"device_class": "garage"}}
+BLIND_STATE = {"state": "closed", "attributes": {"device_class": "blind"}}
+ACCESS_MAP = {"cover.garage": True, "cover.side_gate": True, "cover.blind_a": False, "cover.blind_b": False}
+
+
+def _denied_reason(domain, service, data, cover_access=None, perms=None):
+    decision = mp.authorize_ha_write(domain, service, data, perms or _owner_perms(), cover_access=cover_access)
+    return None if decision.allowed else decision.reason
+
+
+class TestRulesAAndB:
+    @pytest.mark.parametrize("domain,service,data,reason", [
+        ("lock", "unlock", {"entity_id": "LOCK.A,LOCK.B"}, ONE_LOCK),
+        ("lock", "Unlock", {"entity_id": ["lock.a", "lock.b"]}, ONE_LOCK),
+        ("LOCK", "unlock", {"entity_id": "lock.a, lock.b"}, ONE_LOCK),
+        ("lock", "unlock", {"entity_id": "lock.a,lock.b,lock.c"}, ONE_LOCK),
+        ("lock", "unlock", {"entity_id": ["lock.a", "all"]}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "lock.a,ALL"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "all"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": ""}, NEEDS_NAMED),
+        ("lock", "unlock", {}, NEEDS_NAMED),
+        ("lock", "unlock", None, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "lock.all"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "lock.front-door"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "light.porch"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": {"x": "lock.a"}}, NEEDS_NAMED),
+        ("lock", "unlock", {"target": {"entity_id": ["lock.a", "lock.b"]}}, ONE_LOCK),
+        ("lock", "unlock", {"data": {"entity_id": ["lock.a", "lock.b"]}}, ONE_LOCK),
+        ("lock", "unlock", {"data": {"target": {"entity_id": "lock.a,lock.b"}}}, ONE_LOCK),
+        ("lock", "unlock", {"entity_id": "lock.a", "target": {"entity_id": "lock.b"}}, ONE_LOCK),
+        ("lock", "unlock", {"entity_id": "lock.a", "data": {"entity_id": "lock.b"}}, ONE_LOCK),
+        ("lock", "unlock", {"area_id": "kitchen"}, NEEDS_NAMED),
+        ("lock", "unlock", {"entity_id": "lock.a", "device_id": "d1"}, NEEDS_NAMED),
+        ("lock", "open", {"entity_id": "all"}, NEEDS_NAMED),
+        ("lock", "toggle", {"entity_id": "all"}, NEEDS_NAMED),
+        ("lock", "turn_off", {"entity_id": "all"}, NEEDS_NAMED),
+        ("lock", "open", {"entity_id": "lock.a,lock.b"}, ONE_LOCK),
+        ("cover", "open_cover", {"entity_id": "all"}, NEEDS_NAMED),
+        ("cover", "open_cover", {"area_id": "garage"}, NEEDS_NAMED),
+        ("cover", "toggle", {"entity_id": "all"}, NEEDS_NAMED),
+        ("cover", "set_cover_position", {"entity_id": "all"}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"entity_id": "all"}, NEEDS_NAMED),
+        ("homeassistant", "toggle", {"entity_id": "all"}, NEEDS_NAMED),
+        ("homeassistant", "turn_on", {"entity_id": "all"}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"area_id": "kitchen"}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"device_id": "d1"}, NEEDS_NAMED),
+        ("homeassistant", "toggle", {"label_id": "doors"}, NEEDS_NAMED),
+        ("homeassistant", "toggle", {"floor_id": "ground"}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"entity_id": "front_door"}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"entity_id": ["light.x", "front_door"]}, NEEDS_NAMED),
+        ("homeassistant", "turn_off", {"entity_id": "lock.a,lock.b"}, ONE_LOCK),
+        ("homeassistant", "toggle", {"entity_id": "lock.a,cover.garage"}, NEEDS_NAMED),
+    ])
+    def test_denied(self, domain, service, data, reason):
+        assert _denied_reason(domain, service, data) == reason
+
+    def test_one_garage_plus_a_blind_is_denied_but_two_blinds_pass(self):
+        garage_and_blind = {"entity_id": ["cover.garage", "cover.blind_a"]}
+        assert _denied_reason("cover", "open_cover", garage_and_blind, ACCESS_MAP) == NEEDS_NAMED
+        two_blinds = {"entity_id": ["cover.blind_a", "cover.blind_b"]}
+        assert _denied_reason("cover", "open_cover", two_blinds, ACCESS_MAP) is None
+
+    def test_two_access_covers_are_denied(self):
+        assert _denied_reason("cover", "open_cover", {"entity_id": "cover.garage,cover.side_gate"}, ACCESS_MAP) == NEEDS_NAMED
+
+    def test_an_unclassified_cover_is_a_way_in(self):
+        two_blinds = {"entity_id": ["cover.blind_a", "cover.blind_b"]}
+        assert _denied_reason("cover", "open_cover", two_blinds) == NEEDS_NAMED
+        assert _denied_reason("cover", "open_cover", two_blinds, {"cover.blind_a": False}) == NEEDS_NAMED
+
+    def test_one_lock_and_one_garage_in_one_call_is_denied(self):
+        assert _denied_reason("lock", "unlock", {"entity_id": "lock.a,cover.garage"}, ACCESS_MAP) == NEEDS_NAMED
+
+    @pytest.mark.parametrize("domain,service,data,cover_access", [
+        ("lock", "unlock", {"entity_id": "lock.front_door"}, None),
+        ("lock", "Unlock", {"entity_id": " LOCK.Front_Door "}, None),
+        ("lock", "unlock", {"entity_id": "lock.a,lock.a"}, None),
+        ("lock", "lock", {"entity_id": "all"}, None),
+        ("lock", "lock", {"entity_id": "lock.a,lock.b"}, None),
+        ("lock", "lock", {"area_id": "kitchen"}, None),
+        ("cover", "close_cover", {"entity_id": "all"}, None),
+        ("cover", "open_cover", {"entity_id": "cover.garage"}, None),
+        ("cover", "open_cover", {"entity_id": ["cover.blind_a", "cover.blind_b"]}, ACCESS_MAP),
+        ("homeassistant", "turn_off", {"entity_id": "light.x"}, None),
+        ("homeassistant", "turn_on", {"entity_id": "lock.a,lock.b"}, None),
+        ("homeassistant", "turn_off", {"entity_id": "cover.garage,cover.side_gate"}, None),
+        ("homeassistant", "turn_off", {"entity_id": "lock.front_door"}, None),
+        ("light", "turn_off", {"entity_id": "all"}, None),
+    ])
+    def test_allowed(self, domain, service, data, cover_access):
+        assert _denied_reason(domain, service, data, cover_access) is None
+
+    def test_a_guest_denied_the_lock_domain_gets_the_entity_reason_not_a_door_reason(self):
+        assert _denied_reason("lock", "unlock", {"entity_id": "all"}, perms=_guest_perms()) == "entity_or_domain_denied"
+
+    def test_the_rules_hold_for_a_guest_whose_entity_checks_pass(self, monkeypatch):
+        monkeypatch.setattr(mp, "check_entity_permission", lambda entity_id, permissions: True)
+        guest = _guest_perms()
+        assert _denied_reason("lock", "unlock", {"entity_id": "lock.a,lock.b"}, perms=guest) == ONE_LOCK
+        assert _denied_reason("lock", "unlock", {"entity_id": "all"}, perms=guest) == NEEDS_NAMED
+        assert _denied_reason("lock", "unlock", {"entity_id": "lock.a"}, perms=guest) is None
+
+    def test_denied_targets_are_the_normalised_ids(self):
+        decision = mp.authorize_ha_write("LOCK", "unlock", {"entity_id": "LOCK.A, lock.b"}, _owner_perms())
+        assert decision.denied_targets == ("lock.a", "lock.b")
+
+
+class TestTargetExtraction:
+    def test_all_in_any_case_is_the_domain_pseudo_target(self):
+        assert mp._extract_targets("lock", {"entity_id": "ALL"}) == ["lock.all"]
+        assert mp._extract_targets("lock", {"entity_id": "All, all"}) == ["lock.all"]
+
+    def test_every_block_contributes_its_ids_once(self):
+        data = {"entity_id": "lock.a", "target": {"entity_id": ["lock.b", "lock.a"]},
+                "data": {"entity_id": "lock.c", "target": {"entity_id": "lock.d"}}}
+        assert mp._extract_targets("lock", data) == ["lock.a", "lock.b", "lock.c", "lock.d"]
+
+    def test_an_area_device_floor_or_label_anywhere_makes_it_a_pseudo_target(self):
+        for data in ({"area_id": "k"}, {"target": {"floor_id": "g"}}, {"data": {"label_id": "l"}},
+                     {"data": {"target": {"device_id": "d"}}}):
+            assert mp._extract_targets("lock", {"entity_id": "lock.a", **data}) == ["lock.all"], data
+
+    def test_a_non_string_domain_or_service_is_judged_not_crashed(self):
+        assert mp.authorize_ha_write(["lock"], ["unlock"], {"entity_id": "lock.a"}, _owner_perms()).allowed in (True, False)
+        assert mp.authorize_ha_write(None, None, None, _owner_perms()).allowed in (True, False)
+
+
+class TestOpeningHelpers:
+    def test_opening_ids_are_lowercased_unique_and_skip_closes(self):
+        assert mp.opening_ids("lock", "unlock", {"entity_id": "LOCK.A,lock.a"}) == ("lock.a",)
+        assert mp.opening_ids("lock", "lock", {"entity_id": "lock.a"}) == ()
+        assert mp.opening_ids("cover", "close_cover", {"entity_id": "cover.garage"}) == ()
+        assert mp.opening_ids("light", "turn_off", {"entity_id": "light.a"}) == ()
+
+    def test_a_window_covering_is_not_an_opening(self):
+        data = {"entity_id": "cover.blind_a,cover.garage"}
+        assert mp.opening_ids("cover", "open_cover", data, ACCESS_MAP) == ("cover.garage",)
+        assert mp.opening_ids("cover", "open_cover", data) == ("cover.blind_a", "cover.garage")
+
+    def test_homeassistant_maps_onto_the_targets_own_domain(self):
+        assert mp.opening_ids("homeassistant", "turn_off", {"entity_id": "lock.a,cover.g"}) == ("lock.a",)
+        assert mp.opening_ids("homeassistant", "turn_on", {"entity_id": "lock.a,cover.g"}) == ("cover.g",)
+        assert set(mp.opening_ids("homeassistant", "toggle", {"entity_id": "lock.a,cover.g"})) == {"lock.a", "cover.g"}
+
+    def test_only_cover_ids_of_an_opening_call_need_a_class_read(self):
+        assert mp.opening_cover_targets("cover", "open_cover", {"entity_id": "COVER.G,cover.h"}) == ("cover.g", "cover.h")
+        assert mp.opening_cover_targets("cover", "close_cover", {"entity_id": "cover.g"}) == ()
+        assert mp.opening_cover_targets("cover", "open_cover", {"entity_id": "all"}) == ()
+        assert mp.opening_cover_targets("lock", "unlock", {"entity_id": "lock.a"}) == ()
+        assert mp.opening_cover_targets("homeassistant", "turn_off", {"entity_id": "cover.g"}) == ()
+        assert mp.opening_cover_targets("homeassistant", "turn_on", {"entity_id": "cover.g"}) == ("cover.g",)
+
+
+class DoorClient:
+    """The raw client under the guard: records writes, answers get_state from
+    a map, and can be slow, fail its reads, or fail its writes."""
+
+    def __init__(self, states=None, *, read_delay=0.0, fail_reads=False, fail_writes=False):
+        self.states = states or {}
+        self.read_delay = read_delay
+        self.fail_reads = fail_reads
+        self.fail_writes = fail_writes
+        self.calls = []
+        self.reads = []
+        self.opened_when_called = []
+
+    async def get_state(self, entity_id):
+        self.reads.append(entity_id)
+        await asyncio.sleep(self.read_delay)
+        if self.fail_reads:
+            raise RuntimeError("read failed")
+        return self.states[entity_id]
+
+    async def call_service(self, domain, service, data=None):
+        scope = mp.current_ha_scope()
+        self.opened_when_called.append(set(scope.opened) if scope else None)
+        self.calls.append((domain, service, data))
+        if self.fail_writes:
+            raise RuntimeError("write failed")
+        return {"ok": True}
+
+    async def create_automation(self, automation_id, config):
+        self.calls.append(("automation", "create", automation_id))
+        return True
+
+
+def _owner_scope():
+    return mp.ha_permission_scope({"mode": "owner"}, mode="owner")
+
+
+def _unlock(guard, entity_id):
+    return guard.call_service("lock", "unlock", {"entity_id": entity_id})
+
+
+class TestPermissionScopeOpened:
+    def test_a_fresh_scope_starts_empty_and_no_set_is_shared(self):
+        with _owner_scope() as first:
+            first.opened.add("lock.a")
+        with _owner_scope() as second:
+            assert second.opened == set()
+        assert mp.PermissionScope(permissions={}, mode="owner").opened is not mp.PermissionScope(permissions={}, mode="owner").opened
+
+    def test_the_same_id_twice_is_allowed_and_recorded_once(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(_unlock(guard, "lock.front_door"))
+            _run(_unlock(guard, "LOCK.Front_Door"))
+            assert scope.opened == {"lock.front_door"}
+            assert scope.halted is False
+        assert len(client.calls) == 2
+
+    def test_two_sequential_unlocks_of_different_locks_deny_the_second_and_halt(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(_unlock(guard, "lock.front_door"))
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(_unlock(guard, "lock.back_door"))
+            assert excinfo.value.reason == ONE_PER_REQUEST
+            assert scope.halted is True
+            assert scope.denials[-1].reason == ONE_PER_REQUEST
+            assert scope.opened == {"lock.front_door"}
+            with pytest.raises(mp.HAWritePermissionDenied) as later:
+                _run(guard.call_service("light", "turn_on", {"entity_id": "light.a"}))
+            assert later.value.reason == "halted_after_denial"
+        assert len(client.calls) == 1
+
+    def test_lock_and_close_actions_record_nothing(self):
+        client = DoorClient({"cover.garage": GARAGE_STATE})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(guard.call_service("lock", "lock", {"entity_id": "lock.a"}))
+            _run(guard.call_service("lock", "lock", {"entity_id": "all"}))
+            _run(guard.call_service("cover", "close_cover", {"entity_id": "cover.garage"}))
+            _run(guard.call_service("light", "turn_off", {"entity_id": "all"}))
+            assert scope.opened == set()
+            _run(_unlock(guard, "lock.a"))
+            _run(_unlock(guard, "lock.a"))
+        assert client.reads == []
+
+    def test_one_call_carrying_two_garage_ids_is_denied(self):
+        client = DoorClient({"cover.garage": GARAGE_STATE, "cover.side_gate": GARAGE_STATE})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(guard.call_service("cover", "open_cover", {"entity_id": ["cover.garage", "cover.side_gate"]}))
+            assert excinfo.value.reason == NEEDS_NAMED
+            assert scope.opened == set()
+        assert client.calls == []
+
+    def test_gather_of_two_single_garage_opens_with_a_slow_read_lets_exactly_one_through(self):
+        client = DoorClient({"cover.garage": GARAGE_STATE, "cover.side_gate": GARAGE_STATE}, read_delay=0.05)
+        guard = mp.PermissionEnforcingHAClient(client)
+
+        async def go():
+            with _owner_scope() as scope:
+                results = await asyncio.gather(
+                    guard.call_service("cover", "open_cover", {"entity_id": "cover.garage"}),
+                    guard.call_service("cover", "open_cover", {"entity_id": "cover.side_gate"}),
+                    return_exceptions=True,
+                )
+                return results, scope
+
+        results, scope = _run(go())
+        denied = [r for r in results if isinstance(r, mp.HAWritePermissionDenied)]
+        assert len(denied) == 1 and denied[0].reason == ONE_PER_REQUEST
+        assert sum(1 for r in results if not isinstance(r, BaseException)) == 1
+        assert len(client.calls) == 1
+        assert len(scope.opened) == 1
+
+    def test_the_check_and_the_record_happen_before_the_write_is_awaited(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope():
+            _run(_unlock(guard, "lock.front_door"))
+        assert client.opened_when_called == [{"lock.front_door"}]
+
+    def test_a_failed_write_still_counts_so_a_different_door_is_denied(self):
+        client = DoorClient(fail_writes=True)
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            with pytest.raises(RuntimeError):
+                _run(_unlock(guard, "lock.front_door"))
+            assert scope.opened == {"lock.front_door"}
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(_unlock(guard, "lock.back_door"))
+            assert excinfo.value.reason == ONE_PER_REQUEST
+
+    def test_a_get_state_failure_counts_the_cover_as_a_way_in(self):
+        client = DoorClient(fail_reads=True)
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_a"}))
+            assert scope.opened == {"cover.blind_a"}
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_b"}))
+
+    def test_two_blinds_in_separate_calls_never_count(self):
+        client = DoorClient({"cover.blind_a": BLIND_STATE, "cover.blind_b": BLIND_STATE})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_a"}))
+            _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_b"}))
+            assert scope.opened == set()
+        assert len(client.calls) == 2
+
+    @pytest.mark.parametrize("state", [None, "garbled", {"state": "closed"}, {"attributes": None}, {"attributes": {"device_class": 7}}])
+    def test_an_unreadable_class_is_a_way_in(self, state):
+        client = DoorClient({"cover.x": state})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.x"}))
+            assert scope.opened == {"cover.x"}
+
+    def test_a_reuse_and_a_nested_scope_and_a_background_task_see_the_same_set(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+
+        async def background():
+            await _unlock(guard, "lock.back_door")
+
+        async def go():
+            with _owner_scope() as outer:
+                await _unlock(guard, "lock.front_door")
+                with mp.ha_permission_scope({"mode": "owner"}, mode="owner") as nested:
+                    assert nested is not outer
+                    assert nested.opened is outer.opened
+                    with pytest.raises(mp.HAWritePermissionDenied):
+                        await _unlock(guard, "lock.garden_gate")
+                task = asyncio.create_task(background())
+                with pytest.raises(mp.HAWritePermissionDenied):
+                    await task
+                assert mp.current_ha_scope() is outer
+                return set(outer.opened)
+
+        assert _run(go()) == {"lock.front_door"}
+
+    def test_a_scope_opened_outside_any_other_does_not_inherit(self):
+        with _owner_scope() as first:
+            first.opened.add("lock.a")
+        with _owner_scope() as second:
+            assert "lock.a" not in second.opened
+
+    def test_a_call_waiting_on_a_cover_read_is_denied_if_the_scope_halts_meanwhile(self):
+        client = DoorClient({"cover.garage": GARAGE_STATE}, read_delay=0.05)
+        guard = mp.PermissionEnforcingHAClient(client)
+
+        async def go():
+            with _owner_scope() as scope:
+                results = await asyncio.gather(
+                    guard.call_service("cover", "open_cover", {"entity_id": "cover.garage"}),
+                    guard.call_service("lock", "unlock", {"entity_id": "all"}),
+                    return_exceptions=True,
+                )
+                return results, scope
+
+        (slow, fast), scope = _run(go())
+        assert isinstance(fast, mp.HAWritePermissionDenied) and fast.reason == NEEDS_NAMED
+        assert isinstance(slow, mp.HAWritePermissionDenied) and slow.reason == "halted_after_denial"
+        assert client.calls == [] and scope.opened == set()
+
+    def test_a_homeassistant_toggle_of_a_lock_counts(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(guard.call_service("homeassistant", "toggle", {"entity_id": "lock.a"}))
+            assert scope.opened == {"lock.a"}
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(_unlock(guard, "lock.b"))
+
+    def test_a_denied_call_records_no_door(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(_unlock(guard, "all"))
+            assert scope.opened == set()
+
+    def test_covers_past_the_read_cap_are_ways_in(self):
+        ids = [f"cover.b{i}" for i in range(mp.MAX_CLASSIFIED_COVERS + 2)]
+        client = DoorClient({i: BLIND_STATE for i in ids})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope():
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.call_service("cover", "open_cover", {"entity_id": ids}))
+        assert len(client.reads) == mp.MAX_CLASSIFIED_COVERS
+        assert client.calls == []
+
+    def test_an_unscoped_call_is_judged_by_a_throwaway_baseline_scope(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with pytest.raises(mp.HAWritePermissionDenied):
+            _run(_unlock(guard, "lock.front_door"))
+        assert client.calls == []
+
+
+def _step(**kw):
+    return kw
+
+
+def _config(*steps):
+    return {"alias": "x", "trigger": [], "action": list(steps)}
+
+
+def _auth_config(*steps, perms=None, cover_access=None):
+    return mp.authorize_automation_config("x", _config(*steps), perms or _owner_perms(), cover_access=cover_access)
+
+
+class TestRuleDAutomationConfigs:
+    @pytest.mark.parametrize("step", [
+        {"service": "{{ states('input_text.svc') }}", "entity_id": "lock.a"},
+        {"action": "{% if x %}lock.unlock{% endif %}", "entity_id": "lock.a"},
+        {"service": "lock.{{ verb }}", "target": {"entity_id": "lock.a"}},
+        {"service": ["lock.unlock"], "entity_id": "lock.a"},
+        {"service": {"x": 1}},
+    ])
+    def test_a_templated_or_malformed_service_is_denied(self, step):
+        decision = _auth_config(step)
+        assert not decision.allowed and decision.reason == TEMPLATED
+
+    @pytest.mark.parametrize("step", [
+        {"service": "lock.unlock", "entity_id": "{{ trigger.entity_id }}"},
+        {"service": "lock.unlock", "target": {"entity_id": "{{ x }}"}},
+        {"service": "lock.unlock", "data": {"entity_id": "{% for e in x %}{{ e }}{% endfor %}"}},
+        {"service": "cover.open_cover", "entity_id": ["cover.g", "{{ other }}"]},
+        {"service": "homeassistant.turn_off", "entity_id": "{{ x }}"},
+    ])
+    def test_a_templated_target_on_an_opening_service_is_denied(self, step):
+        decision = _auth_config(step)
+        assert not decision.allowed and decision.reason == TEMPLATED
+
+    def test_a_templated_target_on_a_non_opening_service_is_allowed(self):
+        assert _auth_config({"service": "light.turn_on", "entity_id": "{{ trigger.entity_id }}"}).allowed
+        assert _auth_config({"service": "lock.lock", "entity_id": "{{ x }}"}).allowed
+
+    def test_a_guest_with_a_template_keeps_the_entity_reason(self):
+        decision = _auth_config({"service": "lock.unlock", "entity_id": "{{ x }}"}, perms=_guest_perms(), cover_access=None)
+        assert decision.reason == "entity_or_domain_denied"
+
+    @pytest.mark.parametrize("step", [
+        {"device_id": "d1", "domain": "lock", "type": "unlock"},
+        {"device_id": "d1", "domain": "lock", "type": "open", "entity_id": "all"},
+        {"device_id": "d1", "domain": "cover", "type": "open"},
+        {"device_id": "d1", "domain": "COVER", "type": "Open", "entity_id": ""},
+        {"device_id": "d1", "domain": "cover", "type": "set_position"},
+    ])
+    def test_a_device_form_opening_with_only_a_device_id_is_denied(self, step):
+        decision = _auth_config(step)
+        assert not decision.allowed and decision.reason == NEEDS_NAMED
+
+    def test_a_device_form_opening_with_one_entity_passes_and_counts(self):
+        step = {"device_id": "d1", "domain": "lock", "type": "unlock", "entity_id": "lock.front_door"}
+        assert _auth_config(step).allowed
+        second = {"service": "lock.unlock", "entity_id": "lock.back_door"}
+        decision = _auth_config(step, second)
+        assert not decision.allowed and decision.reason == ONE_PER_REQUEST
+
+    def test_a_device_form_close_is_not_an_opening(self):
+        assert _auth_config({"device_id": "d1", "domain": "lock", "type": "lock"}).allowed
+        assert _auth_config({"device_id": "d1", "domain": "cover", "type": "close"}).allowed
+
+    def test_a_guest_device_form_step_is_still_a_domain_denial(self):
+        decision = _auth_config({"device_id": "d1", "domain": "lock", "type": "unlock"}, perms=_guest_perms())
+        assert decision.reason == "entity_or_domain_denied"
+
+    def test_two_opening_steps_are_denied(self):
+        decision = _auth_config(
+            {"service": "lock.unlock", "entity_id": "lock.a"}, {"service": "lock.unlock", "entity_id": "lock.b"}
+        )
+        assert not decision.allowed and decision.reason == ONE_PER_REQUEST
+        assert decision.denied_targets == ("lock.a", "lock.b")
+
+    def test_two_opening_steps_nested_in_a_choose_are_denied(self):
+        step = {"choose": [
+            {"sequence": [{"service": "lock.unlock", "entity_id": "lock.a"}]},
+            {"sequence": [{"service": "cover.open_cover", "entity_id": "cover.g"}]},
+        ]}
+        assert _auth_config(step).reason == ONE_PER_REQUEST
+
+    def test_one_opening_step_alone_and_the_same_door_twice_are_allowed(self):
+        assert _auth_config({"service": "lock.unlock", "entity_id": "lock.a"}).allowed
+        assert _auth_config(
+            {"service": "lock.unlock", "entity_id": "lock.a"}, {"service": "lock.unlock", "entity_id": "LOCK.A"}
+        ).allowed
+
+    def test_closes_and_locks_in_a_config_are_free(self):
+        assert _auth_config(
+            {"service": "lock.lock", "entity_id": "all"},
+            {"service": "cover.close_cover", "entity_id": "all"},
+            {"service": "light.turn_off", "entity_id": "all"},
+        ).allowed
+
+    def test_a_garage_plus_a_blind_in_one_step_is_denied(self):
+        step = {"service": "cover.open_cover", "entity_id": ["cover.garage", "cover.blind_a"]}
+        decision = _auth_config(step, cover_access=ACCESS_MAP)
+        assert not decision.allowed and decision.reason == NEEDS_NAMED
+        two_blinds = {"service": "cover.open_cover", "entity_id": ["cover.blind_a", "cover.blind_b"]}
+        assert _auth_config(two_blinds, cover_access=ACCESS_MAP).allowed
+
+    def test_an_all_target_on_an_opening_step_is_denied(self):
+        decision = _auth_config({"service": "lock.unlock", "entity_id": "all"})
+        assert decision.reason == NEEDS_NAMED
+
+    def test_opening_helpers_walk_the_config(self):
+        config = _config(
+            {"service": "cover.open_cover", "entity_id": "cover.g"},
+            {"device_id": "d", "domain": "lock", "type": "unlock", "entity_id": "lock.a"},
+            {"service": "light.turn_on", "entity_id": "light.a"},
+        )
+        assert mp.automation_opening_cover_targets(config) == ("cover.g",)
+        assert mp.automation_opening_ids(config) == ("cover.g", "lock.a")
+        assert mp.automation_opening_ids(config, {"cover.g": False}) == ("lock.a",)
+
+    def test_the_client_classifies_the_covers_of_a_config_before_judging_it(self):
+        client = DoorClient({"cover.blind_a": BLIND_STATE, "cover.blind_b": BLIND_STATE})
+        guard = mp.PermissionEnforcingHAClient(client)
+        config = _config(
+            {"service": "cover.open_cover", "entity_id": "cover.blind_a"},
+            {"service": "cover.open_cover", "entity_id": "cover.blind_b"},
+        )
+        with _owner_scope() as scope:
+            assert _run(guard.create_automation("x", config)) is True
+            assert scope.opened == set()
+        assert sorted(client.reads) == ["cover.blind_a", "cover.blind_b"]
+
+    def test_a_config_opening_counts_toward_the_request(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            _run(_unlock(guard, "lock.front_door"))
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(guard.create_automation("x", _config({"service": "lock.unlock", "entity_id": "lock.back_door"})))
+            assert excinfo.value.reason == ONE_PER_REQUEST
+            assert scope.opened == {"lock.front_door"}
+        assert client.calls == [("lock", "unlock", {"entity_id": "lock.front_door"})]
+
+    def test_a_templated_config_never_reaches_the_inner_client(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope():
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(guard.create_automation("x", _config({"service": "{{ s }}"})))
+        assert excinfo.value.reason == TEMPLATED
+        assert client.calls == []
+
+
+class TestDenialLogs:
+    def test_ha_write_denied_logs_reason_domain_and_counts_only(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with mock.patch.object(mp, "logger") as log:
+            with mp.ha_permission_scope(
+                {"mode": "owner"}, mode="owner", request_id="req-1", session_id="sess-secret"
+            ):
+                with pytest.raises(mp.HAWritePermissionDenied):
+                    _run(guard.call_service("lock", "unlock", {"entity_id": "lock.alice_room,lock.bob_room"}))
+        denied = [c for c in log.warning.call_args_list if c.args and c.args[0] == "ha_write_denied"]
+        assert len(denied) == 1
+        assert set(denied[0].kwargs) == {
+            "domain", "service", "target_count", "scope_mode", "permissions_mode", "reason", "request_id",
+        }
+        assert denied[0].kwargs["target_count"] == 2
+        assert denied[0].kwargs["reason"] == ONE_LOCK
+        assert denied[0].kwargs["request_id"] == "req-1"
+        flat = repr(log.mock_calls)
+        assert "alice_room" not in flat and "bob_room" not in flat and "sess-secret" not in flat
+
+    def test_the_denial_record_on_the_scope_still_holds_the_targets(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(_unlock(guard, "lock.a,lock.b"))
+        assert scope.denials[0].targets == ("lock.a", "lock.b")
+
+    def test_entity_checks_log_a_kind_and_a_domain_never_an_id(self):
+        perms = _guest_perms(restricted_entities=["lock\\..*secret.*"], allowed_domains=["lock", "light"])
+        with mock.patch.object(mp, "logger") as log:
+            assert mp.check_entity_permission("lock.the_secret_door", perms) is False
+            assert mp.check_entity_permission("climate.hall", perms) is False
+            assert mp.check_entity_permission("light.maple_room", perms) is True
+            assert mp.check_entity_permission("maple_room", _guest_perms(restricted_entities=["x"], allowed_domains=["light"])) is False
+        flat = repr(log.mock_calls)
+        for leaked in ("the_secret_door", "hall", "maple_room", "secret"):
+            assert leaked not in flat, leaked
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert events == ["entity_blocked_by_regex", "entity_blocked_domain", "entity_allowed", "entity_blocked_domain"]
+        assert log.info.call_args_list[0].kwargs["kind"] == "regex"
+        assert log.info.call_args_list[1].kwargs["domain"] == "climate"
+        assert log.info.call_args_list[3].kwargs["domain"] == "none"
+
+
+class TestGuardConstantsMatchTheResolver:
+    """mode_permission may not import the room modules, so it repeats the
+    resolver's opening vocabulary. These pins fail when the copies drift."""
+
+    def test_opening_services_match(self):
+        from orchestrator import access_target
+
+        assert dict(mp._OPENING_SERVICES) == dict(access_target._OPENING_ACTIONS)
+
+    def test_non_access_device_classes_match(self):
+        from orchestrator import access_target
+
+        assert mp.NON_ACCESS_DEVICE_CLASSES == access_target.NON_ACCESS_DEVICE_CLASSES
+
+    def test_the_resolver_and_the_guard_classify_the_same_covers(self):
+        from orchestrator import access_target
+
+        for device_class in (None, "garage", "gate", "door", "blind", "window", "shade", "Curtain", "weird", ""):
+            attrs = {"device_class": device_class} if device_class is not None else {}
+            client = DoorClient({"cover.x": {"attributes": attrs}})
+            guard = mp.PermissionEnforcingHAClient(client)
+            assert _run(guard._cover_is_access("cover.x")) is access_target.is_access_cover("cover.x", attrs), device_class
+
+    def test_door_phrases_agree_across_the_modules(self):
+        from orchestrator import sequence_executor, smart_home_controller
+
+        assert mp.ONE_DOOR_REFUSAL == smart_home_controller.ONE_DOOR_REFUSAL == sequence_executor.ONE_DOOR_STEP_REFUSAL
