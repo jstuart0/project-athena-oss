@@ -288,6 +288,13 @@ OPENING_VERBS = {
     "cover": (("open", "opens", "opening", "opened", "raise", "lift"),
               ("close", "closes", "closing", "closed", "shut", "lower")),
 }
+# A clause with one of these is about a lock, whatever door words it holds.
+_LOCK_CLAUSE_WORDS = frozenset({
+    "lock", "locks", "locking", "locked", "unlock", "unlocks", "unlocking", "unlocked",
+    "deadbolt", "deadbolts", "unbolt", "bolt",
+})
+# "lock" followed by one of these is a verb with its object, never a noun.
+_VERB_OBJECT_FOLLOWERS = frozenset({"the", "it", "them", "all", "this", "that"})
 VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
 
 
@@ -301,7 +308,9 @@ def _door_verb(
     not the back door") or after the verb ("lock the door, no need to
     confirm") changes nothing. A word of ``noun_after`` that follows a
     ``first`` verb in its clause is a noun ("unlock the front door lock"), not
-    the opposite verb."""
+    the opposite verb, unless a negator came earlier in the clause ("unlock the
+    front door no lock it") or the word is followed by the object of a verb
+    ("unlock the front door lock the back door")."""
     up = down = False
     for clause in _CLAUSE_SPLIT.split(query_lower or ""):
         spoken = list(_words(clause))
@@ -310,7 +319,10 @@ def _door_verb(
         for i, word in enumerate(spoken):
             if word in _NEGATORS or (word == "can" and spoken[i + 1:i + 2] == ["t"]):
                 negated = True
-            elif word in noun_after and seen_first:
+            elif (
+                word in noun_after and seen_first and not negated
+                and not (set(spoken[i + 1:i + 2]) & _VERB_OBJECT_FOLLOWERS)
+            ):
                 continue
             elif word in first or word in second:
                 seen_first = seen_first or word in first
@@ -2514,7 +2526,7 @@ Return ONLY valid JSON."""
                 if isinstance(entity_id, str) and entity_id in pool:
                     plain = not access_target.is_access_cover(entity_id, (pool[entity_id] or {}).get('attributes'))
                 else:
-                    plain = access_target.cover_intent_kind(query) == "plain"
+                    plain = self._cover_step_plain(query, target.get('room') or entity_id)
                 pool = {k: v for k, v in pool.items() if access_target.is_access_cover(k, (v or {}).get('attributes'))}
                 if plain or not pool:
                     continue
@@ -2560,6 +2572,24 @@ Return ONLY valid JSON."""
                     intent=None, original_query=None,
                 )
         return None
+
+    @staticmethod
+    def _cover_step_plain(query: str, model_target) -> bool:
+        """Whether a cover step is about blinds and the like, read from the
+        step's own clause and not the whole utterance ("open the blinds and
+        unlock the front door" has a door word, but the cover step is the
+        blinds). The clause is the one holding the step's target words;
+        else every clause that speaks of a cover and is not a lock clause.
+        Plain only when every one of those clauses is plain."""
+        clauses = [c for c in _CLAUSE_SPLIT.split((query or "").lower()) if c.strip()]
+        wanted = frozenset(access_target._target_tokens(model_target, 'cover'))
+        holding = [c for c in clauses if wanted and wanted <= frozenset(_words(c))]
+        if not holding:
+            holding = [
+                c for c in clauses
+                if access_target.cover_intent_kind(c) is not None and not (frozenset(_words(c)) & _LOCK_CLAUSE_WORDS)
+            ]
+        return bool(holding) and all(access_target.cover_intent_kind(c) == "plain" for c in holding)
 
     @staticmethod
     def _opening_clause_ok(query: str, model_target, domain: str) -> bool:
@@ -2645,9 +2675,18 @@ Return ONLY valid JSON."""
             intent = {k: v for k, v in target.items() if k in ('device_type', 'room', 'rooms')}
             if intent.get('room') == 'whole_house':
                 if domain == 'light' and room_context.is_explicit_whole_house(query):
-                    self._set_decided(intent, "whole_house", "all the lights")
-                    target.update(intent)
-                    continue
+                    # The same exclusion authority as a single command: the
+                    # rooms the words spare are carried, and wording it cannot
+                    # read asks. The model's own list is never used.
+                    decision = room_context.sequence_whole_house(query, self._directory())
+                    if isinstance(decision, room_context.WholeHouse):
+                        self._set_decided(
+                            intent, "whole_house", "all the lights", excluded=[r.key for r in decision.excluded],
+                        )
+                        target.pop('excluded_rooms', None)
+                        target.update(intent)
+                        continue
+                    return room_context.ask_text(decision)
                 # The model chose the whole house for words that don't ask for
                 # it: no step acts on a house nobody named.
                 return room_context.ask_text(room_context.AskRoom())
@@ -5176,6 +5215,13 @@ Do NOT mention rooms that have no current or recent motion."""
             ]
             matched = self._match_covers(covers, room, original_query)
             kind = access_target.cover_intent_kind(original_query)
+            window_doors = [
+                e for e in matched if e in access_ids
+                and access_target.is_window_door(e, (covers[e] or {}).get('attributes'))
+            ]
+            named_window_doors = [
+                e for e in window_doors if access_target.named_by_words(self._spoken_entity(e, covers[e]), original_query)
+            ]
             permitted_access = access_ids if action == "get_status" else self._split_permitted(access_ids)[0]
             carried = None
             if kind != "plain":
@@ -5188,9 +5234,16 @@ Do NOT mention rooms that have no current or recent motion."""
             opened_door = None
             if action == "open":
                 plain_ids = [e for e in matched if e not in access_ids]
-                if kind == "plain" and not plain_ids:
+                # "open the bay window" names a cover that is a way in by its
+                # classification: it goes the door path (which asks for its
+                # name) instead of being passed over as not found.
+                window_door_path = kind == "plain" and bool(named_window_doors or (window_doors and not plain_ids))
+                if kind == "plain" and not plain_ids and not window_door_path:
                     return "I couldn't find a garage door or cover for that."
-                if carried or (kind != "plain" and not plain_ids) or (original_query is not None and kind == "access"):
+                if (
+                    carried or window_door_path or (kind != "plain" and not plain_ids)
+                    or (original_query is not None and kind == "access")
+                ):
                     if original_query is not None and not opening_verb_ok(original_query, 'cover'):
                         return VERB_UNCLEAR_TEXT  # a way in needs the words to open it; blinds don't
                     narrow = [e for e in matched if e in access_ids] if len(matched) != len(covers) else []
@@ -5210,6 +5263,10 @@ Do NOT mention rooms that have no current or recent motion."""
                     target_ids = picked
                 elif kind == "plain":
                     target_ids = [e for e in matched if e not in access_ids]
+                    if window_doors:
+                        # Closing or reading a window-worded door-classed
+                        # cover is the safe direction: the words reach it.
+                        target_ids = named_window_doors or target_ids + window_doors
                 else:
                     target_ids = list(matched)
                 if not target_ids:

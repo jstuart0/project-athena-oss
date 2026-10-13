@@ -1358,6 +1358,8 @@ class TestGuardConstantsMatchTheResolver:
         (None, "Blinds Gate"), (None, "Bay 1"), (None, "Workshop Shutter"), (None, "Window Opener"),
         (None, "Kitchen Curtains Garage"), (None, "  "), (None, 7), ("garage", "Living Room Blinds"),
         ("blind", "Garage Door"), (None, "Rideau des Stores"), (None, "BLINDS"),
+        (None, "Living Room Drapes"), (None, "Fireplace Damper"), (None, "Bay Window"), (None, "Drapes Gate"),
+        (None, "Garage Window"),
     ]
 
     @pytest.mark.parametrize("device_class,name", COVER_MATRIX)

@@ -166,6 +166,26 @@ def _next_local_occurrence(now: datetime, wall: time, tz) -> datetime:
     raise AssertionError("no local occurrence within three days")  # unreachable: a day always has one
 
 
+def _is_hue_saturation(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple)) and len(value) == 2
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+    )
+
+
+def _step_parameters(step: Dict) -> Dict:
+    """A step's parameters as a dict: a missing, null or non-object value
+    (a model writes ``"parameters": null``) is empty, so the step still runs.
+    The prompt asks for a single ``hs_color``; the room light writer reads
+    ``hs_colors``, so a lone pair becomes a list of one. An explicit
+    ``hs_colors`` wins. The step itself is not changed."""
+    raw = step.get('parameters')
+    parameters = dict(raw) if isinstance(raw, dict) else {}
+    if not parameters.get('hs_colors') and _is_hue_saturation(parameters.get('hs_color')):
+        parameters['hs_colors'] = [list(parameters['hs_color'])]
+    return parameters
+
+
 class SequenceExecutor:
     """Executes sequences of smart home actions with delays and scheduling."""
 
@@ -324,7 +344,7 @@ class SequenceExecutor:
         """Execute a single sequence step."""
         action = step.get('action', 'turn_on')
         target = step.get('target', {})
-        parameters = step.get('parameters', {})
+        parameters = _step_parameters(step)
 
         # Extract target info
         device_type = target.get('device_type', 'light')
@@ -419,7 +439,7 @@ class SequenceExecutor:
         service_data = {'entity_id': entity_id}
 
         # Add parameters
-        if action == 'set_color' and 'hs_color' in parameters:
+        if action == 'set_color' and _is_hue_saturation(parameters.get('hs_color')):
             service_data['hs_color'] = parameters['hs_color']
             service_data['brightness'] = parameters.get('brightness', 255)
         elif action == 'set_brightness' and 'brightness' in parameters:

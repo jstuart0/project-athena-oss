@@ -67,9 +67,13 @@ _OPENING_ACTIONS = {
     "cover": frozenset({"open", "open_cover", "turn_on", "toggle", "set_cover_position"}),
 }
 
-# Words that make an unclassified cover plain by its NAME. Shutter and window
-# are plain only by device class (a workshop shutter can be a door).
-_NAME_PLAIN_WORDS = frozenset({"blind", "blinds", "shade", "shades", "curtain", "curtains", "awning", "awnings"})
+# Words said of a cover that is plain only by device class: an unclassified
+# "Bay Window" or "Workshop Shutter" can be a door, so these never make a
+# cover plain by name. The wording still treats them as window coverings.
+DEVICE_CLASS_ONLY_COVER_WORDS: FrozenSet[str] = frozenset({"shutter", "shutters", "window", "windows"})
+# Words that make an unclassified cover plain by its NAME: the wording set
+# less the device-class-only words, so wording and classification are one set.
+_NAME_PLAIN_WORDS: FrozenSet[str] = NON_ACCESS_COVER_WORDS - DEVICE_CLASS_ONLY_COVER_WORDS
 
 _QUANTIFIERS = frozenset({"all", "every", "each", "both"})
 _UNIVERSAL_ANYWHERE = frozenset({"everything", "everywhere"})
@@ -199,6 +203,30 @@ def is_opening_action(domain: Optional[str], action: Any) -> bool:
 def noun_present(query: Optional[str], domain: str) -> bool:
     """Whether the utterance says an access noun for the domain."""
     return any(t in _NOUNS[domain] for t in tokens(query or ""))
+
+
+def is_window_door(entity_id: str, attributes: Optional[Mapping]) -> bool:
+    """An access cover (by the classification above) whose own name says
+    window or shutter ("Bay Window" with no device class). Window wording
+    still reaches it to close it or read it; opening it goes through the
+    door path, which asks for its name."""
+    if not is_access_cover(entity_id, attributes):
+        return False
+    attrs = attributes if isinstance(attributes, Mapping) else {}
+    name = attrs.get("friendly_name")
+    if not isinstance(name, str) or not name.strip():
+        name = entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    return any(t in DEVICE_CLASS_ONLY_COVER_WORDS for t in tokens(name))
+
+
+def named_by_words(label: str, query: Optional[str]) -> bool:
+    """Whether the utterance says every distinguishing word of a cover's name
+    ("bay" of "Bay Window"), and the name has one."""
+    wanted = frozenset(
+        t for t in tokens(label)
+        if t not in NON_ACCESS_COVER_WORDS and t not in _NOUNS["cover"] and t not in _FILLER and t not in _VERBS
+    )
+    return bool(wanted) and wanted <= frozenset(tokens(query or ""))
 
 
 def mentions_non_access_cover(query: Optional[str]) -> bool:

@@ -849,6 +849,68 @@ def grounded_exclusion(
     return tuple(refs.values())
 
 
+def whole_house_decision(
+    query: Optional[str], directory: Optional[RoomDirectory] = None,
+) -> Optional[Union[WholeHouse, AskRoom]]:
+    """What the wording says about the whole house: ``WholeHouse`` (with the
+    rooms it leaves out), ``AskRoom`` when it carries an exclusion this parser
+    does not read, or None when it does not ask for the whole house."""
+    if (
+        is_explicit_whole_house(query)
+        and not has_exclusion(query, directory) and has_exclusion_wording(query, directory)
+    ):
+        # "all the lights without the galley", "...spare the galley": the
+        # wording is an exclusion this parser does not read, so the room it
+        # names is not a target and the house is not the answer.
+        return AskRoom()
+    if LEAVE_ON_RE.search(query or "") and not leave_on_exclusion(query, directory):
+        # The leave-on form with more exclusion wording in it: which rooms
+        # stay on is not something the words settle.
+        return AskRoom()
+    whole = explicit_whole_house(query, directory)
+    if whole is None:
+        return None
+    if not whole.excluded and has_exclusion_wording(query, directory):
+        # An exclusion that names no room we know: every light would be
+        # written. Ask instead.
+        return AskRoom()
+    return whole
+
+
+# The words that end one step of a sequence and start the next. A comma does
+# not: it separates the rooms of an exclusion list.
+_SEQUENCE_STEP_SPLIT = re.compile(
+    r"[;.!?]|\b(?:and then|then|after that|afterwards|later)\b"
+    r"|\band\b(?=\s+(?:turn|switch|set|dim|brighten|make|open|close|lock|unlock|play|start|stop|pause)\b)",
+    re.IGNORECASE,
+)
+
+
+def sequence_whole_house(
+    query: Optional[str], directory: Optional[RoomDirectory] = None,
+) -> Union[WholeHouse, AskRoom]:
+    """The whole-house step of a sequence whose utterance says the whole
+    house: the same decision as a single command (``whole_house_decision``),
+    read on the clause that says it (a room named in another step is not an
+    exclusion of this one). When the utterance carries exclusion wording and no room comes
+    out of it ("turn off all the lights, then keep the hall lit"), it asks:
+    a step never writes a room the speaker spared."""
+    text = query or ""
+    if not has_exclusion_wording(text, directory):
+        return WholeHouse()
+    spared: Dict[str, RoomRef] = {}
+    for clause in (c for c in _SEQUENCE_STEP_SPLIT.split(text) if c and c.strip()):
+        if not is_explicit_whole_house(clause):
+            continue
+        decision = whole_house_decision(clause, directory)
+        if not isinstance(decision, WholeHouse):
+            return AskRoom()
+        spared.update({ref.key: ref for ref in decision.excluded})
+    if not spared:
+        return AskRoom()
+    return WholeHouse(tuple(spared.values()))
+
+
 def decide_room(
     mention: RoomMention,
     *,
@@ -869,24 +931,8 @@ def decide_room(
     4. The speaker's room, if the directory knows it.
     5. Ask which room.
     """
-    if (
-        allow_whole_house and is_explicit_whole_house(query)
-        and not has_exclusion(query, directory) and has_exclusion_wording(query, directory)
-    ):
-        # "all the lights without the galley", "...spare the galley": the
-        # wording is an exclusion this parser does not read, so the room it
-        # names is not a target and the house is not the answer.
-        return AskRoom()
-    if allow_whole_house and LEAVE_ON_RE.search(query or "") and not leave_on_exclusion(query, directory):
-        # The leave-on form with more exclusion wording in it: which rooms
-        # stay on is not something the words settle.
-        return AskRoom()
-    whole = explicit_whole_house(query, directory) if allow_whole_house else None
+    whole = whole_house_decision(query, directory) if allow_whole_house else None
     if whole is not None:
-        if not whole.excluded and has_exclusion_wording(query, directory):
-            # An exclusion that names no room we know: every light would be
-            # written. Ask instead.
-            return AskRoom()
         return whole
     speaker = (directory if directory is not None else _EMPTY).resolves(speaker_room)
     if mention.kind != "none" and not mention.in_exclusion:

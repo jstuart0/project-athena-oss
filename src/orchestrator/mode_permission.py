@@ -1087,7 +1087,10 @@ NON_ACCESS_DEVICE_CLASSES = frozenset({
 # An unclassified cover is a window covering by its NAME only for these words,
 # and only when the name has no door, gate, opener or garage word in it. Shutter
 # and window are plain by device class alone (a workshop shutter can be a door).
-NAME_PLAIN_COVER_WORDS = frozenset({"blind", "blinds", "shade", "shades", "curtain", "curtains", "awning", "awnings"})
+NAME_PLAIN_COVER_WORDS = frozenset({
+    "blind", "blinds", "shade", "shades", "curtain", "curtains", "awning", "awnings",
+    "drape", "drapes", "damper", "dampers",
+})
 COVER_DOOR_NOUNS = frozenset({"garage", "garages", "gate", "gates", "door", "doors", "opener", "openers"})
 _WORD_SPLIT = re.compile(r"[\W_]+")
 # Device-form automation steps: ``domain`` + ``type`` -> the service they run.
