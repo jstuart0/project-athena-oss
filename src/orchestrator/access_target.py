@@ -16,6 +16,7 @@ policy table lives with the writers (``SmartHomeController``).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -45,6 +46,7 @@ _PLURAL_NOUNS = {
     "cover": frozenset({"doors", "gates", "openers", "garages"}),
 }
 _ALL_NOUNS = _NOUNS["lock"] | _NOUNS["cover"]
+_GENERIC_NOUNS = frozenset({"door", "doors", "lock", "locks"})
 
 # A cover is NOT an access cover only when its device class says so. Anything
 # else, including a missing class, is treated as a way in.
@@ -186,6 +188,26 @@ def mentions_non_access_cover(query: Optional[str]) -> bool:
     return any(t in NON_ACCESS_COVER_WORDS for t in tokens(query or ""))
 
 
+_STRICT_COVER_NOUNS = frozenset({"door", "doors", "gate", "gates", "opener", "openers"})
+
+
+def cover_intent_kind(query: Optional[str]) -> Optional[str]:
+    """``plain`` when the words are about blinds and the like and say no
+    door, gate or opener ("the garage blinds"); ``access`` when they name an
+    access noun; None when they say neither."""
+    spoken = tokens(query or "")
+    if any(t in NON_ACCESS_COVER_WORDS for t in spoken) and not any(t in _STRICT_COVER_NOUNS for t in spoken):
+        return "plain"
+    return "access" if any(t in _NOUNS["cover"] for t in spoken) else None
+
+
+def hint_phrase(label: str, domain: str) -> str:
+    """What to say to name this door so the opening test passes: its name,
+    with an access noun added when the name has none ("Front Entry" ->
+    "Front Entry door")."""
+    return label if any(t in _NOUNS[domain] for t in tokens(label)) else f"{label} door"
+
+
 # ---------------------------------------------------------------------------
 # Words
 # ---------------------------------------------------------------------------
@@ -236,6 +258,21 @@ def _is_universal(toks: Sequence[str], domain: str) -> bool:
     return False
 
 
+def _is_bare_referent(toks: Sequence[str], label: str, domain: str) -> bool:
+    """Whether the words say nothing but "it" for the carried door: no name
+    word (blinds included) or access noun that isn't part of its own name,
+    and no plural or universal wording."""
+    if not toks:
+        return True
+    if _is_universal(toks, domain):
+        return False
+    own = frozenset(tokens(label))
+    if any(t not in _NOT_MODIFIERS and t not in own for t in toks):
+        return False
+    specific = _NOUNS[domain] - _GENERIC_NOUNS
+    return not any(t in specific and t not in own for t in toks)
+
+
 def _pick(matches: Sequence[Ref], named_by: str, phrase: str) -> Outcome:
     if len(matches) == 1:
         return Named((matches[0],), named_by)
@@ -265,6 +302,7 @@ def resolve(
     entities: Mapping[str, str],
     area_entities: Optional[Mapping[str, Sequence[str]]] = None,
     directory: Optional[room_context.RoomDirectory] = None,
+    carried_trusted: bool = False,
 ) -> Outcome:
     """What the utterance settles about which of ``entities`` is meant.
 
@@ -272,8 +310,10 @@ def resolve(
     outcome can never name a door the request may not use. ``area_entities``
     maps a room key to the ids in that room's area. Rules, in order:
 
-    1. ``carried`` (a server decision), unless the speaker's words name a
-       different entity.
+    1. ``carried`` (a server decision), only for a bare referent ("it",
+       "that", "the door") or the answer to "which door?"
+       (``carried_trusted``). Any word that isn't the carried door's own
+       drops the carry.
     2. Universal wording: ``Every``.
     3. The speaker's words match an entity's distinguishing words: ``Named``
        when exactly one (the most specific), else ``Ambiguous``; a name said
@@ -297,8 +337,7 @@ def resolve(
     named_by = TOKENS_AND_NOUN if noun_present(query, domain) else TOKENS
 
     if isinstance(carried, str) and carried in entities:
-        said = _query_matches(refs, dist, qset)
-        if not said or any(r.entity_id == carried for r in said):
+        if carried_trusted or _is_bare_referent(toks, entities[carried], domain):
             return Named((Ref(carried, entities[carried]),), CARRIED)
     if not toks:
         return Unnamed(refs)
@@ -330,8 +369,14 @@ def resolve(
         modifiers = _modifiers(toks, domain)
         if modifiers:
             return NotFound(" ".join(modifiers[:3]))
-        if len(refs) == 1:
-            return Named(refs, BARE_NOUN)
+        # "my garage": the entities whose own name says the noun the speaker
+        # said (door and lock are in every name, so they narrow nothing).
+        specific = {t for t in toks if t in _NOUNS[domain] and t not in _GENERIC_NOUNS}
+        pool = [r for r in refs if specific & frozenset(tokens(r.label))] if specific else []
+        pool = tuple(pool) if pool else refs
+        if len(pool) == 1:
+            return Named(pool, BARE_NOUN)
+        return Unnamed(pool)
     return Unnamed(refs)
 
 
@@ -381,6 +426,8 @@ def _target_tokens(model_target: Any, domain: str) -> List[str]:
     not text, or that says only "door")."""
     if not isinstance(model_target, str):
         return []
+    if re.match(r"^[a-z_]+\.", model_target.strip().lower()):
+        model_target = model_target.split(".", 1)[1]
     return [
         t for t in tokens(model_target)
         if t not in _NOUNS[domain] and t not in _FILLER and t not in _VERBS and t not in _AREA_WORDS
@@ -397,8 +444,9 @@ def match_reply(reply: Optional[str], candidates: Sequence[Ref]) -> Choice:
     candidate's name. A reply made only of generic nouns ("the deadbolt") is
     read against the names whole. A command word makes it no answer."""
     raw = [t for t in tokens(reply or "") if t not in _REPLY_FILLER]
-    if not raw or any(t in room_context._COMMAND_VERBS for t in raw):
+    if not raw or raw[0] in room_context._COMMAND_VERBS:
         return Choice("none")
+    # "front door lock" repeats the name; a verb anywhere else fits no name.
     words = [t for t in raw if t not in _ALL_NOUNS and t not in _AREA_WORDS]
     wanted = frozenset(words or raw)
     fits = tuple(c for c in candidates if wanted <= frozenset(tokens(c.label)))

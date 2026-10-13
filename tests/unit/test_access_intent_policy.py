@@ -819,13 +819,17 @@ DOOR_STATES = {
 
 
 class DoorChat:
-    def __init__(self, monkeypatch, states=None):
+    def __init__(self, monkeypatch, states=None, *, areas=None, placement=None):
         self.chat = Chat(monkeypatch)
         rig = self.chat.rig
         rig.manager._entities_cache = dict(states or DOOR_STATES)
         rig.manager._build_indexes()
-        rig.registry._snapshot = None
-        rig.registry.state = "unavailable"
+        if areas:
+            rig.registry._snapshot = hr.RegistrySnapshot.from_raw(registry_raw(areas, placement or {}), fetched_at=3.0)
+            rig.registry.state = "ok"
+        else:
+            rig.registry._snapshot = None
+            rig.registry.state = "unavailable"
         self.now = [1_000_000.0]
         monkeypatch.setattr(shc, "_wall_clock", lambda: self.now[0])
         self.chat.clock = self.now
@@ -959,7 +963,7 @@ class TestCarryRules:
 
     def test_a_carried_id_must_be_a_permitted_door_of_the_kind(self):
         honoured = shc.SmartHomeController._honoured_carry
-        intent = {"decided_access": "lock.front_door", "decided_access_src": "replay"}
+        intent = {"decided_access": "lock.front_door", "decided_access_src": "replay", "decided_access_at": shc._wall_clock()}
         assert honoured(intent, "lock", ["lock.front_door"], opening=True) == "lock.front_door"
         assert honoured(intent, "lock", ["lock.back_door"], opening=True) is None
         assert honoured(intent, "cover", ["lock.front_door"], opening=True) is None
@@ -1112,3 +1116,468 @@ class TestCarry:
         assert door.openings == [("lock", "unlock", "lock.front_door")]
         stored = door.chat.stored_parameters()
         assert stored["decided_access"] == "lock.front_door" and stored["decided_access_src"] == "open"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 review: covers keep their rooms, hints round-trip, fast path words
+# ---------------------------------------------------------------------------
+
+HOUSE_COVERS = {
+    "cover.living_blinds": cover_state("Living Room Blinds", "blind", "open"),
+    "cover.den_blinds": cover_state("Den Blinds", "blind", "open"),
+    "cover.garage": cover_state("Garage Door", "garage", "open"),
+    "cover.gate": cover_state("Front Gate", "gate", "open"),
+}
+
+
+def run_with_speaker(rig, intent, query, room, perms=None, mode="owner"):
+    async def go():
+        with mp.ha_permission_scope(perms or {"mode": "owner"}, mode=mode, utterance=classify_utterance(query)):
+            return await rig.controller.execute_intent(intent, rig.raw, query, device_room=room)
+
+    return asyncio.run(go())
+
+
+class TestCoversKeepTheirRooms:
+    def test_close_the_blinds_from_the_living_room_closes_those_blinds_only(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close the blinds", "living_room")
+        assert rig.calls == [("cover", "close_cover", "cover.living_blinds")]
+
+    def test_close_the_blinds_with_no_room_never_reaches_a_door(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close the blinds", None)
+        assert sorted(c[2] for c in rig.calls) == ["cover.den_blinds", "cover.living_blinds"]
+
+    def test_close_all_the_covers_keeps_todays_behaviour(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close all the covers", None)
+        assert len(rig.calls) == 4
+
+    def test_close_the_garage_door_from_another_room_closes_the_garage_only(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close the garage door", "living_room")
+        assert rig.calls == [("cover", "close_cover", "cover.garage")]
+
+    def test_close_the_gate_closes_the_gate_only(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close the gate", None)
+        assert rig.calls == [("cover", "close_cover", "cover.gate")]
+
+    def test_close_all_the_doors_is_explicit_and_stays_on_doors(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close"), "close all the doors", None)
+        assert sorted(c[2] for c in rig.calls) == ["cover.garage", "cover.gate"]
+
+    def test_open_the_garage_blinds_opens_blinds_never_the_door(self, monkeypatch):
+        states = {**HOUSE_COVERS, "cover.garage_blind": cover_state("Garage Blind", "blind")}
+        rig = DoorRig(monkeypatch, states)
+        run_with_speaker(rig, cover_intent("open", room="garage"), "open the garage blinds", None)
+        assert rig.calls == [("cover", "open_cover", "cover.garage_blind")]
+
+    def test_open_the_garage_with_blinds_that_have_no_class_opens_the_garage_door(self, monkeypatch):
+        states = {"cover.garage": cover_state("Garage Door", "garage"), "cover.lr": cover_state("Living Room Blinds")}
+        rig = DoorRig(monkeypatch, states)
+        run_with_speaker(rig, cover_intent("open", room="garage"), "open the garage", None)
+        assert rig.calls == [("cover", "open_cover", "cover.garage")]
+
+    def test_the_question_for_two_garage_doors_does_not_list_blinds(self, monkeypatch):
+        states = {**TWO_GARAGE, "cover.lr": cover_state("Living Room Blinds")}
+        rig = DoorRig(monkeypatch, states)
+        answer, _ = rig.run_scoped(cover_intent("open", room="garage"), "open the garage")
+        assert rig.calls == [] and "blinds" not in answer.lower() and answer.startswith("Which door")
+
+    def test_a_status_read_by_words_carries_but_a_model_room_alone_does_not(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        intent = cover_intent("get_status", room="garage")
+        rig.run_scoped(intent, "what is up")
+        assert "decided_access" not in intent
+        intent = cover_intent("get_status")
+        rig.run_scoped(intent, "is the garage door open")
+        assert intent.get("decided_access") == "cover.garage" and intent["decided_access_src"] == "status"
+
+    def test_talk_of_blinds_drops_a_cover_carry(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        intent = cover_intent("open")
+        intent.update({"decided_access": "cover.garage", "decided_access_src": "status", "decided_access_at": shc._wall_clock()})
+        rig.run_scoped(intent, "open the blinds too")
+        assert [c for c in rig.calls if c[2] == "cover.garage"] == []
+        assert sorted(c[2] for c in rig.calls) == ["cover.den_blinds", "cover.living_blinds"]
+
+
+class TestHintsRoundTrip:
+    def test_a_name_without_a_door_noun_is_hinted_with_one_and_the_hint_works(self, monkeypatch):
+        states = {"lock.entry": lock_state("Front Entry"), "lock.back": lock_state("Back Lock")}
+        rig = DoorRig(monkeypatch, states)
+        answer, _ = rig.run_scoped(lock_intent(), "unlock the front")
+        assert rig.calls == []
+        phrase = answer.split("'")[1]
+        assert phrase.endswith("door") and "Front Entry" in phrase
+        rig.run_scoped(lock_intent(), phrase)
+        assert rig.openings == [("lock", "unlock", "lock.entry")]
+
+    def test_a_cover_with_no_class_and_no_noun_in_its_name_round_trips(self, monkeypatch):
+        states = {"cover.m": cover_state("Main"), "cover.n": cover_state("North Thing")}
+        rig = DoorRig(monkeypatch, states)
+        answer, _ = rig.run_scoped(cover_intent("open", room="main"), "open the main")
+        phrase = answer.split("'")[1]
+        assert phrase.endswith("door")
+        rig.run_scoped(cover_intent("open"), phrase)
+        assert rig.openings == [("cover", "open_cover", "cover.m")]
+
+
+class TestFastPathReadsWholeWords:
+    def fast(self, rig, query):
+        return asyncio.run(rig.controller._fast_path_intent(query, query.lower(), None, False, False, False))
+
+    @pytest.mark.parametrize("query", [
+        "lock the front door, it's unlocked",
+        "don't unlock the front door",
+        "do not unlock the door",
+        "the garage is open, close it",
+        "please don't open the garage door",
+        "never open the garage",
+    ])
+    def test_a_command_with_both_verbs_or_a_negation_is_left_to_the_model(self, monkeypatch, query):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        assert self.fast(rig, query) is None
+
+    def test_plain_commands_still_take_the_fast_path(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        assert self.fast(rig, "unlock the front door")["action"] == "unlock"
+        assert self.fast(rig, "lock the front door")["action"] == "lock"
+        assert self.fast(rig, "can you unlock the front door")["action"] == "unlock"
+        assert self.fast(rig, "close the garage")["action"] == "close"
+        assert self.fast(rig, "open the garage")["action"] == "open"
+        assert self.fast(rig, "is the garage open")["action"] == "get_status"
+        assert self.fast(rig, "garage status")["action"] == "get_status"
+
+
+# ---------------------------------------------------------------------------
+# Sequences, review round
+# ---------------------------------------------------------------------------
+
+class TestSequencesReview:
+    def test_a_step_aimed_at_one_cover_closes_only_that_cover(self, monkeypatch):
+        states = {**HOUSE_COVERS, "light.den": {"state": "on", "attributes": {"friendly_name": "Den"}}}
+        rig = SequenceRig(monkeypatch, states)
+        steps = [step("close", {"device_type": "cover", "room": "garage"}),
+                 step("turn_off", {"device_type": "light", "entity_id": "light.den"})]
+        assert rig.run_plan(steps, "close the garage door then turn off the den light") is None
+        assert [c for c in rig.calls if c[0] == "cover"] == [("cover", "close_cover", "cover.garage")]
+
+    def test_a_close_step_is_aimed_at_the_resolved_cover_not_the_models_id(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, HOUSE_COVERS)
+        steps = [step("close", {"device_type": "cover", "entity_id": "cover.gate"})]
+        rig.run_plan(steps, "close the garage door")
+        assert [c[2] for c in rig.calls] == ["cover.garage"]
+
+    def test_a_blinds_close_step_is_not_narrowed_to_a_door(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, HOUSE_COVERS)
+        steps = [step("close", {"device_type": "cover", "room": "living"})]
+        assert rig.plan(steps, "close the living room blinds") is None
+        assert "entity_id" not in steps[0]["target"]
+
+    def test_swapping_which_door_each_verb_applies_to_asks(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        swapped = [step("unlock", {"device_type": "lock", "room": "back_door"}),
+                   step("lock", {"device_type": "lock", "room": "front_door"})]
+        text = rig.plan(swapped, "unlock the front door and lock the back door")
+        assert text is not None and rig.calls == []
+        right = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("lock", {"device_type": "lock", "room": "back_door"})]
+        assert rig.plan(right, "unlock the front door and lock the back door") is None
+        assert right[0]["target"]["decided_access"] == "lock.front_door"
+        assert right[1]["target"]["entity_id"] == "lock.back_door"
+
+    def test_a_scene_step_the_words_do_not_call_for_is_refused(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, SCENE_STATES)
+        steps = [step("activate", {"device_type": "scene"}, parameters={"entity_id": "script.unlock_all_at_night"})]
+        assert rig.plan(steps, "good night") == shc.UNKNOWN_SCENE_TEXT
+        steps = [step("turn_on", {"device_type": "scene", "entity_id": "script.unlock_all_at_night"})]
+        assert rig.plan(steps, "turn on the lights then good night") == shc.UNKNOWN_SCENE_TEXT
+        steps = [step("activate", {"device_type": "scene"}, parameters={"entity_id": "script.good_night"})]
+        assert rig.plan(steps, "good night") is None
+
+    def test_the_list_json_fallback_reads_whole_words(self, monkeypatch, stub_admin):
+        class LLM:
+            async def generate(self, **kw):
+                return {"response": "not json"}
+
+        controller = shc.SmartHomeController(entity_manager=None, llm_router=LLM())
+        got = asyncio.run(controller.extract_sequence_intent("turn off the front lights then wait"))
+        assert got["steps"][0]["action"] == "turn_off"
+
+
+# ---------------------------------------------------------------------------
+# Status never names a door the request may not use (D23)
+# ---------------------------------------------------------------------------
+
+class TestStatusIsPermitted:
+    def test_a_guest_hears_no_lock_name_or_state(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        answer, _ = rig.run_scoped(lock_intent("get_status"), "are the doors locked", perms=guest(), mode="guest")
+        assert "Front" not in answer and "locked" not in answer.replace("can't", "") or "guest mode" in answer.lower()
+        assert "Front Door" not in answer and "Back Door" not in answer
+
+    def test_a_restricted_lock_is_left_out_of_a_status_answer(self, monkeypatch):
+        perms = {"mode": "degraded", "restricted_entities": [r"^lock\.back_door$"], "allowed_domains": []}
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        answer, _ = rig.run_scoped(lock_intent("get_status"), "are the doors locked", perms=perms)
+        assert "Back Door" not in answer and "Front Door Lock is locked" in answer
+
+    def test_a_guest_hears_no_garage_status(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        answer, _ = rig.run_scoped(cover_intent("get_status", room="garage"), "is the garage open", perms=guest(), mode="guest")
+        assert "Garage" not in answer and "guest mode" in answer.lower()
+
+    def test_a_status_read_under_a_read_only_scope_still_refuses_with_the_mode_wording(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+
+        async def go():
+            with mp.ha_permission_scope(guest(), mode="guest", read_only=True):
+                return await rig.controller.execute_intent(lock_intent("get_status"), rig.raw, "is it locked")
+
+        assert "guest mode" in asyncio.run(go()).lower()
+
+
+# ---------------------------------------------------------------------------
+# The agent grounds what a model picks
+# ---------------------------------------------------------------------------
+
+class TestAgentGrounding:
+    def agent(self, states=None):
+        from unittest.mock import AsyncMock, MagicMock
+        from orchestrator.automation_agent import AutomationAgent
+
+        ha = MagicMock()
+        ha.call_service = AsyncMock(return_value=True)
+        em = MagicMock()
+        em.get_entities = AsyncMock(return_value=states if states is not None else {**THREE_LOCKS, **HOUSE_COVERS, **SCENE_STATES})
+        agent = AutomationAgent(ha, MagicMock(), admin_client=MagicMock(), entity_manager=em)
+        agent.ha_client = ha
+        return agent, ha
+
+    def call(self, args, query):
+        agent, ha = self.agent()
+        result = asyncio.run(agent._exec_ha_service(dict(args), {"query": query, "room": "den"}))
+        return result, ha.call_service.await_args_list
+
+    @pytest.mark.parametrize("args", [
+        {"domain": "lock", "service": "unlock", "entity_id": "all"},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door,lock.back_door"},
+        {"domain": "lock", "service": "unlock", "entity_id": ["lock.front_door"]},
+        {"domain": "lock", "service": "unlock", "entity_id": "front_door"},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": {"area_id": "kitchen"}},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": {"device_id": "x"}},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": {"label_id": "x"}},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": {"floor_id": "x"}},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": {"target": {"area_id": "x"}}},
+        {"domain": "lock", "service": "open", "entity_id": "lock.front_door"},
+        {"domain": "lock", "service": "toggle", "entity_id": "lock.back_door"},
+        {"domain": "cover", "service": "open_cover", "entity_id": "all"},
+        {"domain": "cover", "service": "open_cover", "entity_id": "cover.gate"},
+        {"domain": "cover", "service": "set_cover_position", "entity_id": "cover.garage"},
+        {"domain": "homeassistant", "service": "turn_off", "entity_id": "lock.front_door"},
+        {"domain": "homeassistant", "service": "turn_on", "entity_id": "cover.garage"},
+        {"domain": "homeassistant", "service": "turn_off", "entity_id": "all"},
+        {"domain": "homeassistant", "service": "toggle", "data": {"area_id": "hall"}},
+        {"domain": "lock", "service": "unlock", "entity_id": "lock.nowhere"},
+    ])
+    def test_an_opening_the_words_do_not_name_is_refused(self, args):
+        result, calls = self.call(args, "do something with the house")
+        assert calls == [], args
+        assert result == "I need the name of the lock or door to do that."
+
+    @pytest.mark.parametrize("args,query", [
+        ({"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}, "unlock the front door"),
+        ({"domain": "cover", "service": "open_cover", "entity_id": "cover.gate"}, "open the front gate"),
+        ({"domain": "homeassistant", "service": "turn_off", "entity_id": "lock.front_door"}, "unlock the front door"),
+        ({"domain": "cover", "service": "open_cover", "entity_id": "cover.living_blinds"}, "open the blinds"),
+    ])
+    def test_an_opening_the_words_name_goes_through(self, args, query):
+        result, calls = self.call(args, query)
+        assert len(calls) == 1, result
+
+    def test_closing_locking_and_lights_are_unchanged(self):
+        assert len(self.call({"domain": "lock", "service": "lock", "entity_id": "all"}, "lock up")[1]) == 1
+        assert len(self.call({"domain": "cover", "service": "close_cover", "entity_id": "cover.garage"}, "close it")[1]) == 1
+        assert len(self.call({"domain": "homeassistant", "service": "turn_off", "entity_id": "light.den"}, "lights off")[1]) == 1
+
+    def test_the_wrong_door_for_the_words_is_refused(self):
+        result, calls = self.call({"domain": "lock", "service": "unlock", "entity_id": "lock.back_door"}, "unlock the front door")
+        assert calls == []
+
+    def test_a_door_that_cannot_be_checked_is_not_opened(self):
+        agent, ha = self.agent(states={})
+        result = asyncio.run(agent._exec_ha_service(
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}, {"query": "unlock the front door"}))
+        assert ha.call_service.await_count == 0
+
+    def test_a_scene_or_routine_the_words_do_not_call_for_is_refused(self):
+        result, calls = self.call({"domain": "script", "service": "turn_on", "entity_id": "script.unlock_all_at_night"}, "good night")
+        assert calls == [] and result == shc.UNKNOWN_SCENE_TEXT
+        result, calls = self.call({"domain": "script", "service": "unlock_all_at_night"}, "good night")
+        assert calls == []
+        result, calls = self.call({"domain": "script", "service": "turn_on", "entity_id": "script.good_night"}, "good night")
+        assert len(calls) == 1
+
+    def test_execute_puts_the_turns_words_in_the_context(self):
+        source = (SRC / "orchestrator" / "automation_agent.py").read_text()
+        assert 'context = {**context, "query": query}' in source
+
+
+# ---------------------------------------------------------------------------
+# Carry hygiene
+# ---------------------------------------------------------------------------
+
+class TestCarryHygiene:
+    def test_an_old_replay_carry_does_not_open(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        intent = lock_intent(decided_access="lock.front_door", decided_access_src="replay",
+                             decided_access_at=shc._wall_clock() - shc.ACCESS_CARRY_SECONDS - 5)
+        answer, _ = rig.run_scoped(intent, "unlock it")
+        assert rig.calls == [] and answer.startswith("Which door")
+        intent = lock_intent(decided_access="lock.front_door", decided_access_src="replay",
+                             decided_access_at=shc._wall_clock())
+        rig.run_scoped(intent, "unlock it")
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
+    def test_the_audience_carries_the_resolved_mode(self):
+        from orchestrator.nodes import route_control as rc
+        from orchestrator.state import OrchestratorState
+
+        owner = OrchestratorState(query="x")
+        owner.permissions = {"mode": "owner"}
+        guest_state = OrchestratorState(query="x")
+        guest_state.permissions = {"mode": "guest"}
+        assert rc._audience_class(owner).endswith(":owner") and rc._audience_class(guest_state).endswith(":guest")
+        assert rc._audience_class(owner) != rc._audience_class(guest_state)
+
+    def test_a_follow_up_with_no_action_of_its_own_never_inherits_an_unlock(self, monkeypatch):
+        door = DoorChat(monkeypatch)
+        door.say("unlock the front door")
+        door.reset()
+        door.chat.llm.reply = {"device_type": "lock", "room": None, "parameters": {}}
+        door.say("and the other one", context_ref_info=REF)
+        assert door.openings == []
+
+    def test_the_write_confirmation_replay_does_not_trust_stored_door_keys(self, monkeypatch):
+        from ._room_chat_harness import Chat as LightChat
+
+        chat = LightChat(monkeypatch, threshold=1)
+        first = chat.turn("the lights please")
+        assert first.answer.endswith("?")
+        pending = chat.store["s1"]["parameters"]["pending_write_confirmation"]
+        pending["intent"].update({"decided_access": "lock.back_door", "decided_access_src": "replay",
+                                  "decided_access_fp": "someone", "decided_access_at": 1e12})
+        chat.turn("yes")
+        stored = chat.stored_parameters()
+        assert "decided_access" not in stored and "decided_access_fp" not in stored
+
+
+class TestReviewSurvivors:
+    def test_the_answer_to_which_door_is_trusted_though_the_first_words_named_a_room(self, monkeypatch):
+        states = {"lock.deadbolt": lock_state("Deadbolt"), "lock.latch": lock_state("Latch")}
+        door = DoorChat(monkeypatch, states, areas={"kitchen": "Kitchen"},
+                        placement={"lock.deadbolt": "kitchen", "lock.latch": "kitchen"})
+        out = door.say("unlock the kitchen")
+        assert out.answer.startswith("Which door") and door.calls == []
+        door.say("the deadbolt")
+        assert door.openings == [("lock", "unlock", "lock.deadbolt")]
+
+    def test_and_it_after_an_unlock_with_no_action_of_its_own_never_unlocks_again(self, monkeypatch):
+        door = DoorChat(monkeypatch)
+        door.say("unlock the front door")
+        door.reset()
+        door.chat.llm.reply = {"device_type": "lock", "room": None, "parameters": {}}
+        door.say("and it", context_ref_info=REF)
+        assert door.openings == []
+
+    def test_close_it_after_a_status_read_closes_that_cover_only(self, monkeypatch):
+        door = DoorChat(monkeypatch, HOUSE_COVERS)
+        door.chat.llm.reply = {"device_type": "cover", "room": None, "action": "get_status", "target_scope": "group", "parameters": {}}
+        door.say("is the garage door open")
+        assert door.chat.stored_parameters()["decided_access"] == "cover.garage"
+        door.chat.llm.reply = {"device_type": "cover", "room": None, "action": "close", "target_scope": "group", "parameters": {}}
+        door.reset()
+        door.say("close it", context_ref_info=REF)
+        assert door.calls == [("cover", "close_cover", "cover.garage")]
+
+    def test_a_door_command_with_the_word_front_alone_is_not_enough_for_the_agent(self):
+        agent = TestAgentGrounding().agent()[0]
+        result = asyncio.run(agent._exec_ha_service(
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}, {"query": "unlock the front"}))
+        assert result == "I need the name of the lock or door to do that."
+
+    @pytest.mark.parametrize("data", [{"area_id": "x"}, {"device_id": "x"}, {"label_id": "x"}, {"floor_id": "x"}, {"target": {}}])
+    def test_target_forms_are_refused_even_when_the_door_is_named(self, data):
+        agent, ha = TestAgentGrounding().agent()
+        result = asyncio.run(agent._exec_ha_service(
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door", "data": data},
+            {"query": "unlock the front door"}))
+        assert ha.call_service.await_count == 0 and result == "I need the name of the lock or door to do that."
+
+    @pytest.mark.parametrize("entity", ["all", "lock.front_door,lock.back_door", ["lock.front_door"], "front_door"])
+    def test_non_concrete_ids_are_refused_even_when_the_door_is_named(self, entity):
+        agent, ha = TestAgentGrounding().agent()
+        asyncio.run(agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": entity},
+                                           {"query": "unlock the front door"}))
+        assert ha.call_service.await_count == 0
+
+    def test_a_door_the_inventory_cannot_confirm_is_not_opened(self):
+        agent, ha = TestAgentGrounding().agent(states={"light.x": {"state": "on", "attributes": {}}})
+        asyncio.run(agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+                                           {"query": "unlock the front door"}))
+        assert ha.call_service.await_count == 0
+
+    def test_close_the_door_with_a_model_room_closes_only_that_rooms_door(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("close", room="garage"), "close the door", None)
+        assert rig.calls == [("cover", "close_cover", "cover.garage")]
+
+    def test_a_cover_room_is_grounded_in_the_words_a_lock_name_is_not(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        intent = {"device_type": "cover", "room": "garage"}
+        rig.controller._ground_intent_rooms(intent, "close the door")
+        assert intent["room"] is None
+        intent = {"device_type": "cover", "room": "garage"}
+        rig.controller._ground_intent_rooms(intent, "close the garage door")
+        assert intent["room"] == "garage"
+        intent = {"device_type": "lock", "room": "front_door"}
+        rig.controller._ground_intent_rooms(intent, "unlock the thing")
+        assert intent["room"] == "front_door"
+
+    def test_garage_blinds_with_no_blinds_found_never_opens_the_door(self, monkeypatch):
+        rig = DoorRig(monkeypatch, {"cover.garage": cover_state("Garage Door", "garage")})
+        answer, _ = rig.run_scoped(cover_intent("open", room="garage"), "open the garage blinds")
+        assert rig.calls == [] and "couldn't find" in answer
+
+    def test_a_cover_status_leaves_out_a_door_the_request_may_not_use(self, monkeypatch):
+        perms = {"mode": "degraded", "restricted_entities": [r"^cover\.garage$"], "allowed_domains": []}
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        answer, _ = rig.run_scoped(cover_intent("get_status"), "how is everything", perms=perms)
+        assert "Garage" not in answer and "Front Gate" in answer
+
+    def test_an_unnamed_door_status_records_no_carry(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        intent = cover_intent("get_status")
+        answer, _ = rig.run_scoped(intent, "is the door open")
+        assert "decided_access" not in intent and "Garage Door" in answer and "Front Gate" in answer
+
+    def test_a_universal_door_status_records_no_carry(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        intent = cover_intent("get_status")
+        answer, _ = rig.run_scoped(intent, "are all the doors open")
+        assert "decided_access" not in intent and "Garage Door" in answer and "Front Gate" in answer
+
+    def test_a_question_for_a_model_room_lists_that_rooms_doors_only(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        answer, _ = rig.run_scoped(cover_intent("open", room="garage"), "open the door")
+        assert rig.calls == [] and "Front Gate" not in answer and "Garage Door" in answer
+
+    def test_a_question_about_the_garage_does_not_open_it_in_any_mood(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        for query in ("was the garage left open", "did the garage door close", "is the garage door open", "what is the garage status"):
+            intent = asyncio.run(rig.controller._fast_path_intent(query, query, None, False, False, False))
+            assert intent["action"] == "get_status", query

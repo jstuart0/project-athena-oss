@@ -366,7 +366,11 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         await _clear_pending(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
         state.prev_context = None
 
-        intent = dict(pending.get("intent") or {})
+        stored = dict(pending.get("intent") or {})
+        intent = dict(stored)
+        for key in _ACCESS_DECISION_KEYS:
+            intent.pop(key, None)
+        _carry_access(intent, stored, fingerprint=state.caller_fingerprint, audience=_audience_class(state))
         precheck_denied_domains = [
             d for d in intent_write_domains(intent)
             if not authorize_ha_write(d, "_precheck", None, scope.permissions).allowed
@@ -483,8 +487,11 @@ def _drop_decision(intent: Dict[str, Any]) -> None:
 
 
 def _audience_class(state: OrchestratorState) -> str:
-    """The audience class of this turn, from the server-derived audience."""
-    return audience_class_for(state.knowledge_audience)
+    """The audience class of this turn and the mode the request was resolved
+    to, from server-derived values only: a door decision carries to a
+    follow-up only when both are the same."""
+    resolved = (state.permissions or {}).get("mode") or state.mode
+    return f"{audience_class_for(state.knowledge_audience)}:{resolved}"
 
 
 def _stamp_access_decision(state: OrchestratorState, intent: Dict[str, Any]) -> None:
@@ -710,13 +717,9 @@ async def _resolve_pending_room_choice(
     intent = dict(pending.get("intent") or {})
     room_context.strip_server_keys(intent)
     if pending.get("kind") == room_choice.KIND_ACCESS:
-        intent.update({
-            "decided_access": chosen.key,
-            "decided_access_fp": state.caller_fingerprint,
-            "decided_access_aud": _audience_class(state),
-            "decided_access_src": "replay",
-            "decided_access_at": time.time(),
-        })
+        smart_controller._set_decided_access(
+            intent, chosen.key, fingerprint=state.caller_fingerprint, audience=_audience_class(state),
+        )
     else:
         smart_controller._set_decided(intent, chosen.key, chosen.label)
     first_turn_query = pending.get("query") or ""
@@ -1275,6 +1278,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     # stripped here, and only what _carry_decision puts back
                     # (same caller, same audience) goes on.
                     room_context.strip_server_keys(intent)
+                    if intent.get('device_type') in ('lock', 'cover') and not new_intent.get('action'):
+                        # A door command never inherits an earlier unlock or open.
+                        intent['action'] = 'get_status'
                     follow_up = {"fingerprint": state.caller_fingerprint, "audience": _audience_class(state)}
 
                     # If a new room is named, the earlier decision is dropped and

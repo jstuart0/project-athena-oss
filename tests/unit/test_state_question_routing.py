@@ -725,7 +725,7 @@ _ANSWER_TERMS = {
     "light": ("light",),
     "switch": ("switch",),
     "lock": ("lock", "door"),
-    "cover": ("garage", "cover", "blind"),
+    "cover": ("garage", "cover", "blind", "door"),
     "climate": ("thermostat",),
     "media_player": ("tv", "media"),
     "fan": ("fan",),

@@ -60,7 +60,7 @@ ROOM_SCOPE = (
     "src/orchestrator/ha_entity_manager.py", "src/orchestrator/sequence_executor.py",
     "src/orchestrator/write_fanout.py", "src/orchestrator/nodes/route_control.py",
     "src/gateway/main.py", "src/gateway/speaker_room.py", "src/shared/ha_registry.py",
-    "src/orchestrator/access_target.py",
+    "src/orchestrator/access_target.py", "src/orchestrator/automation_agent.py",
 )
 # In those files a door decision (which lock or cover a command acted on) is a
 # location too, and so is a whole intent, step or target: each can hold a room,

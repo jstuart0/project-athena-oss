@@ -451,6 +451,8 @@ class AutomationAgent:
         Returns:
             Single response message to user
         """
+        # The turn's own words ground every door and scene the model picks.
+        context = {**context, "query": query}
         mode = context.get("mode", "owner")
         room = context.get("room", "office")
         session_id = context.get("session_id")
@@ -469,7 +471,7 @@ class AutomationAgent:
         iteration = 0
         start_time = time.time()
 
-        logger.info(f"AutomationAgent starting: query_len={len(query)}, mode={mode}, room={room}")
+        logger.info(f"AutomationAgent starting: query_len={len(query)}, mode={mode}, has_room={bool(room)}")
 
         while iteration < max_iterations:
             iteration += 1
@@ -768,6 +770,80 @@ class AutomationAgent:
             logger.error(f"Tool execution error ({name}): {e}")
             return f"Error executing {name}: {model_safe_error(e)}"
 
+    _TARGET_FORMS = ("area_id", "device_id", "label_id", "floor_id", "target")
+    _CONCRETE_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+
+    async def _door_states(self, domain: str) -> Dict[str, Dict]:
+        """The states of one domain, for grounding. Empty when they can't be
+        read: a door that can't be checked is not opened."""
+        try:
+            if self.entity_manager is not None:
+                states = await self.entity_manager.get_entities()
+            else:
+                listed = await self.ha_client.get_states()
+                states = {s["entity_id"]: s for s in listed if isinstance(s, dict) and "entity_id" in s}
+        except Exception:
+            return {}
+        return {k: v for k, v in states.items() if isinstance(k, str) and k.startswith(f"{domain}.")}
+
+    async def _ungrounded_target(self, args: Dict, domain: str, service: str, context: Dict) -> Optional[str]:
+        """The refusal for a service call aimed at something the user's words
+        don't call for, or None.
+
+        A scene or routine needs the turn's words to call for it. An opening
+        (an unlock, or opening an access cover, directly or through
+        ``homeassistant``) needs one concrete entity id and the turn's words
+        to name that door (``access_target.resolve`` gives ``Named``); an
+        area, device, label, floor, a list, a comma string or "all" never
+        does. Closing and locking a lock or cover pass as before."""
+        from orchestrator.smart_home_controller import UNKNOWN_SCENE_TEXT, scene_grounded
+        query = context.get("query")
+        entity = args.get("entity_id")
+        data = args.get("data") if isinstance(args.get("data"), dict) else {}
+
+        if domain in ("script", "scene"):
+            ident = entity if isinstance(entity, str) and entity else (
+                f"{domain}.{service}" if service not in ("turn_on", "turn_off", "toggle", "reload") else None
+            )
+            return None if scene_grounded(ident, query) else UNKNOWN_SCENE_TEXT
+        if domain not in access_target.WAY_IN_DOMAINS:
+            return None
+
+        entity_str = entity.strip().lower() if isinstance(entity, str) else None
+        concrete = bool(entity_str) and bool(self._CONCRETE_ID.match(entity_str))
+        eff = access_target.entity_domain(entity_str) if concrete else None
+        forms = any(k in data or k in args for k in self._TARGET_FORMS)
+        if domain == "homeassistant":
+            opening = service in ("turn_on", "turn_off", "toggle") and (
+                not concrete or access_target.is_opening_action(eff, service)
+            )
+        else:
+            opening = access_target.is_opening_action(domain, service)
+        if not opening:
+            return None
+        if forms or eff not in access_target.DOMAINS or (domain != "homeassistant" and eff != domain):
+            if domain == "homeassistant" and concrete and eff not in access_target.DOMAINS:
+                return None
+            return NAME_THE_DOOR_TEXT
+
+        states = await self._door_states(eff)
+        if entity_str not in states:
+            return NAME_THE_DOOR_TEXT
+        if eff == "cover" and not access_target.is_access_cover(entity_str, (states[entity_str] or {}).get("attributes")):
+            return None
+        pool = {
+            k: str(((v or {}).get("attributes") or {}).get("friendly_name") or k.split(".", 1)[1].replace("_", " "))
+            for k, v in states.items()
+            if eff == "lock" or access_target.is_access_cover(k, (v or {}).get("attributes"))
+        }
+        outcome = access_target.resolve(
+            query if isinstance(query, str) else None, domain=eff, model_target=entity_str, carried=None, entities=pool,
+        )
+        if isinstance(outcome, access_target.Named) and outcome.named_by in access_target.OPENING_SOURCES \
+                and outcome.refs[0].entity_id == entity_str:
+            return None
+        return NAME_THE_DOOR_TEXT
+
     async def _exec_ha_service(self, args: Dict, context: Dict) -> str:
         """Execute immediate HA service call."""
         entity_id = args.get("entity_id", "")
@@ -789,6 +865,9 @@ class AutomationAgent:
         way_in_domain = str(domain).lower() in access_target.WAY_IN_DOMAINS
         if not entity_id and way_in_domain and str(domain).lower() in access_target.DOMAINS:
             return NAME_THE_DOOR_TEXT
+        grounding = await self._ungrounded_target(args, str(domain).lower(), str(service).lower(), context)
+        if grounding:
+            return grounding
         if not entity_id and context.get("room") and not way_in_domain:
             entity_id = f"{domain}.{context['room']}"
 

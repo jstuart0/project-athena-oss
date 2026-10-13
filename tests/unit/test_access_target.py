@@ -87,6 +87,103 @@ class TestCarried:
         assert isinstance(lock("unlock it", carried=5), at.Unnamed)
 
 
+class TestCarryIsOnlyForABareReferent:
+    PATIO = {"lock.front_door": "Front Door Lock", "lock.patio": "Back Patio Door Lock"}
+
+    @pytest.mark.parametrize("query", [
+        "unlock it", "unlock that", "unlock the door", "unlock the lock", "open it", "unlock the front door",
+        "unlock it please", "is it locked", "unlock",
+    ])
+    def test_a_bare_referent_or_the_carried_doors_own_name_keeps_it(self, query):
+        out = lock(query, self.PATIO, carried="lock.front_door")
+        assert isinstance(out, at.Named) and out.named_by == at.CARRIED and ids(out) == ["lock.front_door"], query
+
+    @pytest.mark.parametrize("query", [
+        "unlock the back door",      # part of another name
+        "unlock the side door",      # a name nothing answers to
+        "unlock the shed",           # an unknown word
+        "unlock the doors",          # plural
+        "unlock all the locks",
+        "unlock the deadbolt on the garage",
+    ])
+    def test_any_other_word_drops_the_carry_for_a_lock(self, query):
+        out = lock(query, self.PATIO, carried="lock.front_door")
+        assert not (isinstance(out, at.Named) and out.named_by == at.CARRIED), query
+        assert not (isinstance(out, at.Named) and ids(out) == ["lock.front_door"] and "front" not in query), query
+
+    def test_a_partial_name_resolves_to_the_other_door_not_the_carry(self):
+        out = lock("unlock the back door", self.PATIO, carried="lock.front_door")
+        assert isinstance(out, at.Ambiguous) and ids(out) == ["lock.patio"]
+
+    COVERS = {"cover.garage": "Garage Door", "cover.gate": "Front Gate"}
+
+    @pytest.mark.parametrize("query", ["open the gate", "open the opener", "open the blinds too", "open the garage blinds",
+                                       "open the doors"])
+    def test_a_noun_or_talk_of_blinds_that_is_not_the_carried_covers_drops_it(self, query):
+        out = cover(query, self.COVERS, carried="cover.garage")
+        assert not (isinstance(out, at.Named) and out.named_by == at.CARRIED), query
+
+    @pytest.mark.parametrize("query", ["open it", "open the garage door", "open the door", "open the garage", "open that"])
+    def test_a_cover_referent_keeps_it(self, query):
+        out = cover(query, self.COVERS, carried="cover.garage")
+        assert isinstance(out, at.Named) and out.named_by == at.CARRIED, query
+
+    def test_the_answer_to_which_door_is_trusted_whatever_the_first_words_said(self):
+        out = lock("unlock the kitchen", self.PATIO, carried="lock.front_door", carried_trusted=True)
+        assert isinstance(out, at.Named) and out.named_by == at.CARRIED
+        out = lock("unlock the kitchen", self.PATIO, carried="lock.not_here", carried_trusted=True)
+        assert not isinstance(out, at.Named) or out.named_by != at.CARRIED
+
+
+class TestReplyAndHints:
+    def test_a_reply_that_repeats_the_label_is_an_answer(self):
+        labels = (at.Ref("lock.a", "Front Door Lock"), at.Ref("lock.b", "Back Door Lock"))
+        for reply in ("front door lock", "the front door lock", "Front Door Lock please"):
+            out = at.match_reply(reply, labels)
+            assert out.kind == "one" and out.ref.entity_id == "lock.a", reply
+
+    def test_a_reply_that_leads_with_or_holds_a_command_verb_is_no_answer(self):
+        labels = (at.Ref("lock.a", "Front Door Lock"), at.Ref("lock.b", "Back Door Lock"))
+        for reply in ("lock the front door", "unlock front door lock", "front door unlock", "open front", "lock front door lock"):
+            assert at.match_reply(reply, labels).kind == "none", reply
+
+    @pytest.mark.parametrize("label,domain,expected", [
+        ("Front Door Lock", "lock", "Front Door Lock"), ("Front Entry", "lock", "Front Entry door"),
+        ("Kwikset 910", "lock", "Kwikset 910 door"), ("Main", "cover", "Main door"), ("Garage", "cover", "Garage"),
+    ])
+    def test_the_hint_phrase_always_carries_an_access_noun(self, label, domain, expected):
+        assert at.hint_phrase(label, domain) == expected
+
+    @pytest.mark.parametrize("label,domain", [("Front Entry", "lock"), ("Kwikset 910", "lock"), ("Main", "cover")])
+    def test_saying_the_hinted_phrase_names_it_among_several(self, label, domain):
+        entities = {f"{domain}.a": label, f"{domain}.b": "Other Place Thing"}
+        verb = "unlock" if domain == "lock" else "open"
+        out = at.resolve(f"{verb} the {at.hint_phrase(label, domain)}", domain=domain, model_target=None,
+                         carried=None, entities=entities)
+        assert isinstance(out, at.Named) and out.named_by in at.OPENING_SOURCES and ids(out) == [f"{domain}.a"]
+
+    def test_my_garage_picks_the_entity_whose_name_says_garage(self):
+        entities = {"cover.g": "Garage Door", "cover.b": "Living Room Blinds"}
+        out = at.resolve("open my garage", domain="cover", model_target=None, carried=None, entities=entities)
+        assert isinstance(out, at.Named) and ids(out) == ["cover.g"] and out.named_by == at.BARE_NOUN
+
+    def test_two_garage_doors_among_blinds_ask_only_about_the_garage_ones(self):
+        entities = {"cover.l": "Garage Door Left", "cover.r": "Garage Door Right", "cover.b": "Living Room Blinds"}
+        out = at.resolve("open the garage", domain="cover", model_target=None, carried=None, entities=entities)
+        assert isinstance(out, at.Unnamed) and sorted(ids(out)) == ["cover.l", "cover.r"]
+
+    def test_a_model_target_with_the_domain_prefix_still_narrows(self):
+        out = at.narrow_to_target("close the garage left door", "cover.garage_left", "cover")
+        assert out == "left garage", "the prefix word cover must not block narrowing"
+
+    def test_cover_intent_kind(self):
+        assert at.cover_intent_kind("open the garage blinds") == "plain"
+        assert at.cover_intent_kind("open the garage door blinds") == "access"
+        assert at.cover_intent_kind("open the gate") == "access"
+        assert at.cover_intent_kind("open the blinds") == "plain"
+        assert at.cover_intent_kind("open it") is None
+
+
 # ---------------------------------------------------------------------------
 # Rule 2: universal wording
 # ---------------------------------------------------------------------------
