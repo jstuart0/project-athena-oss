@@ -76,7 +76,8 @@ class UserSafeText(str):
 
 def make_user_safe(detail: Any, status_code: Optional[int]) -> Optional[UserSafeText]:
     """`detail` as a `UserSafeText` when it is a 4xx body detail that passes every
-    rule above, else None. Only `rag_client` calls this, for a 4xx response."""
+    rule above, else None. `rag_client` calls it for a 4xx response, and the
+    automation agent for the guard's fixed refusal phrases (status 403)."""
     if not isinstance(detail, str) or not isinstance(status_code, int) or not 400 <= status_code < 500:
         return None
     if not detail or len(detail) > MAX_USER_SAFE_LENGTH or not _USER_SAFE_CHARS.match(detail):

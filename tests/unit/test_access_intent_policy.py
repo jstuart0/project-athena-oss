@@ -2107,3 +2107,37 @@ class TestGuardRefusals:
         with mp.ha_permission_scope(guest(), mode="guest") as guest_scope:
             text = mp.sequence_refusal_message(decision, guest_scope)
         assert "guest mode" in text and "one door" not in text
+
+
+class TestAgentTurnOffThroughTheRealGuard:
+    """D28: homeassistant.turn_off can't open a door in HA core, so the agent's
+    "turn off everything in the kitchen" reaches the guard and is let through;
+    turn_on and toggle on the same open target never are."""
+
+    def agent(self, monkeypatch):
+        from orchestrator.automation_agent import AutomationAgent
+
+        rig = DoorRig(monkeypatch, {**THREE_LOCKS, **TWO_GARAGE, "light.kitchen": lock_state("Kitchen Light", "on")})
+        agent = AutomationAgent(rig.raw, MagicMock(), admin_client=MagicMock(), entity_manager=rig.manager)
+        agent.ha_client = mp.ensure_permission_enforcing(rig.raw)
+        return rig, agent
+
+    def call(self, agent, args, query="turn off everything in the kitchen"):
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner") as scope:
+                return await agent._exec_ha_service(dict(args), {"query": query, "room": "kitchen"}), scope
+
+        return asyncio.run(go())
+
+    def test_turn_off_on_an_area_is_written(self, monkeypatch):
+        rig, agent = self.agent(monkeypatch)
+        result, scope = self.call(agent, {"domain": "homeassistant", "service": "turn_off", "data": {"area_id": "kitchen"}})
+        assert result.startswith("Called homeassistant.turn_off") and scope.denials == []
+        assert [c[:2] for c in rig.calls] == [("homeassistant", "turn_off")]
+
+    def test_turn_on_of_an_open_target_never_reaches_the_client(self, monkeypatch):
+        rig, agent = self.agent(monkeypatch)
+        for service in ("turn_on", "toggle"):
+            result, _ = self.call(agent, {"domain": "homeassistant", "service": service, "data": {"area_id": "kitchen"}},
+                                  "turn on everything in the kitchen")
+            assert result != "" and rig.calls == [], service

@@ -210,7 +210,7 @@ _SCENE_NOT_DISTINGUISHING = frozenset({
     "scene", "script", "routine", "mode", "the", "a", "an", "of", "to", "for", "and", "my", "in", "on", "at",
 })
 _OPENING_VERBS = frozenset({"unlock", "unlocks", "open", "opens", "release", "unbolt", "undo"})
-SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening; ask me when you want it."
+SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening, so ask me when you want it."
 # What a sequence step target may carry in from a model: where, what and how.
 # Everything else, the server's decision keys above all, is dropped.
 _SEQUENCE_TARGET_KEYS = ("device_type", "room", "rooms", "entity_id", "target_scope", "excluded_rooms")

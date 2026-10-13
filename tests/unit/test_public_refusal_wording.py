@@ -202,10 +202,27 @@ def test_an_owner_hears_the_template_phrase_for_a_templated_service():
     assert mp.refusal_message([_denial("templated_service", "automation")], _scope("owner")) == "I can't set that up with a template."
 
 
-def test_partial_does_not_change_a_door_phrase():
+def test_a_partial_door_refusal_says_something_was_done():
     from orchestrator import mode_permission as mp
 
-    assert mp.refusal_message([_denial("one_opening_per_request")], _scope("owner"), partial=True) == mp.ONE_DOOR_REFUSAL
+    for reason in DOOR_REASONS:
+        text = mp.refusal_message([_denial(reason)], _scope("owner"), partial=True)
+        assert text == "I did part of that. " + mp.ONE_DOOR_REFUSAL
+        assert text.startswith("I did part of that.") and "?" not in text
+    for reason, phrase in (("scheduled_opening", mp.SCHEDULED_OPENING_REFUSAL), ("templated_service", mp.TEMPLATE_REFUSAL),
+                           ("unsupported_automation_step", mp.UNSUPPORTED_STEP_REFUSAL)):
+        assert mp.refusal_message([_denial(reason)], _scope("owner"), partial=True) == "I did part of that. " + phrase
+        assert mp.refusal_message([_denial(reason)], _scope("owner")) == phrase
+
+
+def test_a_partial_refusal_stays_vetted_text():
+    from orchestrator import mode_permission as mp
+    from orchestrator.model_safe_errors import make_user_safe
+
+    for reason in mp._DOOR_REASON_ORDER:
+        for partial in (False, True):
+            text = mp.refusal_message([_denial(reason)], _scope("owner"), partial=partial)
+            assert make_user_safe(text, 403) == text, (reason, partial)
 
 
 @pytest.mark.parametrize("kind,expected", [
@@ -256,7 +273,8 @@ def test_the_reason_order_is_the_documented_one():
     from orchestrator import mode_permission as mp
 
     assert mp._DOOR_REASON_ORDER == (
-        "opening_needs_named_target", "unlock_needs_one_lock", "one_opening_per_request", "templated_service",
+        "opening_needs_named_target", "unlock_needs_one_lock", "one_opening_per_request",
+        "scheduled_opening", "templated_service", "unsupported_automation_step",
     )
     assert set(mp._DOOR_REASON_PHRASES) == set(mp._DOOR_REASON_ORDER)
 
