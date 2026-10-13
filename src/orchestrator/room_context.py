@@ -103,8 +103,33 @@ _NUMBER_IN_PARENS = re.compile(r"\((\d+)\)")
 SERVER_DECISION_KEYS: Tuple[str, ...] = (
     "decided_room", "decided_rooms", "decided_excluded", "room_label", "referent_followup",
     "decided_access", "decided_access_fp", "decided_access_aud", "decided_access_src", "decided_access_at",
-    "unprocessable",
+    "unprocessable", "unprocessable_reason",
 )
+
+# A smart-home command longer than this is refused before any model call: no
+# device command is that long, and the model prompt is sized for one that isn't.
+SMART_HOME_MAX_QUERY_CHARS = 1000
+QUERY_TOO_LONG_TEXT = "That's too long for a device command."
+UNPROCESSABLE_TEXT = "Sorry, I couldn't work out that command."
+# Why a model call gave nothing to act on: the query was over the cap, the
+# context budget could not hold the whole prompt, the answer hit its token
+# limit, the JSON was not an object, or (a backend that can't promise the whole
+# prompt was read) it did not parse.
+UNPROCESSABLE_REASONS = ("too_long", "budget", "length", "not_object", "unparseable")
+
+
+def unprocessable_intent(reason: str) -> dict:
+    """The result of a model call that can't be acted on: no device, no action,
+    and a closed ``reason``. Every consumer answers it with
+    ``unprocessable_text`` and writes nothing."""
+    return {"unprocessable": True, "unprocessable_reason": reason}
+
+
+def unprocessable_text(intent: object) -> Optional[str]:
+    """The fixed spoken answer for an unprocessable result, else None."""
+    if not isinstance(intent, dict) or not intent.get("unprocessable"):
+        return None
+    return QUERY_TOO_LONG_TEXT if intent.get("unprocessable_reason") == "too_long" else UNPROCESSABLE_TEXT
 
 
 def strip_server_keys(obj: object) -> Optional[dict]:

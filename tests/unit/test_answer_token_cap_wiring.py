@@ -28,6 +28,7 @@ NON_ANSWER = {
     ("sentence_buffer.py", "stream_with_sentence_buffering"): "unused module; takes max_tokens from its caller",
     ("smart_home_controller.py", "extract_intent"): "smart-home intent JSON, never spoken",
     ("smart_home_controller.py", "extract_sequence_intent"): "smart-home sequence JSON, never spoken",
+    ("smart_home_controller.py", "_retry_without_full_prompt"): "smart-home JSON retried once on a backend that can't honour the full-prompt demand, never spoken",
     ("smart_home_controller.py", "_llm_occupancy_reasoning"): "occupancy decision, never spoken",
     ("smart_home_controller.py", "_extract_motion_control_intent"): "smart-home intent JSON, never spoken",
 }

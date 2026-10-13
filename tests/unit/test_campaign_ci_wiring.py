@@ -52,6 +52,10 @@ GLOBS = (
     "tests/unit/test_public_refusal_wording.py",
     "tests/unit/test_llm_context_plan.py",
     "tests/unit/test_llm_router_context_wiring.py",
+    "tests/unit/test_llm_strict_callers.py",
+    "tests/unit/test_llm_direct_ollama_drift.py",
+    "tests/unit/test_model_json_strip.py",
+    "tests/unit/test_access_target_drift.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
@@ -107,6 +111,10 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_ha_door_read_timeout.py",
     "tests/unit/test_llm_context_plan.py",
     "tests/unit/test_llm_router_context_wiring.py",
+    "tests/unit/test_llm_strict_callers.py",
+    "tests/unit/test_llm_direct_ollama_drift.py",
+    "tests/unit/test_model_json_strip.py",
+    "tests/unit/test_access_target_drift.py",
     "admin/backend/tests/test_oss_profiles_context.py",
 )
 

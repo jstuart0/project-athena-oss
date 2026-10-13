@@ -16,6 +16,7 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.llm_context import ContextBudgetExceeded
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
@@ -368,14 +369,50 @@ def scene_grounded(entity_id: str, query: Optional[str], friendly_name: Optional
     return False
 
 
+class ModelOutputNotObject(ValueError):
+    """The model's JSON parsed but is not an object (a list or a scalar)."""
+
+
 def _model_object(text: str) -> Dict:
     """A model's JSON object with the server-only keys removed (the room and
-    door decisions are the server's to make). Anything that is not an object
-    is as unparseable as bad JSON."""
-    parsed = room_context.strip_server_keys(json.loads(text))
-    if parsed is None:
-        raise json.JSONDecodeError("not a JSON object", text, 0)
-    return parsed
+    door decisions are the server's to make). Raises ``json.JSONDecodeError``
+    for text that is not JSON and ``ModelOutputNotObject`` for JSON that is not
+    an object: the first keeps today's fallback, the second is unprocessable."""
+    parsed = json.loads(text)
+    stripped = room_context.strip_server_keys(parsed)
+    if stripped is None:
+        raise ModelOutputNotObject("model output is not a JSON object")
+    return stripped
+
+
+SMART_HOME_MAX_QUERY_CHARS = room_context.SMART_HOME_MAX_QUERY_CHARS
+PREV_TEXT_MAX_CHARS = 400
+PREV_INTENT_FIELD_MAX_CHARS = 100
+_full_prompt_warned = False
+
+
+def _bounded(value: object, limit: int) -> str:
+    """``value`` as text, cut to ``limit`` characters (a stored turn is input
+    from an earlier request, not a trusted size)."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return text[:limit]
+
+
+def _warn_full_prompt_is_ollama_only(model: str, reason: str) -> None:
+    """One WARNING per process: the router's whole-prompt guarantee holds only
+    on Ollama, so a smart_home_control model on MLX or a cloud backend runs
+    without it."""
+    global _full_prompt_warned
+    if _full_prompt_warned:
+        return
+    _full_prompt_warned = True
+    import structlog
+    structlog.get_logger(__name__).warning(
+        "smart_home_full_prompt_guarantee_unavailable",
+        model=model,
+        reason=reason,
+        note="the full-prompt guarantee is Ollama-only; assign smart_home_control to an Ollama model to restore it",
+    )
 
 
 def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
@@ -1411,6 +1448,34 @@ class SmartHomeController:
 
         return None
 
+    async def _retry_without_full_prompt(self, exc: ContextBudgetExceeded, **generate_kwargs) -> Optional[Dict]:
+        """A strict smart-home call was refused. Only ``unsupported_backend``
+        (MLX or a cloud model assigned to smart_home_control) is retried, once,
+        without the whole-prompt demand; its answer is then trusted only if it
+        parses and did not hit its token limit. Every other reason (over the
+        ceiling, a cut prompt, an unknown floor) gives None: the caller answers
+        "unprocessable" and writes nothing."""
+        import structlog
+        log = structlog.get_logger(__name__)
+        if exc.reason != "unsupported_backend":
+            log.warning(
+                "smart_home_llm_refused", reason=exc.reason, model=generate_kwargs.get("model"),
+                estimate=exc.plan.estimate,
+            )
+            return None
+        _warn_full_prompt_is_ollama_only(generate_kwargs.get("model"), exc.reason)
+        return await self.llm_router.generate(**generate_kwargs)
+
+    @staticmethod
+    def _answer_unusable(llm_response: Optional[Dict]) -> Optional[str]:
+        """The unprocessable reason when the model's answer can't be acted on
+        (refused, or cut off at its token limit), else None."""
+        if llm_response is None:
+            return "budget"
+        if isinstance(llm_response, dict) and llm_response.get("stop_reason") == "length":
+            return "length"
+        return None
+
     async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
                               prev_query: str = None, prev_response: str = None,
                               prev_intent_entities: Dict = None,
@@ -1488,16 +1553,23 @@ class SmartHomeController:
 
         # The model is told nothing about where the speaker is: a room it
         # returns must be one the utterance names (see ground_intent_rooms).
+        # Past the fast paths the query goes into the model prompt, whose size is
+        # planned for a device command: a longer one is refused before any call.
+        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
+            logger.info("smart_home_query_over_cap query_len=%d", len(query))
+            return room_context.unprocessable_intent("too_long")
+
         # Build conversation context for follow-ups and corrections
         conversation_context = ""
         if prev_query and prev_response:
             # Include previous intent entities so LLM knows what device was controlled
             prev_device_info = ""
             if prev_intent_entities:
-                prev_device_type = prev_intent_entities.get('device_type', 'unknown')
-                prev_room = prev_intent_entities.get('room', 'unknown')
-                prev_action = prev_intent_entities.get('action', 'unknown')
-                prev_params = prev_intent_entities.get('parameters', {})
+                field = PREV_INTENT_FIELD_MAX_CHARS
+                prev_device_type = _bounded(prev_intent_entities.get('device_type', 'unknown'), field)
+                prev_room = _bounded(prev_intent_entities.get('room', 'unknown'), field)
+                prev_action = _bounded(prev_intent_entities.get('action', 'unknown'), field)
+                prev_params = _bounded(prev_intent_entities.get('parameters', {}), field)
                 prev_device_info = f"""
 Previous device controlled: {prev_device_type} in {prev_room}
 Previous action: {prev_action}
@@ -1505,8 +1577,8 @@ Previous parameters: {prev_params}
 """
             conversation_context = f"""
 CONVERSATION CONTEXT (use this to understand corrections and follow-ups):
-Previous request: "{prev_query}"
-Previous response: "{prev_response}"
+Previous request: "{_bounded(prev_query, PREV_TEXT_MAX_CHARS)}"
+Previous response: "{_bounded(prev_response, PREV_TEXT_MAX_CHARS)}"
 {prev_device_info}
 Current request: "{query}"
 
@@ -1622,13 +1694,27 @@ Return ONLY the JSON, no other text."""
         config = await admin_client.get_component_model("smart_home_control")
         model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
 
-        # Use LLM to extract intent (llama3.1:8b better at structured output than phi3:mini)
-        llm_response = await self.llm_router.generate(
-            model=model,
-            prompt=intent_prompt,
-            temperature=0.1,
-            max_tokens=400
-        )
+        # Use LLM to extract intent (llama3.1:8b better at structured output than phi3:mini).
+        # The answer picks the device and the write, so it must come from the
+        # whole prompt: a refused or cut-off call is unprocessable, never the
+        # JSON fallback below.
+        whole_prompt_guaranteed = True
+        try:
+            llm_response = await self.llm_router.generate(
+                model=model,
+                prompt=intent_prompt,
+                temperature=0.1,
+                max_tokens=400,
+                require_full_prompt=True,
+            )
+        except ContextBudgetExceeded as exc:
+            whole_prompt_guaranteed = False
+            llm_response = await self._retry_without_full_prompt(
+                exc, model=model, prompt=intent_prompt, temperature=0.1, max_tokens=400,
+            )
+        unusable = self._answer_unusable(llm_response)
+        if unusable:
+            return room_context.unprocessable_intent(unusable)
 
         # Parse JSON response
         try:
@@ -1660,7 +1746,11 @@ Return ONLY the JSON, no other text."""
                     path="llm_coerced",
                 ).inc()
             return intent
+        except ModelOutputNotObject:
+            return room_context.unprocessable_intent("not_object")
         except json.JSONDecodeError as e:
+            if not whole_prompt_guaranteed:
+                return room_context.unprocessable_intent("unparseable")
             # 3.3(c): fallback parsing when the LLM didn't return valid
             # JSON. Never defaults to a write for a non-imperative
             # utterance -- an IMPERATIVE without explicit on/off vocabulary
@@ -1829,6 +1919,10 @@ Return ONLY the JSON, no other text."""
         import logging
         logger = logging.getLogger(__name__)
 
+        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
+            logger.info("smart_home_query_over_cap query_len=%d", len(query))
+            return room_context.unprocessable_intent("too_long")
+
         current_time = local_now().strftime("%H:%M")
 
         sequence_prompt = f"""You are a smart home assistant that creates action sequences.
@@ -1884,12 +1978,23 @@ Return ONLY valid JSON."""
 
         logger.info(f"Extracting sequence intent with model {model}")
 
-        llm_response = await self.llm_router.generate(
-            model=model,
-            prompt=sequence_prompt,
-            temperature=0.2,  # Slightly higher for creative sequences
-            max_tokens=1500   # Sequences can be longer
-        )
+        whole_prompt_guaranteed = True
+        try:
+            llm_response = await self.llm_router.generate(
+                model=model,
+                prompt=sequence_prompt,
+                temperature=0.2,  # Slightly higher for creative sequences
+                max_tokens=1500,  # Sequences can be longer
+                require_full_prompt=True,
+            )
+        except ContextBudgetExceeded as exc:
+            whole_prompt_guaranteed = False
+            llm_response = await self._retry_without_full_prompt(
+                exc, model=model, prompt=sequence_prompt, temperature=0.2, max_tokens=1500,
+            )
+        unusable = self._answer_unusable(llm_response)
+        if unusable:
+            return room_context.unprocessable_intent(unusable)
 
         # Parse response
         response_text = llm_response.get('response', '') if isinstance(llm_response, dict) else str(llm_response)
@@ -1906,7 +2011,11 @@ Return ONLY valid JSON."""
             logger.info(f"Extracted sequence with {len(sequence.get('steps', []))} steps")
             return sequence
 
+        except ModelOutputNotObject:
+            return room_context.unprocessable_intent("not_object")
         except json.JSONDecodeError as e:
+            if not whole_prompt_guaranteed:
+                return room_context.unprocessable_intent("unparseable")
             logger.error(f"Failed to parse sequence JSON: {e}")
             # Return a simple single-step sequence as fallback
             return {
@@ -2062,6 +2171,10 @@ Return ONLY valid JSON."""
             ha_permission_scope,
             refusal_message,
         )
+
+        unprocessable = room_context.unprocessable_text(intent)
+        if unprocessable is not None:
+            return unprocessable
 
         ha_client = ensure_permission_enforcing(ha_client)
 
@@ -6049,14 +6162,18 @@ Do NOT mention rooms that have no current or recent motion."""
         import logging
         logger = logging.getLogger(__name__)
 
+        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
+            logger.info("smart_home_query_over_cap query_len=%d", len(query))
+            return room_context.unprocessable_intent("too_long")
+
         # Build room context
-        room_context = ""
+        device_location = ""
         if device_room and device_room not in ["unknown", "guest"]:
-            room_context = f"\nDevice location: The user is speaking from the {device_room}. If no room is specified, use \"{device_room}\" as the room."
+            device_location = f"\nDevice location: The user is speaking from the {device_room}. If no room is specified, use \"{device_room}\" as the room."
 
         motion_prompt = f"""Extract the motion control intent from this query. Return ONLY valid JSON.
 
-Query: "{query}"{room_context}
+Query: "{query}"{device_location}
 
 CONTEXT: This controls smart lighting automation. Motion sensors detect presence and automatically turn lights on/off.
 Users may want to override this behavior temporarily.
@@ -6109,12 +6226,23 @@ Return ONLY the JSON, no other text."""
         config = await admin_client.get_component_model("smart_home_control")
         model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
 
-        llm_response = await self.llm_router.generate(
-            model=model,
-            prompt=motion_prompt,
-            temperature=0.1,
-            max_tokens=300
-        )
+        whole_prompt_guaranteed = True
+        try:
+            llm_response = await self.llm_router.generate(
+                model=model,
+                prompt=motion_prompt,
+                temperature=0.1,
+                max_tokens=300,
+                require_full_prompt=True,
+            )
+        except ContextBudgetExceeded as exc:
+            whole_prompt_guaranteed = False
+            llm_response = await self._retry_without_full_prompt(
+                exc, model=model, prompt=motion_prompt, temperature=0.1, max_tokens=300,
+            )
+        unusable = self._answer_unusable(llm_response)
+        if unusable:
+            return room_context.unprocessable_intent(unusable)
 
         try:
             text = llm_response.get("response", "").strip()
@@ -6128,7 +6256,11 @@ Return ONLY the JSON, no other text."""
             logger.info("Motion control intent extracted: keys=%s", sorted(intent.keys()))
             return intent
 
+        except ModelOutputNotObject:
+            return room_context.unprocessable_intent("not_object")
         except json.JSONDecodeError as e:
+            if not whole_prompt_guaranteed:
+                return room_context.unprocessable_intent("unparseable")
             logger.error(f"Failed to parse motion control intent: {e}")
             # Fallback to basic parsing
             query_lower = query.lower()

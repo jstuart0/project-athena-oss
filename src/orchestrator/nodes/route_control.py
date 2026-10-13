@@ -544,6 +544,18 @@ def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
     )
 
 
+def _answer_unprocessable(state: OrchestratorState, result: Any) -> bool:
+    """When a model call gave nothing to act on (over the query cap, a refused
+    or cut-off prompt, JSON that isn't an object), answer with the fixed phrase
+    and tell the caller to stop: nothing is written, nothing is stored."""
+    refusal = room_context.unprocessable_text(result)
+    if refusal is None:
+        return False
+    state.answer = refusal
+    logger.info("smart_control_unprocessable", reason=result.get("unprocessable_reason"))
+    return True
+
+
 async def _execute_and_record(
     state: OrchestratorState, scope, intent: Dict[str, Any], *, original_query: str,
     uk: UtteranceClassification, foreign_pending: bool, store_query: str,
@@ -552,6 +564,8 @@ async def _execute_and_record(
     record what happened: a refusal, a "which room?" question, a fan-out
     prompt, or the result. ``original_query`` is what the gate and the room
     decision read; ``store_query`` is what a stored context remembers."""
+    if _answer_unprocessable(state, intent):
+        return
     device_type = intent.get('device_type', 'light')
 
     # Coarse domain pre-check (D14): refuse before execute_intent when the
@@ -617,7 +631,10 @@ async def _execute_and_record(
         logger.info("smart_control_executed", action=intent.get('action'), device_type=device_type)
 
         # Store context for future reference using new context system
-        if state.session_id and not foreign_pending and "couldn't" not in result.lower():
+        if (
+            state.session_id and not foreign_pending and "couldn't" not in result.lower()
+            and len(store_query or "") <= room_context.SMART_HOME_MAX_QUERY_CHARS
+        ):
             await store_conversation_context(
                 session_id=state.session_id,
                 intent="control",
@@ -1019,6 +1036,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         extracted = await smart_controller.extract_intent(
                             extraction_query, device_room=state.room, utterance=uk
                         )
+                        if _answer_unprocessable(state, extracted):
+                            state.node_timings["route_control"] = time.time() - start
+                            return state
                         sq_device_type = extracted.get("device_type")
                         sq_room = sq_room or extracted.get("room")
                     if not sq_device_type:
@@ -1141,6 +1161,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         device_room=state.room
                     )
 
+                    if _answer_unprocessable(state, sequence_data):
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
+
                     if sequence_data and sequence_data.get("steps"):
                         steps = sequence_data["steps"]
                         acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
@@ -1242,6 +1266,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         prev_intent_entities=prev_intent_for_llm,
                         utterance=uk,
                     )
+                    if _answer_unprocessable(state, new_intent):
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
                     new_room = new_intent.get('room')
 
                     # Merge previous context with new info
@@ -1345,6 +1372,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
                     intent = await smart_controller.extract_intent(state.query, device_room=state.room, utterance=uk)
+                    if _answer_unprocessable(state, intent):
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
                     # Some extract_intent shortcuts answer before the LLM
                     # (and its get_status coercion) with a write action; a
                     # question is always a read, whichever path produced

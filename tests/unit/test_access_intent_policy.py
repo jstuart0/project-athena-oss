@@ -473,11 +473,17 @@ class TestKeyHygiene:
         got = asyncio.run(controller._extract_motion_control_intent("disable motion in the office"))
         assert got["action"] == "disable_motion" and not set(FORGED) & set(got)
 
-    @pytest.mark.parametrize("junk", ["[1, 2]", '"unlock"', "42", "null", "{not json"])
-    def test_a_model_that_returns_a_non_object_is_unparseable_not_a_crash(self, stub_admin, junk):
+    @pytest.mark.parametrize("junk", ["[1, 2]", '"unlock"', "42", "null"])
+    def test_a_model_that_returns_a_non_object_is_unprocessable_not_a_crash(self, stub_admin, junk):
         controller = self._controller(junk)
-        intent = asyncio.run(controller.extract_intent("turn off the lights please now"))
-        assert isinstance(intent, dict) and intent.get("action") in ("turn_off", "get_status", "turn_on")
+        # a phrasing no fast path answers, so the model's reply is what is parsed
+        intent = asyncio.run(controller.extract_intent("make the kitchen lights go on"))
+        assert intent == {"unprocessable": True, "unprocessable_reason": "not_object"}
+
+    def test_plain_unparseable_text_keeps_the_fallback(self, stub_admin):
+        controller = self._controller("{not json")
+        intent = asyncio.run(controller.extract_intent("make the kitchen lights go on"))
+        assert intent.get("action") == "turn_on" and not intent.get("unprocessable")
 
     def test_a_forged_decision_does_not_open_a_door(self, monkeypatch, stub_admin):
         """The whole path: the model forges decided_access for the back door; the
