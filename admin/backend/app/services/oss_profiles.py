@@ -189,12 +189,17 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
     ollama_default = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
     mlx_small = os.getenv("ATHENA_MLX_SMALL_MODEL", "qwen3-4b-mlx")
     mlx_large = os.getenv("ATHENA_MLX_LARGE_MODEL", "qwen3-8b-mlx")
+    # Output length is not a profile concern: callers pass max_tokens (see
+    # helpers.answer_max_tokens) and a model row's num_predict would override it
+    # for every caller of that model. Rows here set the context window
+    # (num_ctx, num_batch) and never num_predict or mirostat*; their timeouts
+    # stay at 90 s or more so a first apply never shortens one.
     profiles = {
         "ollama_qwen_small": {
             "name": "ollama_qwen_small",
             "display_name": "Ollama Qwen Small",
             "description": "Balanced default for local Ollama deployments using tuned Qwen models.",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "last_validated": "2026-04-02",
             "preferred_models": [ollama_default, "qwen3:8b"],
             "preferred_families": ["qwen3"],
@@ -209,7 +214,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "backend_type": "ollama",
                     "temperature": 0.4,
                     "max_tokens": 256,
-                    "timeout_seconds": 45,
+                    "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192, "num_batch": 256},
                 },
@@ -217,24 +222,17 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "backend_type": "ollama",
                     "temperature": 0.4,
                     "max_tokens": 256,
-                    "timeout_seconds": 45,
+                    "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {
-                        "num_ctx": 8192,
-                        "num_batch": 256,
-                        "num_predict": 256,
-                        "mirostat": 2,
-                        "mirostat_eta": 0.1,
-                        "mirostat_tau": 5.0,
-                    },
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256},
                 },
                 "qwen3:8b": {
                     "backend_type": "ollama",
                     "temperature": 0.4,
                     "max_tokens": 384,
-                    "timeout_seconds": 60,
+                    "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 8192, "num_batch": 256, "num_predict": 256},
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256},
                 },
             },
             "component_hints": {
@@ -246,7 +244,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
             "name": "mlx_qwen_hybrid",
             "display_name": "MLX Qwen Hybrid",
             "description": "Prefer MLX for low-latency local inference and fall back to Ollama for gaps.",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "last_validated": "2026-04-02",
             "preferred_models": [mlx_small, mlx_large, ollama_default, "qwen3:8b"],
             "preferred_families": ["qwen3"],
@@ -277,9 +275,9 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "backend_type": "ollama",
                     "temperature": 0.4,
                     "max_tokens": 256,
-                    "timeout_seconds": 45,
+                    "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 8192, "num_batch": 256, "num_predict": 256},
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256},
                 },
             },
             "component_hints": {
@@ -293,7 +291,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
             "name": "safe_fallback",
             "display_name": "Safe Fallback",
             "description": "Fallback profile when preferred tuned models are not available.",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "last_validated": "2026-04-02",
             "preferred_models": [ollama_default],
             "preferred_families": ["qwen3", "llama", "phi"],
@@ -308,7 +306,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "backend_type": "ollama",
                     "temperature": 0.5,
                     "max_tokens": 256,
-                    "timeout_seconds": 45,
+                    "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192},
                 },
@@ -1330,7 +1328,31 @@ async def preview_profile(db: Session, profile_name: str, mode: str) -> Dict[str
     }
 
 
-def apply_profile(db: Session, profile_name: str, mode: str, current_user: Optional[User] = None) -> Dict[str, Any]:
+# Scalar fields a new model row starts with. They come from the row the model
+# already runs on (the `_default` fallback), so the first profile apply changes
+# the context size only: it never shortens a timeout or changes sampling.
+INHERITED_MODEL_CONFIG_FIELDS = ("temperature", "max_tokens", "timeout_seconds", "keep_alive_seconds")
+
+
+def inherited_model_config_fields(default_row: Optional[ModelConfiguration], config_spec: Dict[str, Any]) -> Dict[str, Any]:
+    if default_row is not None:
+        values = {name: getattr(default_row, name) for name in INHERITED_MODEL_CONFIG_FIELDS}
+        return {name: value for name, value in values.items() if value is not None}
+    # No fallback row: take only the profile's timeout, which is at least as long.
+    return {"timeout_seconds": config_spec["timeout_seconds"]} if "timeout_seconds" in config_spec else {}
+
+
+def apply_profile(
+    db: Session,
+    profile_name: str,
+    mode: str,
+    current_user: Optional[User] = None,
+    *,
+    keep_active_profile: bool = False,
+) -> Dict[str, Any]:
+    """Apply a shipped profile. `keep_active_profile` (the startup seed) writes
+    the active-profile setting only when none is set; an explicit apply always
+    makes the applied profile active."""
     profiles = profile_registry()
     if profile_name not in profiles:
         raise ValueError(f"Unknown profile '{profile_name}'")
@@ -1397,12 +1419,16 @@ def apply_profile(db: Session, profile_name: str, mode: str, current_user: Optio
             )
             db.add(backend)
             db.flush()
+            backend_map[decision.selected_model] = backend
 
         config_spec = profile.get("model_configurations", {}).get(decision.selected_model) or profile.get("model_configurations", {}).get("_default")
         if config_spec:
             config = model_config_map.get(decision.selected_model)
             if not config:
-                config = ModelConfiguration(model_name=decision.selected_model)
+                config = ModelConfiguration(
+                    model_name=decision.selected_model,
+                    **inherited_model_config_fields(model_config_map.get("_default"), config_spec),
+                )
                 db.add(config)
                 db.flush()
                 # Several components select the same model: reuse the row just
@@ -1412,7 +1438,8 @@ def apply_profile(db: Session, profile_name: str, mode: str, current_user: Optio
                 apply_owned_field(config, field_name, desired, mode, ownership, "ModelConfiguration", decision.selected_model, profile_name, touched)
 
     set_ownership_map(db, ownership)
-    set_setting_text(db, ACTIVE_PROFILE_KEY, profile_name, "Currently active OSS initialization profile.")
+    if not (keep_active_profile and previous_active_profile):
+        set_setting_text(db, ACTIVE_PROFILE_KEY, profile_name, "Currently active OSS initialization profile.")
     last_run = {
         "last_action": "apply_profile",
         "mode": mode,

@@ -45,7 +45,17 @@ def db(monkeypatch):
 
 def seed_migration_050(db):
     for name, options in MIGRATION_050_ROWS.items():
-        db.add(ModelConfiguration(model_name=name, backend_type="ollama", ollama_options=options))
+        db.add(
+            ModelConfiguration(
+                model_name=name,
+                backend_type="auto" if name == "_default" else "ollama",
+                temperature=0.7,
+                max_tokens=4096,
+                timeout_seconds=90,
+                keep_alive_seconds=-1,
+                ollama_options=options,
+            )
+        )
     db.commit()
 
 
@@ -73,11 +83,29 @@ def test_every_shipped_ollama_row_holds_the_smart_home_prompt(monkeypatch):
     assert set(checked.values()) == {8192}, checked
 
 
+def test_shipped_rows_set_the_context_only_never_output_caps_or_short_timeouts(monkeypatch):
+    # Output length comes from callers (answer_max_tokens); a row's num_predict
+    # would override it for every caller of that model.
+    monkeypatch.setenv("ATHENA_DEFAULT_MODEL", DEFAULT_MODEL)
+    seen = 0
+    for name, profile in oss_profiles.profile_registry().items():
+        for model, spec in profile["model_configurations"].items():
+            if spec.get("backend_type") != "ollama":
+                continue
+            seen += 1
+            options = spec["ollama_options"]
+            assert "num_predict" not in options, (name, model)
+            assert not [key for key in options if key.startswith("mirostat")], (name, model)
+            assert set(options) <= {"num_ctx", "num_batch"}, (name, model)
+            assert spec["timeout_seconds"] >= 90, (name, model)
+    assert seen >= 3
+
+
 def test_profile_versions_moved(monkeypatch):
     registry = oss_profiles.profile_registry()
-    assert registry[PROFILE]["version"] == "1.2.0"
-    assert registry["mlx_qwen_hybrid"]["version"] == "1.1.0"
-    assert registry["safe_fallback"]["version"] == "1.1.0"
+    assert registry[PROFILE]["version"] == "1.3.0"
+    assert registry["mlx_qwen_hybrid"]["version"] == "1.2.0"
+    assert registry["safe_fallback"]["version"] == "1.2.0"
 
 
 def test_a_fresh_install_gets_8192_on_its_default_model_row(db, monkeypatch):
@@ -129,3 +157,128 @@ def test_a_profile_owned_row_at_2048_is_upgraded_by_reconcile(db, monkeypatch):
     db.commit()
     oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
     assert options_of(db, DEFAULT_MODEL)["num_ctx"] == 8192
+
+
+NEW_ROW_OPTIONS = {"num_ctx": 8192, "num_batch": 256}
+
+
+def default_row(db):
+    db.expire_all()
+    return db.query(ModelConfiguration).filter(ModelConfiguration.model_name == DEFAULT_MODEL).one()
+
+
+def test_the_first_apply_on_an_install_without_a_default_model_row_changes_context_only(db, monkeypatch):
+    seed_migration_050(db)
+    oss_profiles.set_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY, "safe_fallback", "an operator's choice")
+    assert options_of(db, DEFAULT_MODEL) is None
+    startup(monkeypatch, DEFAULT_MODEL)
+    row = default_row(db)
+    assert row.ollama_options == NEW_ROW_OPTIONS  # no num_predict, no mirostat
+    # everything else is what the model already ran on: the _default fallback row
+    assert (float(row.temperature), row.max_tokens, row.timeout_seconds, row.keep_alive_seconds) == (0.7, 4096, 90, -1)
+    assert row.timeout_seconds >= 90
+
+
+def test_startup_leaves_an_existing_active_profile_alone(db, monkeypatch):
+    seed_migration_050(db)
+    oss_profiles.set_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY, "safe_fallback", "an operator's choice")
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert oss_profiles.get_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY) == "safe_fallback"
+
+
+def test_startup_sets_the_active_profile_when_there_is_none(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert oss_profiles.get_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY) == PROFILE
+
+
+def test_an_explicit_apply_still_makes_the_profile_active(db, monkeypatch):
+    seed_migration_050(db)
+    oss_profiles.set_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY, "safe_fallback", "an operator's choice")
+    startup(monkeypatch, DEFAULT_MODEL)
+    oss_profiles.apply_profile(db, PROFILE, "fill_missing_only")
+    assert oss_profiles.get_setting_text(db, oss_profiles.ACTIVE_PROFILE_KEY) == PROFILE
+
+
+def test_reconcile_on_a_managed_row_replaces_its_options(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    default_row(db).ollama_options = {"num_ctx": 2048, "num_predict": 256, "mirostat": 2}
+    db.commit()
+    oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
+    assert options_of(db, DEFAULT_MODEL) == NEW_ROW_OPTIONS
+
+
+def test_reconcile_leaves_a_detached_field_untouched(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    path = oss_profiles.ownership_key("ModelConfiguration", DEFAULT_MODEL, "ollama_options")
+    ownership = oss_profiles.get_ownership_map(db)
+    oss_profiles.mark_detached(ownership, path, PROFILE)
+    oss_profiles.set_ownership_map(db, ownership)
+    db.commit()
+    operator = {"num_ctx": 4096, "num_predict": 512}
+    default_row(db).ollama_options = dict(operator)
+    db.commit()
+    oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
+    assert options_of(db, DEFAULT_MODEL) == operator
+
+
+@pytest.mark.parametrize("mode", ["fill_missing_only", "reconcile_profile"])
+def test_an_apply_never_shortens_an_existing_timeout(db, monkeypatch, mode):
+    seed_migration_050(db)
+    db.add(
+        ModelConfiguration(
+            model_name=DEFAULT_MODEL, backend_type="ollama", timeout_seconds=120, ollama_options={}, max_tokens=512
+        )
+    )
+    db.add(ModelConfiguration(model_name="qwen3:8b", backend_type="ollama", timeout_seconds=300, ollama_options={"num_ctx": 2048}))
+    db.commit()
+    startup(monkeypatch, DEFAULT_MODEL)
+    oss_profiles.apply_profile(db, PROFILE, mode)
+    db.expire_all()
+    rows = {r.model_name: r for r in db.query(ModelConfiguration).all()}
+    assert rows[DEFAULT_MODEL].timeout_seconds == 120 and rows[DEFAULT_MODEL].max_tokens == 512
+    assert rows["qwen3:8b"].timeout_seconds == 300
+    assert all(r.timeout_seconds >= 90 for r in rows.values())
+
+
+def test_components_sharing_a_model_with_no_backend_row_create_one_backend(db, monkeypatch):
+    monkeypatch.setenv("ATHENA_DEFAULT_MODEL", DEFAULT_MODEL)
+    oss_profiles.set_setting_json(
+        db,
+        "_oss_cached_capabilities",
+        [
+            {
+                "backend_key": "ollama:http://ollama.test:11434",
+                "backend_type": "ollama",
+                "endpoint_url": "http://ollama.test:11434",
+                "display_name": "Ollama",
+                "healthy": True,
+                "status": "configured",
+                "supports_install_action": True,
+                "supports_hot_reload": False,
+                "models": [
+                    {
+                        "name": DEFAULT_MODEL,
+                        "backend_type": "ollama",
+                        "endpoint_url": "http://ollama.test:11434",
+                        "family": "qwen3",
+                        "status": "configured",
+                        "installability_state": "configured",
+                        "supports_runtime_options": True,
+                        "supports_hot_reload": False,
+                        "backend_key": "ollama:http://ollama.test:11434",
+                    }
+                ],
+                "errors": [],
+            }
+        ],
+        "cached capabilities",
+    )
+    db.commit()
+    result = oss_profiles.apply_profile(db, PROFILE, "fill_missing_only")
+    assignments = result["assignment_plan"]["component_assignments"]
+    selected = [d for d in (assignments.values() if isinstance(assignments, dict) else assignments) if d["selected_model"] == DEFAULT_MODEL]
+    assert len(selected) >= 2
+    assert db.query(oss_profiles.LLMBackend).filter(oss_profiles.LLMBackend.model_name == DEFAULT_MODEL).count() == 1
