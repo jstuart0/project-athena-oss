@@ -96,6 +96,49 @@ _STRIP_DEVICE_NOUNS = frozenset({"light", "lights", "lamp", "lamps", "group", "a
 _NUMBER_IN_PARENS = re.compile(r"\((\d+)\)")
 
 
+# What only the server may write onto an intent or a sequence step target: the
+# room decision, the door decision, and the "could not be processed" marker.
+# Model output never carries them (``strip_server_keys`` drops them right after
+# every parse), so a model cannot decide where, or which door, a command acts.
+SERVER_DECISION_KEYS: Tuple[str, ...] = (
+    "decided_room", "decided_rooms", "decided_excluded", "room_label", "referent_followup",
+    "decided_access", "decided_access_fp", "decided_access_aud", "decided_access_src", "decided_access_at",
+    "unprocessable",
+)
+
+
+def strip_server_keys(obj: object) -> Optional[dict]:
+    """A model's parsed JSON with every ``SERVER_DECISION_KEYS`` entry removed,
+    from the object itself and from each step target of a sequence. Anything
+    that is not a JSON object (a list, a scalar) gives None: an unparseable
+    result, never a crash. Non-object steps are dropped and a non-object
+    target becomes empty."""
+    if not isinstance(obj, dict):
+        return None
+    for key in SERVER_DECISION_KEYS:
+        obj.pop(key, None)
+    steps = obj.get("steps")
+    if "steps" in obj:
+        if not isinstance(steps, list):
+            obj["steps"] = []
+        else:
+            kept = []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                for key in SERVER_DECISION_KEYS:
+                    step.pop(key, None)
+                target = step.get("target")
+                if isinstance(target, dict):
+                    for key in SERVER_DECISION_KEYS:
+                        target.pop(key, None)
+                else:
+                    step["target"] = {}
+                kept.append(step)
+            obj["steps"] = kept
+    return obj
+
+
 def spoken_label(name: str) -> str:
     """How a room is said aloud: its name lower-cased, ``(2)`` read as ``2``."""
     return " ".join(_NUMBER_IN_PARENS.sub(r"\1", name or "").lower().split())
