@@ -11,6 +11,7 @@ import asyncio
 import contextvars
 import functools
 import httpx
+import json
 import time
 from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from shared.llm_context import (
     ContextMarks,
     ContextPlan,
     ContextSettings,
+    context_floor,
     estimate_tokens,
     plan_context,
     truncation_suspected,
@@ -259,7 +261,9 @@ OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
 OLLAMA_READ_TIMEOUT_RETRY_BUDGET_THRESHOLD = 0.5
 
 
-async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
+async def prewarm_ollama_models(
+    model_names: List[str], *, num_ctx_by_model: Optional[Dict[str, int]] = None
+) -> Dict[str, bool]:
     """ATHENA-47: pre-warm Ollama by firing a tiny generation per configured model.
 
     Loads model weights into Ollama's memory at startup so the first user query
@@ -267,16 +271,25 @@ async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
     do not raise. Called from orchestrator lifespan as a background task so it
     does NOT block readiness.
 
+    `num_ctx_by_model` carries the context each model's real calls send
+    (`LLMRouter.context_for`), so the warm load is the one later requests
+    reuse; a model without an entry is warmed as before, with no `num_ctx`.
+
     Returns: {model_name: success_bool}
     """
     if not model_names:
         return {}
+    num_ctx_by_model = num_ctx_by_model or {}
     endpoint_url = get_config().ollama_url
     results: Dict[str, bool] = {}
     timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
     async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
         for model in model_names:
             t0 = time.monotonic()
+            options: Dict[str, Any] = {"num_predict": 1}
+            warm_ctx = valid_ctx(num_ctx_by_model.get(model))
+            if warm_ctx is not None:
+                options["num_ctx"] = warm_ctx
             try:
                 resp = await client.post(
                     "/api/generate",
@@ -284,7 +297,7 @@ async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
                         "model": model,
                         "prompt": ".",
                         "stream": False,
-                        "options": {"num_predict": 1},
+                        "options": options,
                         "keep_alive": -1,
                     },
                 )
@@ -302,6 +315,21 @@ async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
                     error_type=type(e).__name__,
                 )
     return results
+
+
+_CONTEXT_REJECTION_MARKERS = ("exceed_context_size", "exceeds the available context size")
+
+
+def _is_context_rejection(response: httpx.Response) -> bool:
+    """Whether a 400 body says the request exceeded the context size: the JSON
+    error's type or message (a string or an object) carries a known marker."""
+    try:
+        error = response.json().get("error")
+    except (ValueError, AttributeError):
+        return False
+    parts = [error] if isinstance(error, str) else [error.get("type"), error.get("message")] if isinstance(error, dict) else []
+    text = " ".join(part for part in parts if isinstance(part, str)).lower()
+    return any(marker in text for marker in _CONTEXT_REJECTION_MARKERS)
 
 
 class BackendType(str, Enum):
@@ -480,11 +508,52 @@ class LLMRouter:
                 raise ContextBudgetExceeded(plan, "floor_unknown")
         return plan
 
+    async def context_for(self, model: str) -> Optional[int]:
+        """The `num_ctx` a default call to `model` sends right now: the row's
+        value (else the operator-stated server default) raised to the largest
+        size a strict call has made sticky. None when no floor is known, in
+        which case nothing is sent."""
+        model_config = await self._get_model_config(model)
+        floor = context_floor((model_config.get("ollama_options") or {}).get("num_ctx"), self._context_settings())
+        if floor is None:
+            return None
+        return max(floor, self._context_marks.get(model, floor))
+
+    def _check_tool_result(
+        self, model: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], data: Dict[str, Any]
+    ) -> None:
+        """Detection only (D5): the tool path sends no `num_ctx`, so it runs at
+        the server's default. Reports a cut-off prompt when that default is
+        known; never raises and never changes what is sent."""
+        server_default = self._context_settings().server_default
+        if server_default <= 0:
+            return
+        estimate = estimate_tokens(json.dumps([messages, tools], default=str))
+        plan = ContextPlan(
+            send=None, effective=server_default, estimate=estimate, reserve=0,
+            outcome="unchanged", floor=server_default,
+        )
+        prompt_eval_count = _count_or_none(data.get("prompt_eval_count"))
+        if not truncation_suspected(plan, prompt_eval_count):
+            return
+        record_llm_context("tools", "truncation_suspected", model)
+        logger.warning(
+            "llm_prompt_truncation_suspected",
+            model=model,
+            path="tools",
+            estimate=estimate,
+            server_default=server_default,
+            prompt_eval_count=prompt_eval_count,
+            load_duration=data.get("load_duration"),
+            strict=False,
+        )
+
     def _note_sent_context(self, model: str, payload: Dict[str, Any]) -> None:
         # Only generate and stream sends are seen here. The tool path sends no
         # num_ctx (D5), so a model shared by both paths can reload on the
-        # generate/tool switch without moving athena_llm_context_changes_total.
-        # Phase 6 adds detection on the tool path.
+        # generate/tool switch without moving athena_llm_context_changes_total;
+        # the tool path reports a cut prompt (`_check_tool_result`) and a
+        # backend refusal (`_note_tool_rejection`) instead.
         sent = valid_ctx(payload.get("options", {}).get("num_ctx"))
         if sent is None:
             return
@@ -1399,6 +1468,15 @@ class LLMRouter:
             logger.error("google_tool_calling_error", model=model, error=str(e), request_id=request_id)
             raise
 
+    @staticmethod
+    def _note_tool_rejection(model: str, response: httpx.Response) -> None:
+        """Count and log an HTTP 400 that says the prompt exceeds the context.
+        The caller re-raises through `raise_for_status`; the body is never logged."""
+        if response.status_code != 400 or not _is_context_rejection(response):
+            return
+        record_llm_context("tools", "rejected_by_backend", model)
+        logger.warning("llm_context_rejected_by_backend", model=model, path="tools", status=400)
+
     async def _generate_ollama_with_tools(
         self,
         model: str,
@@ -1471,8 +1549,10 @@ class LLMRouter:
                     model=model,
                 )
 
+            self._note_tool_rejection(model, response)
             response.raise_for_status()
             data = response.json()
+            self._check_tool_result(model, messages, tools, data)
 
             # Extract message
             message = data.get("message", {})

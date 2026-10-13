@@ -497,3 +497,144 @@ class TestAutoFallback:
         wire.generate(strict=True)
         assert mlx_calls == []
         assert wire.requests[0]["options"]["num_ctx"] == 8192
+
+
+def tool_reply(prompt_eval_count=500, load_duration=123456):
+    return httpx.Response(
+        200,
+        json={
+            "message": {"role": "assistant", "content": "ok"}, "done": True, "done_reason": "stop",
+            "prompt_eval_count": prompt_eval_count, "eval_count": 5, "load_duration": load_duration,
+        },
+    )
+
+
+class TestToolPathDetection:
+    """D5: the tool path sends no num_ctx and only detects."""
+
+    @staticmethod
+    def tools(wire, prompt=MARKER):
+        return run(
+            wire.router.generate_with_tools(
+                model=MODEL, messages=[{"role": "user", "content": prompt}], tools=[], backend="ollama",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"error": {"type": "exceed_context_size_error", "message": "the request exceeds the available context size"}},
+            {"error": {"message": "request exceeds the available context size (MARKER-BODY)"}},
+            {"error": "the request exceeds the available context size: " + MARKER},
+        ],
+        ids=["type", "message", "string"],
+    )
+    def test_a_context_400_is_counted_logged_without_the_body_and_reraised(self, monkeypatch, logs, error):
+        wire = Wire(monkeypatch, responder=lambda body: httpx.Response(400, json=error))
+        before = context_count("rejected_by_backend", path="tools")
+        with pytest.raises(httpx.HTTPStatusError):
+            self.tools(wire)
+        assert context_count("rejected_by_backend", path="tools") - before == 1
+        rejected = [e for e in logs if e["event"] == "llm_context_rejected_by_backend"]
+        assert len(rejected) == 1 and rejected[0]["path"] == "tools"
+        assert MARKER not in json.dumps(logs, default=str) and "MARKER-BODY" not in json.dumps(logs, default=str)
+        assert len(wire.requests) == 1, "nothing is retried or resized"
+        assert "num_ctx" not in wire.requests[0]["options"]
+
+    @pytest.mark.parametrize(
+        "status,error",
+        [
+            (400, {"error": "invalid request"}),
+            (400, {"detail": "no error key"}),
+            (500, {"error": "the request exceeds the available context size"}),
+        ],
+        ids=["other-400", "no-error-key", "500-with-marker"],
+    )
+    def test_other_failures_are_not_classified_as_context(self, monkeypatch, status, error):
+        wire = Wire(monkeypatch, responder=lambda body: httpx.Response(status, json=error))
+        before = context_count("rejected_by_backend", path="tools")
+        with pytest.raises(httpx.HTTPStatusError):
+            self.tools(wire)
+        assert context_count("rejected_by_backend", path="tools") == before
+
+    def test_a_non_json_400_is_not_classified_and_still_raises(self, monkeypatch):
+        wire = Wire(monkeypatch, responder=lambda body: httpx.Response(400, text="exceeds the available context size"))
+        before = context_count("rejected_by_backend", path="tools")
+        with pytest.raises(httpx.HTTPStatusError):
+            self.tools(wire)
+        assert context_count("rejected_by_backend", path="tools") == before
+
+    def test_a_cut_prompt_against_a_known_server_default_is_reported(self, monkeypatch, logs):
+        configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=4096)
+        # rule (a): the count sits on 4096 // 2 + 2 while the estimate is above 4096
+        wire = Wire(monkeypatch, responder=lambda body: tool_reply(2050))
+        before = context_count("truncation_suspected", path="tools")
+        result = self.tools(wire, prompt="a" * 14000)
+        assert result["content"] == "ok", "detection only: the answer is returned"
+        assert context_count("truncation_suspected", path="tools") - before == 1
+        entry = next(e for e in logs if e["event"] == "llm_prompt_truncation_suspected")
+        assert entry["path"] == "tools" and entry["load_duration"] == 123456 and entry["prompt_eval_count"] == 2050
+        assert "num_ctx" not in wire.requests[0]["options"]
+
+    def test_a_whole_prompt_is_not_reported(self, monkeypatch):
+        configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=4096)
+        wire = Wire(monkeypatch, responder=lambda body: tool_reply(4000))
+        before = context_count("truncation_suspected", path="tools")
+        self.tools(wire, prompt="a" * 14000)
+        assert context_count("truncation_suspected", path="tools") == before
+
+    def test_with_no_known_server_default_nothing_is_reported(self, monkeypatch):
+        # 100 reported tokens against ~5,000 estimated is a cut prompt by the ratio rule
+        # (as the previous test shows with a known default), so only the unknown
+        # default keeps it from being reported
+        wire = Wire(monkeypatch, responder=lambda body: tool_reply(100))
+        before = context_count("truncation_suspected", path="tools")
+        self.tools(wire, prompt="a" * 14000)
+        assert context_count("truncation_suspected", path="tools") == before
+
+    def test_the_ratio_rule_reports_with_a_known_default(self, monkeypatch):
+        configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=65536)
+        wire = Wire(monkeypatch, responder=lambda body: tool_reply(100))
+        before = context_count("truncation_suspected", path="tools")
+        self.tools(wire, prompt="a" * 14000)
+        assert context_count("truncation_suspected", path="tools") - before == 1
+
+
+class TestPrewarmAndContextFor:
+    @staticmethod
+    def prewarm(wire, models, **kwargs):
+        return run(llm_router_module.prewarm_ollama_models(models, **kwargs))
+
+    def test_prewarm_sends_the_context_the_real_calls_send(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        assert self.prewarm(wire, [MODEL], num_ctx_by_model={MODEL: 8192}) == {MODEL: True}
+        assert wire.requests[0]["options"] == {"num_predict": 1, "num_ctx": 8192}
+
+    @pytest.mark.parametrize("value", [None, 0, -5, True, "8192"], ids=repr)
+    def test_prewarm_ignores_a_missing_or_invalid_size(self, monkeypatch, value):
+        wire = Wire(monkeypatch)
+        self.prewarm(wire, [MODEL], num_ctx_by_model={MODEL: value})
+        assert wire.requests[0]["options"] == {"num_predict": 1}
+
+    def test_prewarm_without_a_map_is_unchanged(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        self.prewarm(wire, [MODEL, "other:1b"])
+        assert [r["options"] for r in wire.requests] == [{"num_predict": 1}, {"num_predict": 1}]
+
+    def test_context_for_is_the_row_until_a_strict_call_makes_a_larger_size_sticky(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        assert run(wire.router.context_for(MODEL)) == 2048
+        wire.generate(strict=True)
+        assert run(wire.router.context_for(MODEL)) == 8192, "the high-water mark beats the row"
+        assert run(wire.router.context_for("other:1b")) == 2048, "marks are per model"
+
+    def test_context_for_falls_back_to_the_server_default_and_is_none_when_unknown(self, monkeypatch):
+        wire = Wire(monkeypatch, row={"num_predict": 384})
+        assert run(wire.router.context_for(MODEL)) is None
+        configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=65536)
+        assert run(wire.router.context_for(MODEL)) == 65536
+
+    def test_context_for_sends_nothing(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        run(wire.router.context_for(MODEL))
+        assert wire.requests == []

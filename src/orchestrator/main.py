@@ -1240,7 +1240,12 @@ async def lifespan(app: FastAPI):
                 return
             logger.info("ollama_prewarm_starting", model_count=len(unique_models), models=unique_models)
             from shared.llm_router import prewarm_ollama_models
-            results = await prewarm_ollama_models(unique_models)
+            warm_contexts = {}
+            for _model in unique_models:
+                _ctx = await llm_router.context_for(_model)
+                if _ctx is not None:
+                    warm_contexts[_model] = _ctx
+            results = await prewarm_ollama_models(unique_models, num_ctx_by_model=warm_contexts)
             successes = sum(1 for v in results.values() if v)
             logger.info(
                 "ollama_prewarm_complete",
