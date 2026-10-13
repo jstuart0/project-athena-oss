@@ -97,6 +97,7 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_mode_permission.py",
     "tests/unit/test_public_refusal_wording.py",
     "tests/unit/test_ha_refusal_wiring.py",
+    "tests/unit/test_ha_door_read_timeout.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

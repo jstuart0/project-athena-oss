@@ -186,6 +186,17 @@ def _scope(kind):
 DOOR_REASONS = ("opening_needs_named_target", "unlock_needs_one_lock", "one_opening_per_request")
 
 
+def test_an_unreadable_door_has_its_own_phrase_and_never_asks():
+    from orchestrator import mode_permission as mp
+
+    text = mp.refusal_message([_denial("door_unverified")], _scope("owner"))
+    assert text == mp.DOOR_UNVERIFIED_REFUSAL == "I couldn't check that door right now, so I didn't open it."
+    assert "?" not in text and not MODE_WORDS.search(text)
+    assert mp.refusal_message([_denial("door_unverified")], _scope("guest")) != text
+    assert mp.refusal_message([_denial("door_unverified")], _scope("owner"), partial=True) == "I did part of that. " + text
+    assert mp.refusal_message([_denial("door_unverified"), _denial("scheduled_opening")], _scope("owner")) == text
+
+
 @pytest.mark.parametrize("reason", DOOR_REASONS)
 def test_an_owner_hears_the_one_door_phrase_for_each_door_reason(reason):
     from orchestrator import mode_permission as mp
@@ -273,7 +284,7 @@ def test_the_reason_order_is_the_documented_one():
     from orchestrator import mode_permission as mp
 
     assert mp._DOOR_REASON_ORDER == (
-        "opening_needs_named_target", "unlock_needs_one_lock", "one_opening_per_request",
+        "opening_needs_named_target", "unlock_needs_one_lock", "one_opening_per_request", "door_unverified",
         "scheduled_opening", "templated_service", "unsupported_automation_step",
     )
     assert set(mp._DOOR_REASON_PHRASES) == set(mp._DOOR_REASON_ORDER)

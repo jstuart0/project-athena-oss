@@ -1057,6 +1057,7 @@ OPENING_NEEDS_NAMED_TARGET = "opening_needs_named_target"
 UNLOCK_NEEDS_ONE_LOCK = "unlock_needs_one_lock"
 ONE_OPENING_PER_REQUEST = "one_opening_per_request"
 SCHEDULED_OPENING = "scheduled_opening"
+DOOR_UNVERIFIED = "door_unverified"
 TEMPLATED_SERVICE = "templated_service"
 UNSUPPORTED_AUTOMATION_STEP = "unsupported_automation_step"
 
@@ -1220,6 +1221,7 @@ def opening_ids(
 def _opening_denial(
     domain: str, service: str, targets: List[str], cover_access: Optional[Mapping[str, bool]],
     grouped: AbstractSet[str] = frozenset(),
+    unverified: AbstractSet[str] = frozenset(),
 ) -> Optional[str]:
     """Rules A and B for one call, on the targets as given (before the
     cross-domain fallback adds any). Returns the denial reason or None."""
@@ -1229,6 +1231,8 @@ def _opening_denial(
     if not all(_is_concrete_target(t, doors_only=doors_only) for t in targets):
         return OPENING_NEEDS_NAMED_TARGET
     ids = _opening_ids_of(domain, service, targets, cover_access)
+    if any(i in unverified for i in ids):
+        return DOOR_UNVERIFIED
     if any(i in grouped for i in ids):
         return OPENING_NEEDS_NAMED_TARGET
     if sum(1 for i in ids if i.startswith("lock.")) > 1:
@@ -1246,6 +1250,7 @@ def authorize_ha_write(
     *,
     cover_access: Optional[Mapping[str, bool]] = None,
     grouped: AbstractSet[str] = frozenset(),
+    unverified: AbstractSet[str] = frozenset(),
 ) -> HAWriteDecision:
     """Authorize one HA write (call_service-shaped) against `permissions`.
 
@@ -1266,7 +1271,9 @@ def authorize_ha_write(
     ``cover_access`` maps a cover id to whether it is a way in; a cover
     missing from it is one. ``grouped`` holds the lowercased ids of locks and
     covers whose state lists member entities: opening one is opening several
-    doors, so it is denied.
+    doors, so it is denied. ``unverified`` holds the ids whose state could
+    not be read (an error or something that isn't a state): a door that can't
+    be checked is not opened.
     """
     perms = normalize_permissions(permissions)
     targets = _extract_targets(domain, service_data)
@@ -1285,7 +1292,7 @@ def authorize_ha_write(
     if denied:
         return HAWriteDecision(allowed=False, denied_targets=tuple(denied), reason="entity_or_domain_denied")
     reason = _opening_denial(
-        str(domain).strip().lower(), str(service).strip().lower(), named_targets, cover_access, grouped
+        str(domain).strip().lower(), str(service).strip().lower(), named_targets, cover_access, grouped, unverified
     )
     if reason:
         return HAWriteDecision(allowed=False, denied_targets=tuple(named_targets), reason=reason)
@@ -1783,6 +1790,7 @@ def permission_refusal_message(
 # which-door question (room_choice) asks.
 ONE_DOOR_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 TEMPLATE_REFUSAL = "I can't set that up with a template."
+DOOR_UNVERIFIED_REFUSAL = "I couldn't check that door right now, so I didn't open it."
 SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening, so ask me when you want it."
 UNSUPPORTED_STEP_REFUSAL = "I can't set up that automation."
 # What a turn that already did something says first (xander M1): the refusal
@@ -1793,6 +1801,7 @@ _DOOR_REASON_ORDER = (
     OPENING_NEEDS_NAMED_TARGET,
     UNLOCK_NEEDS_ONE_LOCK,
     ONE_OPENING_PER_REQUEST,
+    DOOR_UNVERIFIED,
     SCHEDULED_OPENING,
     TEMPLATED_SERVICE,
     UNSUPPORTED_AUTOMATION_STEP,
@@ -1801,6 +1810,7 @@ _DOOR_REASON_PHRASES: Dict[str, str] = {
     OPENING_NEEDS_NAMED_TARGET: ONE_DOOR_REFUSAL,
     UNLOCK_NEEDS_ONE_LOCK: ONE_DOOR_REFUSAL,
     ONE_OPENING_PER_REQUEST: ONE_DOOR_REFUSAL,
+    DOOR_UNVERIFIED: DOOR_UNVERIFIED_REFUSAL,
     SCHEDULED_OPENING: SCHEDULED_OPENING_REFUSAL,
     TEMPLATED_SERVICE: TEMPLATE_REFUSAL,
     UNSUPPORTED_AUTOMATION_STEP: UNSUPPORTED_STEP_REFUSAL,
@@ -1870,6 +1880,10 @@ def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope"
 
 # D14 C: how a cover is classified before an opening call is judged.
 MAX_CLASSIFIED_DOORS = 16
+# The door read's own bound, passed to Home Assistant's HTTP client. It is
+# above ha_auth.CANARY_TIMEOUT (8 s), which already cuts a canary read off, so
+# a read that happens to be a canary behaves exactly as it did at the default.
+DOOR_READ_TIMEOUT_SECONDS = 10.0
 
 
 def _metric_domain(domain: Any) -> str:
@@ -1976,34 +1990,41 @@ class PermissionEnforcingHAClient:
         _record_denial(scope, domain, service, targets, reason)
         raise HAWritePermissionDenied(f"{domain}.{service} denied ({reason})", reason=reason)
 
-    async def _read_door(self, entity_id: str) -> Tuple[bool, bool]:
-        """``(is a way in, is a group of doors)`` from one state read. A cover
-        is a way in unless ``cover_is_access`` says otherwise; a failed or
-        malformed read makes it one and cannot show a group.
+    async def _read_door(self, entity_id: str) -> Tuple[bool, bool, bool]:
+        """``(is a way in, is a group of doors, was read)`` from one state
+        read. A cover is a way in unless ``cover_is_access`` says otherwise.
+        A read that raises, or returns something that isn't a state mapping,
+        is unverified: it could hide a group, so the opening is refused.
 
-        The read is never cut short from here: cancelling an in-flight Home
-        Assistant request would leave its auth reservation spent
-        (``unreachable_sent``), so a hung read is bounded by the channel's own
-        HTTP timeout instead (ian M4)."""
+        The read is bounded by Home Assistant's own request timeout
+        (``DOOR_READ_TIMEOUT_SECONDS``, httpx's timeout) and never cancelled
+        from here: cancelling an in-flight request would leave its auth
+        reservation spent (``unreachable_sent``)."""
         try:
-            state = await self._inner.get_state(entity_id)
+            state = await self._inner.get_state(entity_id, timeout=DOOR_READ_TIMEOUT_SECONDS)
         except Exception as exc:
             logger.warning("door_state_read_failed", error_class=type(exc).__name__)
-            return True, False
-        attributes = state.get("attributes") if isinstance(state, Mapping) else None
+            return True, False, False
+        if not isinstance(state, Mapping):
+            logger.warning("door_state_read_failed", error_class="NotAState")
+            return True, False, False
+        attributes = state.get("attributes")
         access = cover_is_access(entity_id, attributes) if entity_id.startswith("cover.") else True
-        return access, access and is_door_group(attributes)
+        return access, access and is_door_group(attributes), True
 
-    async def _classify_doors(self, door_ids: Iterable[str]) -> Tuple[Dict[str, bool], frozenset]:
+    async def _classify_doors(self, door_ids: Iterable[str]) -> Tuple[Dict[str, bool], frozenset, frozenset]:
         """One read per lock or cover (D14 C step 1), before anything is
-        checked: which covers are ways in, and which doors are groups. A door
-        past the read cap is left out, so a cover counts as a way in."""
+        checked: which covers are ways in, which doors are groups, and which
+        could not be read. A door past the read cap is left out, so a cover
+        counts as a way in."""
         ids = tuple(dict.fromkeys(door_ids))[:MAX_CLASSIFIED_DOORS]
         if not ids:
-            return {}, frozenset()
+            return {}, frozenset(), frozenset()
         reads = await asyncio.gather(*(self._read_door(i) for i in ids))
         access = {i: r[0] for i, r in zip(ids, reads)}
-        return access, frozenset(i for i, r in zip(ids, reads) if r[1])
+        grouped = frozenset(i for i, r in zip(ids, reads) if r[1])
+        unverified = frozenset(i for i, r in zip(ids, reads) if not r[2])
+        return access, grouped, unverified
 
     def _record_openings(
         self, scope: PermissionScope, domain: str, service: str, doors: Tuple[str, ...]
@@ -2037,12 +2058,15 @@ class PermissionEnforcingHAClient:
             early = authorize_ha_write(domain, service, service_data, scope.permissions)
             if not early.allowed and early.reason == "entity_or_domain_denied":
                 self._deny(scope, domain, service, early.denied_targets, early.reason)
-        cover_access, grouped = await self._classify_doors(doors) if doors else ({}, frozenset())
+        cover_access, grouped, unverified = (
+            await self._classify_doors(doors) if doors else ({}, frozenset(), frozenset())
+        )
         # No await from here to the inner call (D14 C).
         if scope.halted:
             self._deny(scope, domain, service, (), "halted_after_denial")
         decision = authorize_ha_write(
-            domain, service, service_data, scope.permissions, cover_access=cover_access, grouped=grouped
+            domain, service, service_data, scope.permissions, cover_access=cover_access, grouped=grouped,
+            unverified=unverified,
         )
         if not decision.allowed:
             self._deny(scope, domain, service, decision.denied_targets, decision.reason)
@@ -2057,7 +2081,7 @@ class PermissionEnforcingHAClient:
         if scope.halted:
             self._deny(scope, "automation", "create", (), "halted_after_denial")
         covers = automation_opening_cover_targets(config)
-        cover_access, _ = await self._classify_doors(covers) if covers else ({}, frozenset())
+        cover_access, _, _ = await self._classify_doors(covers) if covers else ({}, frozenset(), frozenset())
         # No await from here to the inner call (D14 C).
         if scope.halted:
             self._deny(scope, "automation", "create", (), "halted_after_denial")

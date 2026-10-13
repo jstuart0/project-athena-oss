@@ -191,6 +191,10 @@ class Rig:
         self.controller = shc.SmartHomeController(entity_manager=self.manager, llm_router=MagicMock())
         self.raw = MagicMock()
         self.raw.call_service = AsyncMock(return_value={"ok": True})
+        # The guard reads a lock's or cover's state before it opens one.
+        self.raw.get_state = AsyncMock(
+            side_effect=lambda entity_id, **kw: (self.manager._entities_cache or {}).get(entity_id, {"state": "unknown", "attributes": {}})
+        )
         self.gate_calls = []
         real_gate = write_fanout.gate
 

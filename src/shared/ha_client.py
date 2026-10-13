@@ -41,10 +41,11 @@ class HomeAssistantClient:
         """Check if Home Assistant is configured."""
         return self._channel.configured
 
-    async def get_state(self, entity_id: str) -> Dict[str, Any]:
-        """Get the state of an entity."""
+    async def get_state(self, entity_id: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Get the state of an entity. ``timeout`` replaces the channel's
+        per-phase default for this read (httpx's own timeout, not a cancel)."""
         self._check_configured()
-        response = await self._channel.request("GET", f"/api/states/{entity_id}")
+        response = await self._channel.request("GET", f"/api/states/{entity_id}", timeout=timeout)
         response.raise_for_status()
         return response.json()
 

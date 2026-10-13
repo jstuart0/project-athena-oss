@@ -73,7 +73,7 @@ class DoorRig(Rig):
     def __init__(self, monkeypatch, states, *, areas=None, placement=None, **kw):
         super().__init__(monkeypatch, states=states, registry=False, **kw)
         # The guard reads a cover's state to tell a blind from a garage door.
-        self.raw.get_state = AsyncMock(side_effect=lambda entity_id: states[entity_id])
+        self.raw.get_state = AsyncMock(side_effect=lambda entity_id, **kw: states[entity_id])
         if areas:
             snapshot = hr.RegistrySnapshot.from_raw(registry_raw(areas, placement or {}), fetched_at=2.0)
             self.registry._snapshot = snapshot

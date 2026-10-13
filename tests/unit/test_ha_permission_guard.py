@@ -903,14 +903,16 @@ class DoorClient:
         self.fail_writes = fail_writes
         self.calls = []
         self.reads = []
+        self.timeouts = []
         self.opened_when_called = []
 
-    async def get_state(self, entity_id):
+    async def get_state(self, entity_id, **kw):
+        self.timeouts.append(kw.get("timeout"))
         self.reads.append(entity_id)
         await asyncio.sleep(self.read_delay)
         if self.fail_reads:
             raise RuntimeError("read failed")
-        return self.states[entity_id]
+        return self.states.get(entity_id, {"state": "unknown", "attributes": {}})
 
     async def call_service(self, domain, service, data=None):
         scope = mp.current_ha_scope()
@@ -1028,14 +1030,15 @@ class TestPermissionScopeOpened:
                 _run(_unlock(guard, "lock.back_door"))
             assert excinfo.value.reason == ONE_PER_REQUEST
 
-    def test_a_get_state_failure_counts_the_cover_as_a_way_in(self):
+    def test_a_get_state_failure_refuses_the_cover_opening(self):
         client = DoorClient(fail_reads=True)
         guard = mp.PermissionEnforcingHAClient(client)
         with _owner_scope() as scope:
-            _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_a"}))
-            assert scope.opened == {"cover.blind_a"}
-            with pytest.raises(mp.HAWritePermissionDenied):
-                _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_b"}))
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(guard.call_service("cover", "open_cover", {"entity_id": "cover.blind_a"}))
+            assert excinfo.value.reason == mp.DOOR_UNVERIFIED
+            assert scope.opened == set()
+        assert client.calls == []
 
     def test_two_blinds_in_separate_calls_never_count(self):
         client = DoorClient({"cover.blind_a": BLIND_STATE, "cover.blind_b": BLIND_STATE})
@@ -1046,8 +1049,8 @@ class TestPermissionScopeOpened:
             assert scope.opened == set()
         assert len(client.calls) == 2
 
-    @pytest.mark.parametrize("state", [None, "garbled", {"state": "closed"}, {"attributes": None}, {"attributes": {"device_class": 7}}])
-    def test_an_unreadable_class_is_a_way_in(self, state):
+    @pytest.mark.parametrize("state", [{"state": "closed"}, {"attributes": None}, {"attributes": {"device_class": 7}}])
+    def test_an_unclassifiable_state_is_a_way_in(self, state):
         client = DoorClient({"cover.x": state})
         guard = mp.PermissionEnforcingHAClient(client)
         with _owner_scope() as scope:
@@ -1454,7 +1457,7 @@ class TestCoverClassificationMatchesTheResolver:
         class SlowRead(DoorClient):
             cancelled = False
 
-            async def get_state(self, entity_id):
+            async def get_state(self, entity_id, **kw):
                 try:
                     await asyncio.sleep(0.05)
                 except asyncio.CancelledError:
@@ -1506,12 +1509,49 @@ class TestDoorGroups:
             _run(_unlock(guard, "lock.front"))
         assert len(client.calls) == 1
 
-    def test_a_failed_read_cannot_show_a_group_so_the_unlock_proceeds(self):
+    def test_a_failed_read_could_hide_a_group_so_the_unlock_is_refused(self):
         client = DoorClient(fail_reads=True)
         guard = mp.PermissionEnforcingHAClient(client)
         with _owner_scope() as scope:
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(_unlock(guard, "lock.all_doors"))
+            assert excinfo.value.reason == mp.DOOR_UNVERIFIED
+            assert scope.opened == set() and scope.halted is True
+        assert client.calls == []
+
+    @pytest.mark.parametrize("state", [None, "garbled", 7, ["attributes"], b"x"])
+    def test_a_state_that_is_not_a_mapping_refuses_the_unlock_and_the_open(self, state):
+        client = DoorClient({"lock.front": state, "cover.garage": state})
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope() as scope:
+            for domain, service, entity in (("lock", "unlock", "lock.front"), ("cover", "open_cover", "cover.garage")):
+                scope.halted = False
+                with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                    _run(guard.call_service(domain, service, {"entity_id": entity}))
+                assert excinfo.value.reason == mp.DOOR_UNVERIFIED
+        assert client.calls == []
+
+    def test_an_unreadable_door_does_not_stop_a_close_or_a_lock(self):
+        client = DoorClient(fail_reads=True)
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope():
+            _run(guard.call_service("lock", "lock", {"entity_id": "lock.front"}))
+            _run(guard.call_service("cover", "close_cover", {"entity_id": "cover.garage"}))
+        assert len(client.calls) == 2 and client.reads == []
+
+    def test_the_read_carries_the_door_timeout(self):
+        client = DoorClient()
+        guard = mp.PermissionEnforcingHAClient(client)
+        with _owner_scope():
             _run(_unlock(guard, "lock.front"))
-            assert scope.opened == {"lock.front"}
+        assert client.timeouts == [mp.DOOR_READ_TIMEOUT_SECONDS]
+
+    def test_the_pure_rule_refuses_an_unverified_opening_only(self):
+        decision = mp.authorize_ha_write("lock", "unlock", {"entity_id": "lock.g"}, _owner_perms(), unverified={"lock.g"})
+        assert not decision.allowed and decision.reason == mp.DOOR_UNVERIFIED
+        assert mp.authorize_ha_write("lock", "lock", {"entity_id": "lock.g"}, _owner_perms(), unverified={"lock.g"}).allowed
+        assert mp.authorize_ha_write("cover", "open_cover", {"entity_id": "cover.b"}, _owner_perms(),
+                                     cover_access={"cover.b": False}, unverified={"cover.b"}).allowed
 
     def test_a_plain_lock_with_no_members_unlocks(self):
         client = DoorClient({"lock.front": {"state": "locked", "attributes": {"friendly_name": "Front"}}})
