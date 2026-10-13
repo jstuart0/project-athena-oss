@@ -344,7 +344,9 @@ _SCOPE_WORDS = _UNIVERSAL_QUANTIFIERS | _LIGHT_NOUNS | frozenset({
 })
 _OBJECT_FILLER = frozenset({"the", "a", "an", "my", "our", "your", "for"})
 _STATE_WORDS = frozenset({"on", "off", "lit", "dark"})
+_PLACE_PREPOSITIONS = frozenset({"in", "inside", "at"})
 _TRAILING_DEFERRAL_WORDS = frozenset({"excluded", "excepted"})
+_SKIPPED_AFTER_DEFERRAL = _OBJECT_FILLER | _LIGHT_NOUNS | _PLACE_PREPOSITIONS
 _PLAIN_WORDS = _OBJECT_FILLER | _SCOPE_WORDS | _NON_ROOM_TOKENS | frozenset({"it", "them", "that"})
 
 
@@ -361,6 +363,22 @@ def _has_whole_house_cue(toks: Sequence[str]) -> bool:
     return bool(WHOLE_HOUSE_ROOM_RE.search(text) or WHOLE_HOUSE_LIGHT_RE.search(text))
 
 
+def _names_scope_room(toks: Sequence[str], spans: Sequence[Tuple[int, int]],
+                      objects: Sequence[Tuple[int, int]]) -> bool:
+    """True when a room outside ``objects`` follows a place word that comes
+    after a scope or light noun ("all the lights in the kitchen"): that room
+    is the target, so a leading phrase before it is an opener."""
+    for start, stop in spans:
+        if (start, stop) in objects:
+            continue
+        q = start - 1
+        while q >= 0 and toks[q] in _OBJECT_FILLER:
+            q -= 1
+        if q >= 0 and toks[q] in _PLACE_PREPOSITIONS and any(t in _SCOPE_WORDS for t in toks[:q]):
+            return True
+    return False
+
+
 def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> Tuple[int, List[Tuple[int, int]]]:
     """(index where the exclusion clause starts, or ``len(toks)``; the token
     ranges of rooms an opener introduced)."""
@@ -375,7 +393,9 @@ def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> T
         end = i + length
         objects = [(start, stop) for start, stop in spans
                    if start >= end and all(t in _OBJECT_FILLER for t in toks[end:start])]
-        if any(t in _SCOPE_WORDS for t in toks[:i]) or any(e <= i for _, e in spans) or (cue and objects):
+        if any(t in _SCOPE_WORDS for t in toks[:i]) or any(e <= i for _, e in spans):
+            return i, introduced
+        if cue and objects and not _names_scope_room(toks, spans, objects):
             return i, introduced
         introduced.extend(objects)
         i = end
@@ -419,7 +439,14 @@ def has_exclusion_deferral_word(query: Optional[str], directory: Optional[RoomDi
             return True
         if tok in _TRAILING_DEFERRAL_WORDS and any(i - 3 <= stop <= i for _, stop in spans):
             return True  # "with the galley excluded"
-        window = toks[i + 1:i + 4]
+        # "leave the lights in the hall on": skip the filler, light nouns and
+        # place words, then look three tokens on.
+        j = i + 1
+        while j < len(toks) and toks[j] in _SKIPPED_AFTER_DEFERRAL:
+            j += 1
+        if any(j <= start < j + 3 for start, _ in spans):
+            return True
+        window = toks[j:j + 3]
         for k, word in enumerate(window):
             if word in _STATE_WORDS:
                 if any(w not in _PLAIN_WORDS for w in window[:k]):

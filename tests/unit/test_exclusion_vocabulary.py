@@ -457,6 +457,108 @@ def test_leave_on_form_with_other_exclusion_wording_writes_nothing(monkeypatch):
     assert rig.written == [], rig.written
 
 
+# ---------------------------------------------------------------------------
+# F1: "the lights in the X" names a room after a deferral word
+# ---------------------------------------------------------------------------
+
+def _model_intent(rig, query, excluded, room="whole_house"):
+    rig.controller.llm_router = _CountingLlm(json.dumps({
+        "device_type": "light", "room": room, "excluded_rooms": excluded,
+        "action": "turn_off", "target_scope": "group", "parameters": {}}))
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        return asyncio.run(rig.controller.extract_intent(query))
+
+
+@pytest.mark.parametrize("query,spared,lamp", [
+    ("turn off all the lights and leave the lights in the galley on", "galley", "light.galley_all"),
+    ("turn off all the lights, spare the lights in the galley", "galley", "light.galley_all"),
+    ("turn off all the lights, skip the lamps in the study", "study", "light.study_lamp"),
+])
+def test_a_deferral_word_before_the_lights_in_a_room_spares_that_room(monkeypatch, query, spared, lamp):
+    assert rc.has_exclusion_deferral_word(query, HOUSE) is True
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = _model_intent(rig, query, [spared])
+    assert rig.controller.llm_router.calls == 1, "the model, not a fast path, reads it"
+    asyncio.run(_execute(rig, intent, query, speaker="hall"))
+    assert lamp not in rig.written and not (spared == "galley" and set(rig.written) & GALLEY_LEAVES), rig.written
+    assert "light.hall_lamp" in rig.written, "the rest of the house is turned off"
+
+
+def test_leave_the_lights_in_the_hall_on_spares_the_hall(monkeypatch):
+    query = "turn off all the lights and leave the lights in the hall on"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = _model_intent(rig, query, ["hall"])
+    asyncio.run(_execute(rig, intent, query, speaker="study"))
+    assert "light.hall_lamp" not in rig.written and "light.study_lamp" in rig.written, rig.written
+
+
+def test_before_we_leave_turn_off_all_the_lights_makes_no_model_call_and_asks_nothing(monkeypatch):
+    query = "before we leave, turn off all the lights"
+    got, llm = _extract(query)
+    assert llm.calls == 0, got
+    rig = Rig(monkeypatch, attic_state="on")
+    asyncio.run(_execute(rig, {"device_type": "light", "room": "whole_house", "action": "turn_off",
+                               "target_scope": "group", "parameters": {}}, query, speaker="study"))
+    assert "light.study_lamp" in rig.written and "light.hall_lamp" in rig.written, rig.written
+
+
+# ---------------------------------------------------------------------------
+# F2: "in the X" after a scope names the target, not an exclusion
+# ---------------------------------------------------------------------------
+
+def _extract_and_write(monkeypatch, query, speaker="study"):
+    rig = Rig(monkeypatch, attic_state="on")
+    rig.controller.llm_router = None
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query))
+    asyncio.run(_execute(rig, intent, query, speaker=speaker))
+    return intent, set(rig.written)
+
+
+def test_a_leading_phrase_before_all_the_lights_in_a_room_writes_that_room_only(monkeypatch):
+    intent, written = _extract_and_write(monkeypatch, "besides the study, turn off all the lights in the galley")
+    assert written and written <= GALLEY_LEAVES | {"light.galley_pair", "light.galley_all"}, written
+    assert "light.study_lamp" not in written and "light.hall_lamp" not in written
+
+
+def test_a_leading_phrase_with_two_rooms_and_no_scope_room_still_excludes_both(monkeypatch):
+    intent, written = _extract_and_write(monkeypatch, "except the galley and the study, turn off all the lights", "hall")
+    assert not written & GALLEY_LEAVES and "light.study_lamp" not in written, written
+    assert "light.hall_lamp" in written and "light.north_lamp" in written
+
+
+def test_a_leading_phrase_before_every_light_in_two_rooms_writes_those_rooms_only(monkeypatch):
+    intent, written = _extract_and_write(monkeypatch, "except the study, turn off every light in the galley and the hall", "north_bathroom")
+    assert "light.hall_lamp" in written and written & GALLEY_LEAVES, written
+    assert "light.study_lamp" not in written and "light.north_lamp" not in written and "light.attic_a" not in written
+
+
+def test_a_room_after_in_before_a_later_phrase_is_the_target(monkeypatch):
+    query = "turn off all the lights in the galley besides the study"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = _model_intent(rig, query, None, room="galley")
+    asyncio.run(_execute(rig, intent, query, speaker="hall"))
+    written = set(rig.written)
+    assert written and written <= GALLEY_LEAVES | {"light.galley_pair", "light.galley_all"}, written
+
+
+@pytest.mark.parametrize("query", [
+    "besides the study turn off all the lights near the galley",
+    "besides the study in the galley turn off all the lights",
+])
+def test_only_a_place_word_after_a_scope_makes_a_room_the_target(query):
+    toks = rc.tokens(query)
+    spans = [(m.start, m.end) for m in rc._chosen_mentions(toks, HOUSE)]
+    assert rc._scan_exclusions(toks, spans)[0] == 0, query
+
+
+def test_the_scan_marks_the_scope_room_not_the_leading_object():
+    toks = rc.tokens("besides the study turn off all the lights in the galley")
+    spans = [(m.start, m.end) for m in rc._chosen_mentions(toks, HOUSE)]
+    cutoff, introduced = rc._scan_exclusions(toks, spans)
+    assert cutoff == len(toks) and introduced == [spans[0]]
+
+
 def test_an_exclusion_with_no_whole_house_wording_never_defaults_to_the_speakers_room(monkeypatch):
     query = "flip the lights on except the galley"
     rig = Rig(monkeypatch, attic_state="on")
