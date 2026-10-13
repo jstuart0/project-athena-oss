@@ -170,6 +170,7 @@ def _is_hue_saturation(value: Any) -> bool:
     return (
         isinstance(value, (list, tuple)) and len(value) == 2
         and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+        and 0 <= value[0] <= 360 and 0 <= value[1] <= 100
     )
 
 
@@ -177,12 +178,16 @@ def _step_parameters(step: Dict) -> Dict:
     """A step's parameters as a dict: a missing, null or non-object value
     (a model writes ``"parameters": null``) is empty, so the step still runs.
     The prompt asks for a single ``hs_color``; the room light writer reads
-    ``hs_colors``, so a lone pair becomes a list of one. An explicit
-    ``hs_colors`` wins. The step itself is not changed."""
+    ``hs_colors``, so a lone pair becomes a list of one. A valid ``hs_colors``
+    (a non-empty list of in-range hue/saturation pairs) wins; an invalid one
+    is dropped. The step itself is not changed."""
     raw = step.get('parameters')
     parameters = dict(raw) if isinstance(raw, dict) else {}
-    if not parameters.get('hs_colors') and _is_hue_saturation(parameters.get('hs_color')):
-        parameters['hs_colors'] = [list(parameters['hs_color'])]
+    colors = parameters.get('hs_colors')
+    if not (isinstance(colors, (list, tuple)) and colors and all(_is_hue_saturation(c) for c in colors)):
+        parameters.pop('hs_colors', None)
+        if _is_hue_saturation(parameters.get('hs_color')):
+            parameters['hs_colors'] = [list(parameters['hs_color'])]
     return parameters
 
 

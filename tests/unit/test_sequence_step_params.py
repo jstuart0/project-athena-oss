@@ -111,3 +111,27 @@ class TestHsColor:
         sent = [c[2] for c in _light_calls(rig)]
         assert {"entity_id": "light.hall_lamp", "hs_color": [10, 20], "brightness": 255} in sent
         assert all(c.get("hs_color") != None or "hs_color" not in c for c in sent)  # noqa: E711
+
+
+class TestHsColorsValues:
+    @pytest.mark.parametrize("bad", [
+        [[400, 50]], [[10, 150]], [[-1, 5]], [["a", 1]], [[1]], [[1, 2, 3]], "red", [], [None], [[True, 1]],
+    ])
+    def test_an_invalid_hs_colors_is_ignored(self, bad):
+        assert "hs_colors" not in se._step_parameters({"parameters": {"hs_colors": bad}})
+
+    def test_an_invalid_hs_colors_falls_back_to_a_valid_hs_color(self):
+        got = se._step_parameters({"parameters": {"hs_colors": [[400, 5]], "hs_color": [10, 20]}})
+        assert got["hs_colors"] == [[10, 20]]
+
+    def test_a_valid_list_is_kept_as_is(self):
+        colors = [[0, 100], [120, 50]]
+        assert se._step_parameters({"parameters": {"hs_colors": colors}})["hs_colors"] == colors
+
+    def test_an_out_of_range_hs_color_is_not_converted(self):
+        assert "hs_colors" not in se._step_parameters({"parameters": {"hs_color": [361, 10]}})
+
+    def test_an_invalid_list_reaches_no_light_writer(self, monkeypatch):
+        rig = Rig(monkeypatch)
+        _run(rig, [_step("set_color", {"hs_colors": [[999, 999]]})], "make the hall lights blue")
+        assert all("hs_color" not in (c[2] or {}) or c[2]["hs_color"] != [999, 999] for c in _light_calls(rig))

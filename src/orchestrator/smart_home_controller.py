@@ -293,8 +293,10 @@ _LOCK_CLAUSE_WORDS = frozenset({
     "lock", "locks", "locking", "locked", "unlock", "unlocks", "unlocking", "unlocked",
     "deadbolt", "deadbolts", "unbolt", "bolt",
 })
-# "lock" followed by one of these is a verb with its object, never a noun.
-_VERB_OBJECT_FOLLOWERS = frozenset({"the", "it", "them", "all", "this", "that"})
+# "lock" after an opening verb is a noun only when the clause ends there or
+# only these closing words follow ("unlock the front door lock please").
+# Anything else after it is the object of the opposite verb.
+_CLOSING_FILLER = frozenset({"please", "pls", "now", "thanks", "thx", "thank", "you", "for", "me"})
 VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
 
 
@@ -308,9 +310,9 @@ def _door_verb(
     not the back door") or after the verb ("lock the door, no need to
     confirm") changes nothing. A word of ``noun_after`` that follows a
     ``first`` verb in its clause is a noun ("unlock the front door lock"), not
-    the opposite verb, unless a negator came earlier in the clause ("unlock the
-    front door no lock it") or the word is followed by the object of a verb
-    ("unlock the front door lock the back door")."""
+    the opposite verb, but only when nothing except closing filler follows it
+    and no negator came earlier in the clause ("unlock the front door no lock
+    it", "unlock front door lock back door" are the opposite verb)."""
     up = down = False
     for clause in _CLAUSE_SPLIT.split(query_lower or ""):
         spoken = list(_words(clause))
@@ -321,7 +323,7 @@ def _door_verb(
                 negated = True
             elif (
                 word in noun_after and seen_first and not negated
-                and not (set(spoken[i + 1:i + 2]) & _VERB_OBJECT_FOLLOWERS)
+                and all(w in _CLOSING_FILLER for w in spoken[i + 1:])
             ):
                 continue
             elif word in first or word in second:
@@ -2526,7 +2528,7 @@ Return ONLY valid JSON."""
                 if isinstance(entity_id, str) and entity_id in pool:
                     plain = not access_target.is_access_cover(entity_id, (pool[entity_id] or {}).get('attributes'))
                 else:
-                    plain = self._cover_step_plain(query, target.get('room') or entity_id)
+                    plain = self._cover_step_plain(query, target.get('room') or entity_id, self._directory())
                 pool = {k: v for k, v in pool.items() if access_target.is_access_cover(k, (v or {}).get('attributes'))}
                 if plain or not pool:
                     continue
@@ -2574,16 +2576,30 @@ Return ONLY valid JSON."""
         return None
 
     @staticmethod
-    def _cover_step_plain(query: str, model_target) -> bool:
+    def _cover_step_plain(query: str, model_target, directory=None) -> bool:
         """Whether a cover step is about blinds and the like, read from the
         step's own clause and not the whole utterance ("open the blinds and
         unlock the front door" has a door word, but the cover step is the
         blinds). The clause is the one holding the step's target words;
         else every clause that speaks of a cover and is not a lock clause.
-        Plain only when every one of those clauses is plain."""
+        Plain only when every one of those clauses is plain. A target no clause
+        holds, or one that says garage or gate where no blinds clause does, is
+        not plain. A target that is only a room's name aims at no door and is
+        left out of that test."""
         clauses = [c for c in _CLAUSE_SPLIT.split((query or "").lower()) if c.strip()]
         wanted = frozenset(access_target._target_tokens(model_target, 'cover'))
+        if wanted and isinstance(model_target, str) and room_context.find_room_mention(
+            model_target.replace('_', ' '), directory,
+        ).kind != "none" and not access_target.target_nouns(model_target, 'cover'):
+            wanted = frozenset()
         holding = [c for c in clauses if wanted and wanted <= frozenset(_words(c))]
+        if wanted and not holding:
+            return False  # the step is aimed at words no clause says
+        nouns = access_target.target_nouns(model_target, 'cover')
+        if nouns and not any(
+            nouns <= frozenset(_words(c)) and access_target.cover_intent_kind(c) == "plain" for c in clauses
+        ):
+            return False  # aimed at a garage or gate that no blinds clause mentions
         if not holding:
             holding = [
                 c for c in clauses
@@ -2667,6 +2683,8 @@ Return ONLY valid JSON."""
         door_text = await self._plan_sequence_doors(steps, query)
         if door_text is not None:
             return door_text
+        whole_houses = None
+        whole_house_index = 0
         for step in steps:
             target = step.get('target') or {}
             domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
@@ -2678,15 +2696,22 @@ Return ONLY valid JSON."""
                     # The same exclusion authority as a single command: the
                     # rooms the words spare are carried, and wording it cannot
                     # read asks. The model's own list is never used.
-                    decision = room_context.sequence_whole_house(query, self._directory())
-                    if isinstance(decision, room_context.WholeHouse):
-                        self._set_decided(
-                            intent, "whole_house", "all the lights", excluded=[r.key for r in decision.excluded],
-                        )
-                        target.pop('excluded_rooms', None)
-                        target.update(intent)
-                        continue
-                    return room_context.ask_text(decision)
+                    # Each whole-house step reads its own clause, in order.
+                    if whole_houses is None:
+                        whole_houses = room_context.sequence_whole_house(query, self._directory())
+                    count = sum(1 for st in steps if (st.get('target') or {}).get('room') == 'whole_house')
+                    if isinstance(whole_houses, room_context.AskRoom) or (
+                        len(whole_houses) != 1 and len(whole_houses) != count
+                    ):
+                        return room_context.ask_text(room_context.AskRoom())
+                    decision = whole_houses[0] if len(whole_houses) == 1 else whole_houses[whole_house_index]
+                    whole_house_index += 1
+                    self._set_decided(
+                        intent, "whole_house", "all the lights", excluded=[r.key for r in decision.excluded],
+                    )
+                    target.pop('excluded_rooms', None)
+                    target.update(intent)
+                    continue
                 # The model chose the whole house for words that don't ask for
                 # it: no step acts on a house nobody named.
                 return room_context.ask_text(room_context.AskRoom())
@@ -5545,9 +5570,26 @@ Do NOT mention rooms that have no current or recent motion."""
         def is_lamp(entity_id: str) -> bool:
             return entity_id not in non_lamp and not any(p.search(entity_id) for p in patterns)
 
-        def leaves_of(entity_ids) -> list:
+        def raw_leaves(entity_ids) -> set:
             leaves = expand_light_leaves(list(entity_ids), entities)
-            return sorted({leaf for ids in leaves.values() for leaf in ids if is_lamp(leaf)})
+            return {leaf for ids in leaves.values() for leaf in ids if is_lamp(leaf)}
+
+        # Every lamp that belongs to a room the speaker left out, however a
+        # group reaches it: by registry area when there is a snapshot, and by
+        # the room's own lights (groups, name match) besides. A group named
+        # for another room ("Hall") that holds one of its bulbs loses that
+        # bulb, and a group is never skipped for a name that merely contains
+        # the excluded key ("Garden" for "den").
+        spared: set = set()
+        for key in excluded:
+            if snapshot is not None:
+                for area in snapshot.areas:
+                    if area.key == key:
+                        spared |= raw_leaves(area_lamp_targets(snapshot, area.area_id, entities, patterns))
+            spared |= raw_leaves(m['entity_id'] for m in await self._resolve_room_lights(key))
+
+        def leaves_of(entity_ids) -> list:
+            return sorted(raw_leaves(entity_ids) - spared)
 
         rooms: List[list] = []
         owner = self._audience_is_owner()
@@ -5565,11 +5607,6 @@ Do NOT mention rooms that have no current or recent motion."""
                     rooms.append(leaves_of(ids))
         elif owner:
             for group in await self.entity_manager.get_all_light_groups():
-                name = (group.get('friendly_name') or '').lower()
-                entity_id = (group.get('entity_id') or '').lower()
-                spoken_excluded = [k.replace('_', ' ') for k in excluded]
-                if any(k in name or k in entity_id for k in spoken_excluded):
-                    continue
                 members = group.get('members') or [group.get('entity_id')]
                 rooms.append(leaves_of(m for m in members if m))
         else:

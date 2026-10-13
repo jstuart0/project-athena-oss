@@ -1122,7 +1122,8 @@ def cover_is_access(entity_id: str, attributes: Optional[Mapping[str, Any]]) -> 
     ``access_target.is_access_cover`` (pinned equal in the tests). A device
     class naming a window covering makes it plain; any other class makes it a
     way in; an unclassified cover is plain only when its friendly name says
-    blinds, shades, curtains or awnings and no door, gate, opener or garage."""
+    blinds, shades, curtains, awnings, drapes or dampers and no door, gate,
+    opener or garage."""
     attrs = attributes if isinstance(attributes, Mapping) else {}
     device_class = attrs.get("device_class")
     if isinstance(device_class, str) and device_class.strip().lower() in NON_ACCESS_DEVICE_CLASSES:

@@ -500,6 +500,16 @@ def _target_tokens(model_target: Any, domain: str) -> List[str]:
     ]
 
 
+def target_nouns(model_target: Any, domain: str) -> FrozenSet[str]:
+    """The access nouns a model's target itself says (``garage``, ``gate``):
+    the words ``_target_tokens`` leaves out."""
+    if not isinstance(model_target, str):
+        return frozenset()
+    if re.match(r"^[a-z_]+\.", model_target.strip().lower()):
+        model_target = model_target.split(".", 1)[1]
+    return frozenset(t for t in tokens(model_target) if t in _NOUNS[domain])
+
+
 # ---------------------------------------------------------------------------
 # The answer to "which door?"
 # ---------------------------------------------------------------------------

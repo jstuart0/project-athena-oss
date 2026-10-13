@@ -26,15 +26,28 @@ from orchestrator.sequence_executor import SequenceExecutor  # noqa: E402
 from .test_access_intent_policy import (  # noqa: E402,F401
     THREE_LOCKS, DoorRig, SequenceRig, cover_intent, cover_state, lock_intent, lock_state, step,
 )
-from .test_room_light_area_tier import GALLEY_LEAVES, Rig, _isolated  # noqa: E402,F401
+from .test_room_light_area_tier import GALLEY_LEAVES, Rig, _isolated, _state, guest, light  # noqa: E402,F401
 from orchestrator.utterance_kind import classify_utterance  # noqa: E402
 
 HALL = {"light.hall_lamp"}
 
 
+def light_intent(action, **extra):
+    return light("whole_house", action, **extra)
+
+
+def guest_perms():
+    return guest(allowed_intents=["control"])
+
+
 def _light_step(action, room="whole_house", **extra):
     return {"action": action, "target": {"device_type": "light", "room": room, **extra},
             "parameters": {}, "delay_after": 0, "at_time": None}
+
+
+def _rig(monkeypatch, **kw):
+    """The light rig with the fan-out limits off."""
+    return Rig(monkeypatch, threshold=0, hard_limit=0, **kw)
 
 
 class SequenceLightRig(Rig):
@@ -156,21 +169,150 @@ class TestWholeHouseStepKeepsExclusions:
 
 class TestSequenceWholeHouseAuthority:
     """room_context.sequence_whole_house is the one reader of a sequence's
-    exclusions, and it is the single-command authority applied per clause."""
+    exclusions: the single-command authority applied per clause."""
 
     def test_it_agrees_with_decide_room_on_a_single_clause(self):
         for text in ("turn off all the lights except the galley", "turn off all the lights",
-                     "turn off all the lights without the galley"):
+                     "turn off all the lights without the galley", "turn off all the lights in the kitchen"):
             single = room_context.whole_house_decision(text)
             seq = room_context.sequence_whole_house(text)
-            assert type(single) is type(seq), text
             if isinstance(single, room_context.WholeHouse):
-                assert {r.key for r in single.excluded} == {r.key for r in seq.excluded}
+                assert len(seq) == 1 and {r.key for r in single.excluded} == {r.key for r in seq[0].excluded}, text
+            else:
+                assert isinstance(seq, room_context.AskRoom), text
+
+    HOUSE = room_context.RoomDirectory.build(areas=[
+        type("A", (), {"area_id": f"area_{k}", "name": k.title(), "aliases": (), "key": k})()
+        for k in ("galley", "study", "hall")
+    ])
 
     def test_a_comma_does_not_end_a_step(self):
         text = "turn off all the lights except the galley, the study, then turn on the hall"
-        seq = room_context.sequence_whole_house(text)
-        assert isinstance(seq, room_context.WholeHouse)
+        seq = room_context.sequence_whole_house(text, self.HOUSE)
+        assert len(seq) == 1 and {r.key for r in seq[0].excluded} == {"galley", "study"}
+
+    PLAY = room_context.RoomDirectory.build(areas=[
+        type("A", (), {"area_id": "area_play", "name": "Play Room", "aliases": (), "key": "play_room"})(),
+        type("A", (), {"area_id": "area_kitchen", "name": "Kitchen", "aliases": (), "key": "kitchen"})(),
+    ])
+
+    def test_and_play_room_is_a_room_not_a_step(self):
+        seq = room_context.sequence_whole_house("turn off all the lights except the kitchen and play room", self.PLAY)
+        assert len(seq) == 1 and {r.key for r in seq[0].excluded} == {"kitchen", "play_room"}
+
+    def test_and_play_music_is_a_step(self):
+        clauses = room_context.step_clauses("turn off all the lights except the kitchen and play some music", self.PLAY)
+        assert len(clauses) == 2
+        seq = room_context.sequence_whole_house("turn off all the lights except the kitchen and play some music", self.PLAY)
+        assert len(seq) == 1 and {r.key for r in seq[0].excluded} == {"kitchen"}
+
+    def test_but_and_a_non_light_verb_is_a_second_command(self):
+        seq = room_context.sequence_whole_house("turn off all the lights but lock the front door")
+        assert len(seq) == 1 and seq[0].excluded == ()
+        assert room_context.has_exclusion("turn off all the lights but lock the front door") is False
+
+    def test_but_a_non_light_command_naming_a_room_is_its_own_step(self):
+        seq = room_context.sequence_whole_house("turn off all the lights but lock the hall door", self.HOUSE)
+        assert len(seq) == 1 and seq[0].excluded == ()
+
+    def test_but_and_a_light_verb_is_still_an_exclusion(self):
+        assert room_context.has_exclusion("turn on all the lights but turn off the kitchen") is True
+
+    def test_each_whole_house_clause_has_its_own_exclusions(self):
+        seq = room_context.sequence_whole_house(
+            "turn off all the lights except the galley, then at 11 turn off all the lights", self.HOUSE,
+        )
+        assert [[r.key for r in d.excluded] for d in seq] == [["galley"], []]
+
+    def test_a_clause_with_a_room_and_no_exclusion_asks(self):
+        assert isinstance(room_context.sequence_whole_house("turn off all the lights in the kitchen"), room_context.AskRoom)
+
+    def test_no_clause_that_says_the_house_asks(self):
+        assert isinstance(room_context.sequence_whole_house("turn off the hall lights"), room_context.AskRoom)
+
+
+class TestPerStepAndKitchenSequences:
+    def test_the_second_whole_house_step_includes_the_galley(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_light_step("turn_off"), _light_step("turn_off")]
+        assert rig.plan(steps, "turn off all the lights except the galley, then at 11 turn off all the lights") is None
+        assert steps[0]["target"]["decided_excluded"] == ["galley"]
+        assert steps[1]["target"]["decided_excluded"] == []
+        assert "excluded_rooms" not in steps[1]["target"]
+
+    def test_a_clause_count_that_does_not_match_the_steps_asks(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_light_step("turn_off"), _light_step("turn_off"), _light_step("turn_off")]
+        text = rig.plan(steps, "turn off all the lights except the galley, then at 11 turn off all the lights")
+        assert text == "Which room?"
+
+    def test_a_kitchen_clause_with_a_model_whole_house_step_never_writes_the_house(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_light_step("turn_off"), _light_step("turn_on", room="hall")]
+        text = rig.run(steps, "turn off all the lights in the kitchen, then turn on the hall")
+        assert text == "Which room?" and rig.raw.call_service.await_count == 0
+
+    def test_but_lock_the_front_door_turns_off_everything_and_locks(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_light_step("turn_off")]
+        assert rig.plan(steps, "turn off all the lights but lock the front door") is None
+        assert steps[0]["target"]["decided_excluded"] == []
+
+
+# ---------------------------------------------------------------------------
+# D32: a group never reaches a bulb of a room the speaker left out
+# ---------------------------------------------------------------------------
+
+class TestWholeHouseExclusionNeverLeaksThroughAGroup:
+    def _written(self, rig, perms=None, mode="owner", trusted=True):
+        rig.run(light_intent("turn_off", excluded_rooms=["galley"]), "turn off all the lights except the galley",
+                perms, mode, trusted)
+        return set(rig.written)
+
+    def test_an_untrusted_owner_does_not_write_a_galley_bulb_through_the_hall_group(self, monkeypatch):
+        rig = _rig(monkeypatch, attic_state="on")
+        written = self._written(rig, trusted=False)
+        assert "light.hall_lamp" in written
+        assert not written & GALLEY_LEAVES, written
+
+    def test_a_trusted_owner_is_unchanged(self, monkeypatch):
+        rig = _rig(monkeypatch, attic_state="on")
+        written = self._written(rig)
+        assert "light.study_lamp" in written and not written & GALLEY_LEAVES
+
+    def test_a_guest_does_not_write_a_galley_bulb_through_a_configured_group(self, monkeypatch):
+        rig = _rig(monkeypatch, attic_state="on", groups='{"hall": "light.hall_pair", "study": "light.study_lamp"}')
+        written = self._written(rig, guest_perms(), "guest")
+        assert "light.hall_lamp" in written and "light.study_lamp" in written
+        assert not written & GALLEY_LEAVES, written
+
+    def test_the_same_with_no_registry(self, monkeypatch):
+        rig = _rig(monkeypatch, registry=False, groups='{"galley": "light.galley_all"}')
+        written = self._written(rig, trusted=False)
+        assert "light.hall_lamp" in written and not written & GALLEY_LEAVES, written
+
+    def test_a_bulb_in_the_excluded_area_that_the_room_group_does_not_list_is_still_spared(self, monkeypatch):
+        from .test_room_light_area_tier import _reg, house
+        raw, states = house(attic_state="on")
+        raw["entities"].append(_reg("light.counter_strip", area="area_galley"))
+        states["light.counter_strip"] = _state("light.counter_strip")
+        states["light.hall_extra"] = _state("light.hall_extra", members=["light.hall_lamp", "light.counter_strip"])
+        rig = _rig(monkeypatch, attic_state="on", states=states, groups='{"galley": "light.galley_pair"}')
+        from shared import ha_registry as hr
+        rig.registry._snapshot = hr.RegistrySnapshot.from_raw(raw, fetched_at=1.0)
+        written = self._written(rig, trusted=False)
+        assert "light.hall_lamp" in written
+        assert "light.counter_strip" not in written, written
+
+    def test_excluding_den_does_not_drop_a_garden_group(self, monkeypatch):
+        states = {
+            "light.den_lamp": _state("light.den_lamp"), "light.garden_lamp": _state("light.garden_lamp"),
+            "light.den": _state("light.den", members=["light.den_lamp"], name="Den"),
+            "light.garden": _state("light.garden", members=["light.garden_lamp"], name="Garden"),
+        }
+        rig = _rig(monkeypatch, registry=False, states=states)
+        rig.run(light_intent("turn_off", excluded_rooms=["den"]), "turn off all the lights except the den", None, "owner", False)
+        assert "light.garden_lamp" in rig.written and "light.den_lamp" not in rig.written, rig.written
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +463,15 @@ class TestTheLockNounExemption:
     @pytest.mark.parametrize("query,ok", [
         ("unlock the front door lock", True),
         ("unlock the Front Door Lock", True),
-        ("unlock the lock on the front door", True),
+
         ("unlock the front door lock please", True),
+        ("unlock the front door lock now thanks", True),
+        ("unlock the front door lock back", False),
+        ("unlock front door lock front", False),
+        ("unlock the front door lock for me", True),
+        ("unlock the lock on the front door", False),
+        ("unlock front door lock back door", False),
+        ("unlock the front door lock the back door", False),
         ("unlock the front door no lock it", False),
         ("unlock the front door lock the back door", False),
         ("unlock the front door lock it", False),
@@ -357,3 +506,39 @@ class TestTheLockNounExemption:
         rig = DoorRig(monkeypatch, THREE_LOCKS)
         rig.run_scoped(lock_intent(room="front_door"), "unlock the Front Door Lock")
         assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
+
+class TestTheNounAllowlistThroughASequence:
+    def test_unlock_front_door_lock_back_door_does_not_open_the_back_door(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "back"})]
+        text = rig.run_plan(steps, "unlock front door lock back door")
+        assert rig.openings == [], rig.calls
+        assert text == shc.VERB_UNCLEAR_TEXT
+
+    def test_unlock_the_front_door_lock_still_opens_the_front_door(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.run_plan(steps, "unlock the front door lock please") is None
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
+
+class TestCoverStepPlainIsFailSafe:
+    plain = staticmethod(shc.SmartHomeController._cover_step_plain)
+
+    def test_a_target_no_clause_says_is_not_plain(self):
+        assert self.plain("open the blinds and unlock the front door", "workshop") is False
+
+    def test_a_garage_target_with_no_blinds_clause_naming_it_is_not_plain(self):
+        assert self.plain("open the blinds and unlock the front door", "garage") is False
+        assert self.plain("open the garage blinds", "garage") is True
+
+    def test_a_gate_target_is_not_plain_beside_a_blinds_clause(self):
+        assert self.plain("open the blinds and the gate", "gate") is False
+
+    def test_a_room_target_does_not_turn_blinds_into_a_door(self):
+        assert self.plain("open the blinds and unlock the front door", "living_room") is True
+
+    def test_a_non_text_target_falls_back_to_the_clauses(self):
+        assert self.plain("open the blinds", 7) is True
+        assert self.plain("open the blinds", None) is True

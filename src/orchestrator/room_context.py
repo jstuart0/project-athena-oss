@@ -450,6 +450,9 @@ def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> T
             i += 1
             continue
         end = i + length
+        if tuple(toks[i:end]) == ("but",) and toks[end:end + 1] and toks[end] in _NON_LIGHT_STEP_VERBS:
+            i = end  # "all the lights but lock the front door": a second command
+            continue
         objects = _object_chain(toks, spans, end)
         if any(t in _SCOPE_WORDS for t in toks[:i]) or any(e <= i for _, e in spans):
             return i, introduced
@@ -879,36 +882,62 @@ def whole_house_decision(
 
 # The words that end one step of a sequence and start the next. A comma does
 # not: it separates the rooms of an exclusion list.
-_SEQUENCE_STEP_SPLIT = re.compile(
-    r"[;.!?]|\b(?:and then|then|after that|afterwards|later)\b"
-    r"|\band\b(?=\s+(?:turn|switch|set|dim|brighten|make|open|close|lock|unlock|play|start|stop|pause)\b)",
-    re.IGNORECASE,
-)
+_HARD_STEP_SPLIT = re.compile(r"[;.!?]|\b(?:and then|then|after that|afterwards|later)\b", re.IGNORECASE)
+_SOFT_STEP_SPLIT = re.compile(r"\b(and|but)\b\s+(\w+)", re.IGNORECASE)
+# "and <verb>" starts a new step. "but <verb>" does too, but only for verbs
+# that are not about lights ("but lock the front door"): "all the lights on
+# but turn off the kitchen" still reads as an exclusion.
+_STEP_VERBS = frozenset({
+    "turn", "switch", "set", "dim", "brighten", "make", "open", "close", "lock", "unlock", "play", "start",
+    "stop", "pause",
+})
+_NON_LIGHT_STEP_VERBS = frozenset({"open", "close", "lock", "unlock", "play", "start", "stop", "pause"})
+
+
+def _starts_a_room(rest: str, directory: Optional[RoomDirectory]) -> bool:
+    """Whether the words begin with a room's name ("play room")."""
+    return any(m.start == 0 and m.kind != "partial" for m in _chosen_mentions(tokens(rest), directory))
+
+
+def step_clauses(text: str, directory: Optional[RoomDirectory] = None) -> List[str]:
+    """The utterance cut into the clauses of its steps. A verb that is the
+    first word of a room's name ("and play room") does not start a step."""
+    parts: List[str] = []
+    for chunk in _HARD_STEP_SPLIT.split(text or ""):
+        start = 0
+        for match in _SOFT_STEP_SPLIT.finditer(chunk):
+            joiner, verb = match.group(1).lower(), match.group(2).lower()
+            if verb not in (_NON_LIGHT_STEP_VERBS if joiner == "but" else _STEP_VERBS):
+                continue
+            if _starts_a_room(chunk[match.start(2):], directory):
+                continue
+            parts.append(chunk[start:match.start()])
+            start = match.end(1)
+        parts.append(chunk[start:])
+    return [p for p in parts if p.strip()]
 
 
 def sequence_whole_house(
     query: Optional[str], directory: Optional[RoomDirectory] = None,
-) -> Union[WholeHouse, AskRoom]:
-    """The whole-house step of a sequence whose utterance says the whole
-    house: the same decision as a single command (``whole_house_decision``),
-    read on the clause that says it (a room named in another step is not an
-    exclusion of this one). When the utterance carries exclusion wording and no room comes
-    out of it ("turn off all the lights, then keep the hall lit"), it asks:
-    a step never writes a room the speaker spared."""
-    text = query or ""
-    if not has_exclusion_wording(text, directory):
-        return WholeHouse()
-    spared: Dict[str, RoomRef] = {}
-    for clause in (c for c in _SEQUENCE_STEP_SPLIT.split(text) if c and c.strip()):
-        if not is_explicit_whole_house(clause):
-            continue
-        decision = whole_house_decision(clause, directory)
-        if not isinstance(decision, WholeHouse):
+) -> Union[AskRoom, Tuple[WholeHouse, ...]]:
+    """The whole-house decisions of a sequence, one per clause that says the
+    whole house, in order: each is the single-command decision
+    (``whole_house_decision``) read on its own clause, so a room spared in one
+    step is not spared in another. ``AskRoom`` when any such clause is not a
+    plain whole house (a room named outside an exclusion, or exclusion wording
+    this parser does not read), when no clause says it, or when a clause with
+    no step of its own carries exclusion wording ("turn off all the lights,
+    then keep the hall lit"): a step never writes a room the speaker spared."""
+    decisions: List[WholeHouse] = []
+    for clause in step_clauses(query or "", directory):
+        if is_explicit_whole_house(clause):
+            decision = whole_house_decision(clause, directory)
+            if not isinstance(decision, WholeHouse):
+                return AskRoom()
+            decisions.append(decision)
+        elif has_exclusion_wording(clause, directory) and not any(t in _STEP_VERBS for t in tokens(clause)):
             return AskRoom()
-        spared.update({ref.key: ref for ref in decision.excluded})
-    if not spared:
-        return AskRoom()
-    return WholeHouse(tuple(spared.values()))
+    return tuple(decisions) if decisions else AskRoom()
 
 
 def decide_room(
