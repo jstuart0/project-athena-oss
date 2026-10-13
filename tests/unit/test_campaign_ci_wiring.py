@@ -87,6 +87,8 @@ CAMPAIGN_TESTS = (
     "admin/backend/tests/test_service_urls_accessor.py",
     "admin/backend/tests/test_core_probe.py",
     "tests/unit/test_stuck_sensor_detection.py",
+    "tests/unit/test_llm_context_plan.py",
+    "tests/unit/test_llm_router_context_wiring.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

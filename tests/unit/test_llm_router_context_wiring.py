@@ -20,7 +20,7 @@ sys.path.insert(0, "src")
 import shared.llm_router as llm_router_module  # noqa: E402
 from shared.config import _clear_cache_for_tests  # noqa: E402
 from shared.llm_context import ContextBudgetExceeded  # noqa: E402
-from shared.llm_router import LLMRouter  # noqa: E402
+from shared.llm_router import LLMRouter, llm_usage_scope  # noqa: E402
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -74,6 +74,16 @@ def reply(prompt_eval_count=4441, done_reason="stop") -> httpx.Response:
         200,
         json={"response": "ok", "done": True, "prompt_eval_count": prompt_eval_count, "eval_count": 5, "done_reason": done_reason},
     )
+
+
+def prompt_with_estimate(target):
+    """A prompt whose composed form (with the /no_think prefix) estimates to `target`."""
+    from shared.llm_context import estimate_tokens
+
+    size = 0
+    while estimate_tokens(llm_router_module._compose_ollama_prompt("a" * size, "/no_think")) < target:
+        size += 1
+    return "a" * size
 
 
 class Wire:
@@ -186,12 +196,45 @@ class TestStrictSizing:
         assert context_count("raised") - raised_before == 1
         assert changes() - changes_before == 1
 
-    def test_unknown_floor_sends_no_size_and_records_nothing(self, monkeypatch):
-        row = {"num_predict": 384}
-        wire = Wire(monkeypatch, row=row)
-        wire.generate(strict=True)
+    def test_unknown_floor_small_need_sends_no_size_and_records_nothing(self, monkeypatch):
+        wire = Wire(monkeypatch, row={"num_predict": 384})
+        wire.generate("short prompt", strict=True)
         assert "num_ctx" not in wire.requests[0]["options"]
         assert wire.router._context_marks.get(MODEL, None) == 0
+
+    def test_unknown_floor_large_need_refuses_before_any_request(self, monkeypatch):
+        wire = Wire(monkeypatch, row={"num_predict": 384})
+        before = context_count("unknown_default")
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            wire.generate(strict=True)
+        assert raised.value.reason == "floor_unknown"
+        assert wire.requests == []
+        assert context_count("unknown_default") - before == 1
+
+    def test_unknown_floor_boundary_at_2048(self, monkeypatch):
+        # reserve 384: estimate 1664 is need 2048 (sent), 1665 is need 2049 (refused)
+        wire = Wire(monkeypatch, row={"num_predict": 384})
+        wire.generate(prompt_with_estimate(1664), strict=True)
+        assert len(wire.requests) == 1 and "num_ctx" not in wire.requests[0]["options"]
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            wire.generate(prompt_with_estimate(1665), strict=True)
+        assert raised.value.reason == "floor_unknown"
+        assert len(wire.requests) == 1
+
+    def test_a_non_power_of_two_server_context_cannot_slip_through(self, monkeypatch):
+        # a 6000 server context reports 3002 for a cut prompt: no power-of-two
+        # signature, and 3002 is above 35% of the estimate. Refused up front.
+        wire = Wire(monkeypatch, row={"num_predict": 384}, responder=lambda body: reply(3002, "length"))
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            wire.generate(strict=True)
+        assert raised.value.reason == "floor_unknown"
+        assert wire.requests == []
+
+    def test_unknown_floor_small_prompt_still_raises_on_a_truncated_result(self, monkeypatch):
+        wire = Wire(monkeypatch, row={"num_predict": 384}, responder=lambda body: reply(100, "length"))
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            wire.generate(prompt_with_estimate(600), strict=True)
+        assert raised.value.reason == "truncated"
 
     def test_server_default_is_the_floor_when_the_row_has_no_size(self, monkeypatch):
         configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=65536)
@@ -233,14 +276,6 @@ class TestRefusals:
         assert [e for e in logs if e["event"] == "llm_prompt_truncation_suspected"]
         assert MARKER not in json.dumps(logs, default=str)
 
-    def test_unknown_floor_truncation_still_raises_for_a_strict_call(self, monkeypatch):
-        wire = Wire(monkeypatch, row={"num_predict": 384}, responder=lambda body: reply(2050, "length"))
-        before = context_count("unknown_default")
-        with pytest.raises(ContextBudgetExceeded) as raised:
-            wire.generate(strict=True)
-        assert raised.value.reason == "truncated"
-        assert context_count("unknown_default") - before == 1
-
     def test_stream_reports_a_cut_prompt_in_the_done_branch_and_never_raises(self, monkeypatch):
         body = '{"response":"x"}\n{"response":"","done":true,"prompt_eval_count":1026,"eval_count":1}\n'
         wire = Wire(monkeypatch, responder=lambda _: httpx.Response(200, text=body))
@@ -254,6 +289,73 @@ class TestRefusals:
         before = context_count("truncation_suspected")
         wire.generate(strict=True)
         assert context_count("truncation_suspected") == before
+
+
+class TestTruncatedStrictCall:
+    def test_the_mark_does_not_move(self, monkeypatch):
+        wire = Wire(monkeypatch, responder=lambda body: reply(1026, "length"))
+        with pytest.raises(ContextBudgetExceeded):
+            wire.generate(strict=True)
+        assert wire.router._context_marks.get(MODEL, 2048) == 0
+        wire.generate(strict=False)
+        assert wire.requests[-1]["options"]["num_ctx"] == 2048
+
+    def test_the_refusal_keeps_its_token_counts(self, monkeypatch):
+        wire = Wire(monkeypatch, responder=lambda body: reply(1026, "length"))
+        with llm_usage_scope() as usage:
+            with pytest.raises(ContextBudgetExceeded) as raised:
+                wire.generate(strict=True)
+        assert (raised.value.prompt_eval_count, raised.value.eval_count) == (1026, 5)
+        assert (usage.prompt_tokens, usage.completion_tokens) == (1026, 5)
+        assert wire.router._metrics[-1]["prompt_tokens"] == 1026
+
+    def test_refusals_before_the_request_add_no_usage(self, monkeypatch):
+        configure(monkeypatch, LLM_CONTEXT_CEILING=4096)
+        wire = Wire(monkeypatch)
+        with llm_usage_scope() as usage:
+            with pytest.raises(ContextBudgetExceeded):
+                wire.generate(strict=True)
+        assert (usage.prompt_tokens, usage.completion_tokens) == (0, 0)
+        assert len(wire.router._metrics) == 0
+
+    def test_the_warning_names_the_floor_not_the_row(self, monkeypatch, logs):
+        wire = Wire(monkeypatch, responder=lambda body: reply(1026, "length"))
+        wire.generate(strict=False)
+        entry = [e for e in logs if e["event"] == "llm_prompt_truncation_suspected"][0]
+        assert entry["floor_ctx"] == 2048 and "row_ctx" not in entry
+
+
+class TestUnsupportedBackends:
+    @pytest.mark.parametrize("backend_type", ["mlx", "openai", "anthropic", "google"])
+    def test_a_strict_call_fails_closed(self, monkeypatch, backend_type):
+        wire = Wire(monkeypatch)
+
+        async def backend_config(model):
+            return {"backend_type": backend_type, "endpoint_url": "http://x.test", "timeout_seconds": 30}
+
+        async def must_not_run(*args, **kwargs):
+            raise AssertionError("backend reached")
+
+        monkeypatch.setattr(wire.router, "_get_backend_config", backend_config)
+        for name in ("_generate_mlx", "_generate_openai", "_generate_anthropic", "_generate_google"):
+            monkeypatch.setattr(wire.router, name, must_not_run)
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            wire.generate(strict=True)
+        assert raised.value.reason == "unsupported_backend"
+        assert wire.requests == []
+
+    def test_a_default_call_still_reaches_the_backend(self, monkeypatch):
+        wire = Wire(monkeypatch)
+
+        async def backend_config(model):
+            return {"backend_type": "mlx", "endpoint_url": "http://x.test", "timeout_seconds": 30}
+
+        async def mlx(*args, **kwargs):
+            return {"response": "ok", "backend": "mlx"}
+
+        monkeypatch.setattr(wire.router, "_get_backend_config", backend_config)
+        monkeypatch.setattr(wire.router, "_generate_mlx", mlx)
+        assert wire.generate(strict=False)["backend"] == "mlx"
 
 
 class TestObserveMode:
@@ -289,6 +391,23 @@ class TestRetry:
         with pytest.raises(httpx.ReadTimeout):
             wire.generate(strict=True)
         assert len(wire.requests) == 1
+
+    def test_a_sticky_default_call_keeps_the_retry(self, monkeypatch):
+        monkeypatch.setattr(llm_router_module, "OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S", 0)
+        wire = Wire(monkeypatch)
+        wire.generate(strict=True)
+        wire.requests.clear()
+        wire.responder = self.timeout_then_ok(wire.requests)
+        wire.generate(strict=False)
+        assert [r["options"]["num_ctx"] for r in wire.requests] == [8192, 8192]
+
+    def test_observe_keeps_the_retry(self, monkeypatch):
+        configure(monkeypatch, LLM_CONTEXT_GUARD="observe")
+        monkeypatch.setattr(llm_router_module, "OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S", 0)
+        wire = Wire(monkeypatch)
+        wire.responder = self.timeout_then_ok(wire.requests)
+        wire.generate(strict=True)
+        assert len(wire.requests) == 2
 
     def test_an_unraised_plan_still_retries_once(self, monkeypatch):
         monkeypatch.setattr(llm_router_module, "OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S", 0)
@@ -357,5 +476,24 @@ class TestAutoFallback:
 
         monkeypatch.setattr(wire.router, "_get_backend_config", backend_config)
         monkeypatch.setattr(wire.router, "_generate_mlx", broken_mlx)
+        wire.generate(strict=False)
+        assert wire.requests[0]["options"]["num_ctx"] == 2048
+
+    def test_a_strict_auto_call_skips_mlx_and_is_planned_on_ollama(self, monkeypatch):
+        configure(monkeypatch, OLLAMA_URL="http://ollama.test")
+        wire = Wire(monkeypatch)
+
+        async def backend_config(model):
+            return {"backend_type": "auto", "endpoint_url": "http://mlx.test", "timeout_seconds": 30}
+
+        mlx_calls = []
+
+        async def mlx(*args, **kwargs):
+            mlx_calls.append(1)
+            raise RuntimeError("mlx down")
+
+        monkeypatch.setattr(wire.router, "_get_backend_config", backend_config)
+        monkeypatch.setattr(wire.router, "_generate_mlx", mlx)
         wire.generate(strict=True)
+        assert mlx_calls == []
         assert wire.requests[0]["options"]["num_ctx"] == 8192

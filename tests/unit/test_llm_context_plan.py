@@ -216,6 +216,12 @@ class TestUnknownFloor:
         assert (result.send, result.outcome) == (None, "unknown_default")
         assert marks.get(MODEL, None) == 0
 
+    def test_the_2048_boundary_with_an_unknown_floor(self):
+        at = plan(prompt_for_estimate(2048 - 384), row=None)
+        over = plan(prompt_for_estimate(2048 - 384 + 1), row=None)
+        assert (at.send, at.outcome) == (None, "unchanged")
+        assert (over.send, over.outcome) == (None, "unknown_default")
+
     def test_over_ceiling_still_refuses_with_an_unknown_floor(self):
         result = plan(prompt_for_estimate(20000), row=None)
         assert result.outcome == "over_ceiling"
@@ -224,6 +230,16 @@ class TestUnknownFloor:
         marks = ContextMarks()
         marks.record(MODEL, None, 8192)
         assert marks.get(MODEL, None) == 0
+
+
+class TestCeilingAboveTheFloor:
+    def test_a_non_power_of_two_ceiling_never_raises_above_the_base(self):
+        result = plan(prompt_for_estimate(17000 - 384), row=18000, ceiling=20000)
+        assert (result.send, result.outcome) == (18000, "unchanged")
+
+    def test_a_prompt_that_does_not_fit_the_base_is_refused(self):
+        result = plan(prompt_for_estimate(19000 - 384), row=18000, ceiling=20000)
+        assert result.outcome == "over_ceiling"
 
 
 class TestStickyMarks:
@@ -357,6 +373,18 @@ class TestCapturedPromptsAreNotFlagged:
         assert captures[0]["role"] == "fact_check"
         assert (captures[0]["case_id"], captures[0]["prompt_bytes"], captures[0]["prompt_eval_count"]) == ("fc_p01", 810, 196)
 
+    def test_prefix_cache_hits_still_report_the_full_prompt_count(self):
+        # Ollama 0.33.3: a prefix-cache hit reports the whole prompt, not the
+        # uncached tail. The bench's sh_intent rows at num_ctx 8192 span
+        # 4,438-4,609 (468 cached rows included) and none is truncated.
+        entries = json.loads(FIXTURE.read_text())["sh_intent_at_8192"]
+        assert {e["case_id"] for e in entries} == {"si_r10", "si_f01"}
+        for entry in entries:
+            for count in entry["prompt_eval_counts"]:
+                assert 4438 <= count <= 4609
+                result = plan("a" * entry["prompt_bytes"], row=8192, require_full=False)
+                assert truncation_suspected(result, count) is False
+
     @pytest.mark.parametrize("effective", [2048, None])
     def test_no_capture_is_flagged(self, captures, effective):
         flagged = []
@@ -417,14 +445,14 @@ class TestConfigFields:
         assert len(errors) == 1
         assert "bogus" not in errors[0].getMessage()
 
-    @pytest.mark.parametrize("value", ["10", "x", "2047", "-1", "", "1.5"])
+    @pytest.mark.parametrize("value", ["10", "x", "2047", "-1", "", "1.5", str(10**9), "131073"])
     def test_bad_ceiling_becomes_16384_with_one_error(self, clean_env, caplog, value):
         clean_env.setenv("LLM_CONTEXT_CEILING", value)
         config, records = _load(caplog)
         assert config.llm_context_ceiling == 16384
         assert len([r for r in records if r.levelno == logging.ERROR and "llm_context_ceiling_invalid" in r.getMessage()]) == 1
 
-    @pytest.mark.parametrize("value", ["-5", "x", "1.5"])
+    @pytest.mark.parametrize("value", ["-5", "x", "1.5", str(10**9), "131073"])
     def test_bad_server_default_becomes_unknown_with_one_error(self, clean_env, caplog, value):
         clean_env.setenv("LLM_SERVER_DEFAULT_CONTEXT", value)
         config, records = _load(caplog)

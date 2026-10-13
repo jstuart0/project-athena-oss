@@ -65,6 +65,7 @@ from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from shared.admin_url import get_admin_url
+from shared.llm_context import MAX_BUCKET
 
 logger = logging.getLogger(__name__)
 
@@ -709,11 +710,12 @@ class AthenaConfig(BaseSettings):
     @classmethod
     def _validate_llm_context_ceiling(cls, v: object) -> int:
         value = _plain_int(v)
-        if value is not None and value >= _LLM_CONTEXT_CEILING_MIN:
+        if value is not None and _LLM_CONTEXT_CEILING_MIN <= value <= MAX_BUCKET:
             return value
         logger.error(
-            "llm_context_ceiling_invalid: LLM_CONTEXT_CEILING must be an integer of at least %d; using %d",
+            "llm_context_ceiling_invalid: LLM_CONTEXT_CEILING must be an integer from %d to %d; using %d",
             _LLM_CONTEXT_CEILING_MIN,
+            MAX_BUCKET,
             _LLM_CONTEXT_CEILING_DEFAULT,
         )
         return _LLM_CONTEXT_CEILING_DEFAULT
@@ -722,11 +724,12 @@ class AthenaConfig(BaseSettings):
     @classmethod
     def _validate_llm_server_default_context(cls, v: object) -> int:
         value = _plain_int(v)
-        if value is not None and value >= 0:
+        if value is not None and 0 <= value <= MAX_BUCKET:
             return value
         logger.error(
             "llm_server_default_context_invalid: LLM_SERVER_DEFAULT_CONTEXT must be 0 (unknown) "
-            "or a positive integer; using 0"
+            "or an integer up to %d; using 0",
+            MAX_BUCKET,
         )
         return 0
 

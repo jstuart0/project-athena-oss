@@ -60,15 +60,26 @@ class ContextPlan:
 class ContextBudgetExceeded(RuntimeError):
     """A strict call can't be answered from a complete prompt.
 
-    `reason` is `over_ceiling` (refused before any request) or `truncated`
-    (the response shows the prompt was cut). The message never carries prompt
+    `reason` is `over_ceiling`, `floor_unknown` or `unsupported_backend`
+    (all refused before any request) or `truncated` (the response shows the
+    prompt was cut). The message never carries prompt
     text.
     """
 
-    def __init__(self, plan: ContextPlan, reason: str):
+    def __init__(
+        self,
+        plan: ContextPlan,
+        reason: str,
+        *,
+        prompt_eval_count: Optional[int] = None,
+        eval_count: Optional[int] = None,
+    ):
         super().__init__(f"llm context budget exceeded: {reason}")
         self.plan = plan
         self.reason = reason
+        # Tokens a refused (truncated) response already consumed, for accounting.
+        self.prompt_eval_count = prompt_eval_count
+        self.eval_count = eval_count
 
 
 class ContextMarks:
@@ -148,13 +159,19 @@ def plan_context(
         need = estimate + reserve
         bucket = max(_next_pow2(need), MIN_BUCKET)
         if base is None:
+            # Nothing is sent without a known floor: a need above the smallest
+            # bucket can't be guaranteed, so the router refuses it (the
+            # post-hoc check can't see a non-power-of-two server context).
             effective = None
             if bucket > settings.ceiling:
                 outcome = "over_ceiling"
             elif need > MIN_BUCKET:
                 outcome = "unknown_default"
-        elif bucket > settings.ceiling and need > base:
-            outcome = "over_ceiling"
+        elif bucket > settings.ceiling:
+            # The ceiling bounds raises only: a prompt that doesn't fit what
+            # would be sent anyway is refused; one that fits keeps the base.
+            if need > base:
+                outcome = "over_ceiling"
         else:
             send = effective = max(base, min(bucket, settings.ceiling))
             if send > base:

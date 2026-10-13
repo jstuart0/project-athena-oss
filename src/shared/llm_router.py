@@ -26,6 +26,7 @@ from shared.llm_context import (
     ContextMarks,
     ContextPlan,
     ContextSettings,
+    estimate_tokens,
     plan_context,
     truncation_suspected,
     valid_ctx,
@@ -472,11 +473,18 @@ class LLMRouter:
                 ceiling=settings.ceiling,
                 strict=require_full_prompt,
             )
-        if require_full_prompt and settings.mode == "enforce" and plan.outcome == "over_ceiling":
-            raise ContextBudgetExceeded(plan, "over_ceiling")
+        if require_full_prompt and settings.mode == "enforce":
+            if plan.outcome == "over_ceiling":
+                raise ContextBudgetExceeded(plan, "over_ceiling")
+            if plan.outcome == "unknown_default":
+                raise ContextBudgetExceeded(plan, "floor_unknown")
         return plan
 
     def _note_sent_context(self, model: str, payload: Dict[str, Any]) -> None:
+        # Only generate and stream sends are seen here. The tool path sends no
+        # num_ctx (D5), so a model shared by both paths can reload on the
+        # generate/tool switch without moving athena_llm_context_changes_total.
+        # Phase 6 adds detection on the tool path.
         sent = valid_ctx(payload.get("options", {}).get("num_ctx"))
         if sent is None:
             return
@@ -498,10 +506,11 @@ class LLMRouter:
         and report or raise on a cut-off prompt."""
         settings = self._context_settings()
         enforcing = settings.mode == "enforce"
-        if require_full_prompt and enforcing and plan.send is not None:
-            self._context_marks.record(model, plan.floor, plan.send)
         prompt_eval_count = _count_or_none(data.get("prompt_eval_count"))
         if not truncation_suspected(plan, prompt_eval_count):
+            # The mark moves only for a strict call that came back whole.
+            if require_full_prompt and enforcing and plan.send is not None:
+                self._context_marks.record(model, plan.floor, plan.send)
             return
         record_llm_context(path, "truncation_suspected", model)
         logger.warning(
@@ -510,14 +519,19 @@ class LLMRouter:
             path=path,
             estimate=plan.estimate,
             reserve=plan.reserve,
-            row_ctx=plan.floor,
+            floor_ctx=plan.floor,
             sent=plan.send,
             prompt_eval_count=prompt_eval_count,
             load_duration=data.get("load_duration"),
             strict=require_full_prompt,
         )
         if require_full_prompt and enforcing:
-            raise ContextBudgetExceeded(plan, "truncated")
+            raise ContextBudgetExceeded(
+                plan,
+                "truncated",
+                prompt_eval_count=prompt_eval_count,
+                eval_count=_count_or_none(data.get("eval_count")),
+            )
 
     async def _get_backend_config(self, model: str) -> Dict[str, Any]:
         """
@@ -761,12 +775,26 @@ class LLMRouter:
             has_ollama_options=bool(ollama_options)
         )
 
+        if require_full_prompt and backend_type not in (
+            BackendType.OLLAMA, "ollama", BackendType.AUTO, "auto"
+        ):
+            # Only Ollama is planned and checked; MLX and the cloud backends
+            # can't honour the guarantee, so a strict caller fails closed.
+            raise ContextBudgetExceeded(
+                ContextPlan(
+                    send=None, effective=None, estimate=estimate_tokens(prompt),
+                    reserve=0, outcome="unchanged",
+                ),
+                "unsupported_backend",
+            )
+
         start_time = time.time()
         response = None
 
         try:
-            if backend_type == BackendType.AUTO or backend_type == "auto":
-                # Try MLX first, fall back to Ollama
+            if (backend_type == BackendType.AUTO or backend_type == "auto") and not require_full_prompt:
+                # Try MLX first, fall back to Ollama (a strict call skips MLX:
+                # only Ollama can guarantee the whole prompt was read)
                 try:
                     response = await self._generate_mlx(
                         endpoint_url, model, prompt, temperature, max_tokens, timeout, mlx_options,
@@ -824,13 +852,25 @@ class LLMRouter:
                     system_prompt=system_prompt, request_id=request_id
                 )
 
-            else:  # OLLAMA (default)
+            else:  # OLLAMA (default; also a strict AUTO call)
+                ollama_url = get_config().ollama_url if backend_type in (BackendType.AUTO, "auto") else endpoint_url
                 response = await self._generate_ollama(
-                    endpoint_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
+                    ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
                     system_prompt=system_prompt, require_full_prompt=require_full_prompt
                 )
 
             return response
+
+        except ContextBudgetExceeded as exc:
+            # A truncated strict response was still paid for: keep its counts in
+            # the usage scope and the metric window.
+            if exc.prompt_eval_count is not None or exc.eval_count is not None:
+                response = {
+                    "backend": "ollama",
+                    "prompt_eval_count": exc.prompt_eval_count,
+                    "eval_count": exc.eval_count,
+                }
+            raise
 
         finally:
             duration = time.time() - start_time
@@ -1539,7 +1579,10 @@ class LLMRouter:
                 response = await client.post("/api/generate", json=payload)
             except httpx.ReadTimeout:
                 elapsed = time.monotonic() - start_time
-                if plan.floor is not None and plan.send is not None and plan.send > plan.floor:
+                # Only a plan that raised the context reloaded the model; a sticky
+                # default call keeps the ATHENA-31 retry. (In observe the outcome
+                # is computed but nothing was raised, so send == floor.)
+                if plan.outcome == "raised" and plan.send is not None and plan.send != plan.floor:
                     logger.warning(
                         "ollama_read_timeout_retry_skipped_context_raised",
                         model=model,

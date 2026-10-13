@@ -649,5 +649,21 @@
    "prompt_bytes": 1863,
    "prompt_eval_count": 554
   }
+ ],
+ "sh_intent_at_8192": [
+  {
+   "case_id": "si_r10",
+   "prompt_bytes": 12907,
+   "prompt_eval_counts": [
+    4438
+   ]
+  },
+  {
+   "case_id": "si_f01",
+   "prompt_bytes": 13600,
+   "prompt_eval_counts": [
+    4609
+   ]
+  }
  ]
 }
