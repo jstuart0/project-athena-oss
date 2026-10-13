@@ -202,8 +202,12 @@ def _build_ollama_generate_payload(
     system_prompt: Optional[str],
     stream: bool,
     context: Optional[ContextPlan] = None,
+    caller_output_wins: bool = False,
 ) -> Dict[str, Any]:
     """Build an Ollama `/api/generate` request payload.
+
+    ``caller_output_wins`` (strict calls only): a row ``num_predict`` smaller
+    than the caller's ``max_tokens`` does not cut the caller's answer short.
 
     Shared by `_generate_ollama` (non-streaming) and `_generate_ollama_stream`
     (streaming, ATHENA-87 F80) so both send byte-identical requests except
@@ -230,6 +234,8 @@ def _build_ollama_generate_payload(
             model=model,
             options=list(ollama_options.keys())
         )
+    if caller_output_wins and (valid_ctx(options.get("num_predict")) or 0) < max_tokens:
+        options["num_predict"] = max_tokens
     # The planned context overrides the row's value, so it is set after the merge.
     if context is not None and context.send is not None:
         options["num_ctx"] = context.send
@@ -315,6 +321,20 @@ async def prewarm_ollama_models(
                     error_type=type(e).__name__,
                 )
     return results
+
+
+def warn_if_server_default_context_unknown() -> bool:
+    """One startup WARNING when LLM_SERVER_DEFAULT_CONTEXT is unset: a model
+    whose row has no num_ctx then has no known floor, and a strict smart-home
+    call to it is refused. Returns whether it warned."""
+    if get_config().llm_server_default_context > 0:
+        return False
+    logger.warning(
+        "llm_server_default_context_unset",
+        note="strict smart-home calls need a num_ctx on the model's row or LLM_SERVER_DEFAULT_CONTEXT; "
+             "without either, a prompt above 2048 tokens is refused",
+    )
+    return True
 
 
 _CONTEXT_REJECTION_MARKERS = ("exceed_context_size", "exceeds the available context size")
@@ -435,6 +455,8 @@ class LLMRouter:
         self._context_marks = ContextMarks()
         self._last_sent_context: Dict[str, int] = {}
         self._invalid_row_ctx_reported: set = set()
+        self._raise_warned: set = set()
+        self._stale_config_warned: set = set()
 
         logger.info(
             "llm_router_initialized",
@@ -476,6 +498,10 @@ class LLMRouter:
             )
         settings = self._context_settings()
         merged_num_predict = options.get("num_predict")
+        if require_full_prompt and valid_ctx(merged_num_predict) is not None:
+            # The payload sends at least the caller's limit (see
+            # `_build_ollama_generate_payload`), so the reserve is that.
+            merged_num_predict = max(merged_num_predict, max_tokens)
         plan = plan_context(
             prompt_text=_compose_ollama_prompt(prompt, system_prompt),
             row_ctx=row_ctx,
@@ -500,6 +526,19 @@ class LLMRouter:
                 sent=plan.send,
                 ceiling=settings.ceiling,
                 strict=require_full_prompt,
+            )
+        if (
+            require_full_prompt and plan.floor is not None
+            and plan.send is not None and plan.send > plan.floor and model not in self._raise_warned
+        ):
+            self._raise_warned.add(model)
+            logger.warning(
+                "llm_context_raised_above_row",
+                model=model,
+                floor=plan.floor,
+                planned=plan.send,
+                note="the model's row num_ctx is below what its strict calls need; replicas size independently "
+                     "and each reload costs seconds. Set this model's row num_ctx to the planned size",
             )
         if require_full_prompt and settings.mode == "enforce":
             if plan.outcome == "over_ceiling":
@@ -706,6 +745,15 @@ class LLMRouter:
                 "keep_alive_seconds": -1  # Default: keep forever
             }
 
+    def _serve_stale_model_config(self, model: str, cause: str) -> Dict[str, Any]:
+        """The last config fetched for `model`, served while admin can't answer
+        (kept in memory, per model, replaced by every successful fetch). Without
+        it the row's num_ctx would vanish and a strict call would refuse."""
+        if model not in self._stale_config_warned:
+            self._stale_config_warned.add(model)
+            logger.warning("model_config_served_stale", model=model, cause=cause)
+        return self._model_config_cache[model]
+
     async def _get_model_config(self, model: str) -> Dict[str, Any]:
         """
         Fetch model execution configuration (Ollama/MLX options) from admin API.
@@ -731,7 +779,12 @@ class LLMRouter:
             url = f"{self.admin_url}/api/model-configs/public/{path_segments(model)}"
             response = await self.client.get(url, headers=service_key_headers())
 
+            if response.status_code != 200 and response.status_code != 404 and model in self._model_config_cache:
+                note_admin_refusal(response.status_code, "/api/model-configs/public/{model_name}")
+                return self._serve_stale_model_config(model, f"http_{response.status_code}")
+
             if response.status_code == 200:
+                self._stale_config_warned.discard(model)
                 config = response.json()
                 logger.debug(
                     "fetched_model_config",
@@ -769,6 +822,8 @@ class LLMRouter:
                 model=model,
                 error=str(e)
             )
+            if model in self._model_config_cache:
+                return self._serve_stale_model_config(model, type(e).__name__)
             # Return empty config on failure
             return {
                 "model_name": model,
@@ -1650,6 +1705,7 @@ class LLMRouter:
             system_prompt=system_prompt,
             stream=False,
             context=plan,
+            caller_output_wins=require_full_prompt,
         )
         self._note_sent_context(model, payload)
 

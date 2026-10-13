@@ -152,7 +152,8 @@ class TestStrictSizing:
         assert "num_ctx" not in body
         options = body["options"]
         assert options["num_ctx"] == 8192
-        assert (options["num_batch"], options["mirostat"], options["num_predict"]) == (256, 2, 384)
+        # a strict call's max_tokens (400) beats the row's smaller num_predict (384)
+        assert (options["num_batch"], options["mirostat"], options["num_predict"]) == (256, 2, 400)
         assert (options["mirostat_eta"], options["mirostat_tau"]) == (0.1, 5.0)
         assert body["prompt"].startswith("/no_think\n\n" + MARKER)
 
@@ -212,12 +213,12 @@ class TestStrictSizing:
         assert context_count("unknown_default") - before == 1
 
     def test_unknown_floor_boundary_at_2048(self, monkeypatch):
-        # reserve 384: estimate 1664 is need 2048 (sent), 1665 is need 2049 (refused)
+        # reserve 400 (the caller's max_tokens beats the row's 384): estimate 1648 is need 2048 (sent), 1649 is need 2049 (refused)
         wire = Wire(monkeypatch, row={"num_predict": 384})
-        wire.generate(prompt_with_estimate(1664), strict=True)
+        wire.generate(prompt_with_estimate(1648), strict=True)
         assert len(wire.requests) == 1 and "num_ctx" not in wire.requests[0]["options"]
         with pytest.raises(ContextBudgetExceeded) as raised:
-            wire.generate(prompt_with_estimate(1665), strict=True)
+            wire.generate(prompt_with_estimate(1649), strict=True)
         assert raised.value.reason == "floor_unknown"
         assert len(wire.requests) == 1
 
@@ -638,3 +639,181 @@ class TestPrewarmAndContextFor:
         wire = Wire(monkeypatch)
         run(wire.router.context_for(MODEL))
         assert wire.requests == []
+
+
+class TestRaiseAboveTheRowWarning:
+    """I-1: two replicas size a raised model independently; the operator is told once."""
+
+    def raised(self, logs):
+        return [e for e in logs if e["event"] == "llm_context_raised_above_row"]
+
+    def test_a_strict_raise_above_the_row_warns_once_per_model_without_prompt_text(self, monkeypatch, logs):
+        wire = Wire(monkeypatch)
+        wire.generate(strict=True)
+        wire.generate(strict=True)
+        entries = self.raised(logs)
+        assert len(entries) == 1 and entries[0]["log_level"] == "warning"
+        assert (entries[0]["model"], entries[0]["floor"], entries[0]["planned"]) == (MODEL, 2048, 8192)
+        assert MARKER not in json.dumps(logs, default=str)
+        wire.generate(strict=True, model="other:8b")
+        assert len(self.raised(logs)) == 2
+
+    def test_no_warning_when_the_row_already_holds_the_prompt(self, monkeypatch, logs):
+        wire = Wire(monkeypatch, row={**ROW_2048, "num_ctx": 8192})
+        wire.generate(strict=True)
+        assert self.raised(logs) == []
+
+    def test_no_warning_for_a_default_call_or_in_observe_mode(self, monkeypatch, logs):
+        wire = Wire(monkeypatch)
+        wire.generate(strict=False)
+        assert self.raised(logs) == []
+
+    def test_no_warning_in_observe_mode(self, monkeypatch, logs):
+        configure(monkeypatch, LLM_CONTEXT_GUARD="observe")
+        wire = Wire(monkeypatch)
+        wire.generate(strict=True)
+        assert self.raised(logs) == []
+
+    def test_the_raise_is_visible_in_the_context_metric(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        before = context_count("raised")
+        wire.generate(strict=True)
+        assert context_count("raised") - before == 1
+
+
+class TestStrictCallersOutputLimit:
+    """I-2: a strict caller's max_tokens beats a smaller row num_predict."""
+
+    def test_a_384_row_sends_the_callers_1500(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        wire.generate(strict=True)
+        assert wire.requests[0]["options"]["num_predict"] == 400  # generate() helper passes max_tokens=400
+        run(wire.router.generate(model=MODEL, prompt=SH_INTENT_PROMPT, temperature=0.1, max_tokens=1500,
+                                 system_prompt="/no_think", require_full_prompt=True))
+        assert wire.requests[1]["options"]["num_predict"] == 1500
+
+    def test_a_default_call_keeps_the_row_value(self, monkeypatch):
+        wire = Wire(monkeypatch)
+        run(wire.router.generate(model=MODEL, prompt="hi", temperature=0.1, max_tokens=1500, system_prompt="/no_think"))
+        assert wire.requests[0]["options"]["num_predict"] == 384
+
+    def test_a_row_value_above_the_callers_stays(self, monkeypatch):
+        wire = Wire(monkeypatch, row={**ROW_2048, "num_predict": 900})
+        run(wire.router.generate(model=MODEL, prompt="hi", temperature=0.1, max_tokens=400,
+                                 system_prompt="/no_think", require_full_prompt=True))
+        assert wire.requests[0]["options"]["num_predict"] == 900
+
+    def test_the_context_reserve_counts_the_larger_limit(self, monkeypatch):
+        # estimate 7000 + 384 fits 8192; + 1500 does not
+        wire = Wire(monkeypatch)
+        run(wire.router.generate(model=MODEL, prompt=prompt_with_estimate(7000), temperature=0.1, max_tokens=1500,
+                                 system_prompt="/no_think", require_full_prompt=True))
+        assert wire.requests[0]["options"]["num_ctx"] == 16384
+
+    def test_the_stream_payload_is_unchanged(self, monkeypatch):
+        stream_body = '{"response":"ok","done":true,"prompt_eval_count":4441,"eval_count":5}\n'
+        wire = Wire(monkeypatch, responder=lambda body: httpx.Response(200, text=stream_body))
+        wire.stream()
+        assert wire.requests[0]["options"]["num_predict"] == 384
+
+
+class AdminOutage:
+    """A router whose admin model-config endpoint can be switched to fail."""
+
+    def __init__(self, monkeypatch, row=None, **wire_kwargs):
+        self.wire = Wire(monkeypatch, row=row, **wire_kwargs)
+        self.router = self.wire.router
+        self.mode = "ok"
+        self.fetches = 0
+        row_now = lambda: self.wire.row  # noqa: E731
+
+        def handler(request):
+            self.fetches += 1
+            if self.mode == "down":
+                raise httpx.ConnectError("admin down")
+            if self.mode == "503":
+                return httpx.Response(503, json={"detail": "busy"})
+            if self.mode == "404":
+                return httpx.Response(404, json={"detail": "none"})
+            return httpx.Response(200, json={"model_name": MODEL, "ollama_options": row_now(), "timeout_seconds": 30})
+
+        self.router.client = _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+        self.router._cache_ttl = 0
+        self.router._get_model_config = llm_router_module.LLMRouter._get_model_config.__get__(self.router)
+
+    def config(self, model=MODEL):
+        return run(self.router._get_model_config(model))
+
+
+class TestAdminOutageKeepsTheLastRow:
+    """I-3: a fetch failure serves the last good config, never an empty one."""
+
+    @pytest.mark.parametrize("mode", ["down", "503"])
+    def test_an_outage_after_a_good_fetch_keeps_the_row_and_a_strict_call_works(self, monkeypatch, logs, mode):
+        admin = AdminOutage(monkeypatch)
+        assert admin.config()["ollama_options"]["num_ctx"] == 2048
+        admin.mode = mode
+        assert admin.config()["ollama_options"]["num_ctx"] == 2048
+        admin.config()
+        stale = [e for e in logs if e["event"] == "model_config_served_stale"]
+        assert len(stale) == 1 and stale[0]["log_level"] == "warning" and stale[0]["model"] == MODEL
+        result = admin.wire.generate(strict=True)
+        assert result["response"] == "ok"
+        assert admin.wire.requests[-1]["options"]["num_ctx"] == 8192
+
+    def test_an_outage_with_no_prior_fetch_keeps_todays_empty_config_and_refuses(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.mode = "down"
+        assert admin.config()["ollama_options"] == {}
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            admin.wire.generate(strict=True)
+        assert raised.value.reason == "floor_unknown"
+
+    def test_a_missing_row_is_not_served_stale(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "404"
+        assert admin.config()["ollama_options"] == {}
+
+    def test_the_cache_is_replaced_by_every_success_and_the_warning_rearms(self, monkeypatch, logs):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.wire.row = {**ROW_2048, "num_ctx": 4096}
+        admin.config()
+        admin.mode = "down"
+        assert admin.config()["ollama_options"]["num_ctx"] == 4096
+        admin.mode = "ok"
+        admin.config()
+        admin.mode = "down"
+        admin.config()
+        assert len([e for e in logs if e["event"] == "model_config_served_stale"]) == 2
+
+    def test_the_stale_cache_is_per_model(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        assert admin.config("other:1b")["ollama_options"] == {}
+
+
+class TestStartupWarning:
+    def test_unset_server_default_warns(self, monkeypatch, logs):
+        assert llm_router_module.warn_if_server_default_context_unknown() is True
+        entry = next(e for e in logs if e["event"] == "llm_server_default_context_unset")
+        assert entry["log_level"] == "warning"
+
+    def test_a_set_server_default_is_silent(self, monkeypatch, logs):
+        configure(monkeypatch, LLM_SERVER_DEFAULT_CONTEXT=65536)
+        assert llm_router_module.warn_if_server_default_context_unknown() is False
+        assert [e for e in logs if e["event"] == "llm_server_default_context_unset"] == []
+
+    def test_the_lifespan_calls_it_and_prewarm_passes_the_sizes(self):
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse((Path(__file__).resolve().parents[2] / "src" / "orchestrator" / "main.py").read_text(encoding="utf-8"))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        named = lambda n, call: getattr(call.func, "id", getattr(call.func, "attr", None)) == n  # noqa: E731
+        assert any(named("warn_if_server_default_context_unknown", c) for c in calls)
+        prewarm = [c for c in calls if named("prewarm_ollama_models", c)]
+        assert len(prewarm) == 1 and any(k.arg == "num_ctx_by_model" for k in prewarm[0].keywords)
+        assert any(named("context_for", c) for c in calls)

@@ -1213,6 +1213,8 @@ async def lifespan(app: FastAPI):
     # Initialize LLM router with database-driven backend configuration
     llm_router = get_llm_router()
     _runtime.set_llm_router(llm_router)
+    from shared.llm_router import warn_if_server_default_context_unknown
+    warn_if_server_default_context_unknown()
     logger.info(f"LLM Router initialized with admin API: {llm_router.admin_url}")
 
     # ATHENA-47: pre-warm Ollama models in background so the first user query

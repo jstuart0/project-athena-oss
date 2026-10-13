@@ -208,6 +208,14 @@ def _signature_matches(estimate: int, count: int, size: int) -> bool:
     return estimate > size and abs(count - (size // 2 + 2)) <= SIGNATURE_TOLERANCE
 
 
+def reported_count_too_low(estimate: int, count: Optional[int]) -> bool:
+    """Rule (b) alone, for any backend that reports prompt tokens: with an
+    estimate of at least 256 tokens, a count under 35% of it is a cut prompt."""
+    if count is None or isinstance(count, bool) or not isinstance(count, int):
+        return False
+    return estimate >= RATIO_MIN_ESTIMATE and count * 100 < RATIO_PERCENT * estimate
+
+
 def truncation_suspected(
     plan: ContextPlan, prompt_eval_count: Optional[int], *, backend: str = "ollama"
 ) -> bool:
@@ -225,7 +233,4 @@ def truncation_suspected(
     sizes = (plan.effective,) if plan.effective is not None else _SCAN_SIZES
     if any(_signature_matches(plan.estimate, prompt_eval_count, size) for size in sizes):
         return True
-    return (
-        plan.estimate >= RATIO_MIN_ESTIMATE
-        and prompt_eval_count * 100 < RATIO_PERCENT * plan.estimate
-    )
+    return reported_count_too_low(plan.estimate, prompt_eval_count)
