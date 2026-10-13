@@ -261,6 +261,10 @@ def _build_ollama_generate_payload(
 # read timeout is safe. The backoff gives the Ollama host a moment to finish a stalled
 # request that was about to complete.
 OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
+# A model config served while admin is down is trusted this long after its last
+# good fetch, and re-tried this often.
+STALE_MODEL_CONFIG_MAX_AGE_SECONDS = 600.0
+STALE_MODEL_CONFIG_RETRY_SECONDS = 30.0
 # ATHENA-47: Don't retry if the first attempt already consumed >50% of the
 # timeout budget — a second attempt that would push past the upstream gateway
 # timeout is doomed and just amplifies user-visible latency.
@@ -457,6 +461,8 @@ class LLMRouter:
         self._invalid_row_ctx_reported: set = set()
         self._raise_warned: set = set()
         self._stale_config_warned: set = set()
+        self._stale_expired_warned: set = set()
+        self._model_config_fetched_at: Dict[str, float] = {}
 
         logger.info(
             "llm_router_initialized",
@@ -745,13 +751,42 @@ class LLMRouter:
                 "keep_alive_seconds": -1  # Default: keep forever
             }
 
-    def _serve_stale_model_config(self, model: str, cause: str) -> Dict[str, Any]:
+    @staticmethod
+    def _empty_model_config(model: str) -> Dict[str, Any]:
+        return {
+            "model_name": model,
+            "ollama_options": {},
+            "mlx_options": {},
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "timeout_seconds": 60,
+            "keep_alive_seconds": -1,
+        }
+
+    def _serve_stale_model_config(self, model: str, cause: str, now: float) -> Dict[str, Any]:
         """The last config fetched for `model`, served while admin can't answer
         (kept in memory, per model, replaced by every successful fetch). Without
-        it the row's num_ctx would vanish and a strict call would refuse."""
+        it the row's num_ctx would vanish and a strict call would refuse.
+
+        Bounded: past STALE_MODEL_CONFIG_MAX_AGE_SECONDS since the last good
+        fetch it is no config at all. Each stale serve holds the cache for
+        STALE_MODEL_CONFIG_RETRY_SECONDS so a down admin costs one timeout per
+        interval, not one per call."""
+        age = now - self._model_config_fetched_at.get(model, 0.0)
+        if age > STALE_MODEL_CONFIG_MAX_AGE_SECONDS:
+            if model not in self._stale_expired_warned:
+                self._stale_expired_warned.add(model)
+                logger.warning("model_config_stale_expired", model=model, cause=cause, age_seconds=int(age))
+            return self._empty_model_config(model)
+        record_llm_context("admin", "served_stale", model)
         if model not in self._stale_config_warned:
             self._stale_config_warned.add(model)
-            logger.warning("model_config_served_stale", model=model, cause=cause)
+            logger.warning("model_config_served_stale", model=model, cause=cause, age_seconds=int(age))
+        # The hold never reaches past the age limit: the cache lapses there.
+        self._model_config_expiry[model] = min(
+            now + STALE_MODEL_CONFIG_RETRY_SECONDS,
+            self._model_config_fetched_at.get(model, 0.0) + STALE_MODEL_CONFIG_MAX_AGE_SECONDS,
+        )
         return self._model_config_cache[model]
 
     async def _get_model_config(self, model: str) -> Dict[str, Any]:
@@ -779,12 +814,16 @@ class LLMRouter:
             url = f"{self.admin_url}/api/model-configs/public/{path_segments(model)}"
             response = await self.client.get(url, headers=service_key_headers())
 
-            if response.status_code != 200 and response.status_code != 404 and model in self._model_config_cache:
+            if (
+                response.status_code not in (200, 401, 403, 404)
+                and model in self._model_config_cache
+            ):
                 note_admin_refusal(response.status_code, "/api/model-configs/public/{model_name}")
-                return self._serve_stale_model_config(model, f"http_{response.status_code}")
+                return self._serve_stale_model_config(model, f"http_{response.status_code}", now)
 
             if response.status_code == 200:
                 self._stale_config_warned.discard(model)
+                self._stale_expired_warned.discard(model)
                 config = response.json()
                 logger.debug(
                     "fetched_model_config",
@@ -794,6 +833,9 @@ class LLMRouter:
                 )
             else:
                 note_admin_refusal(response.status_code, "/api/model-configs/public/{model_name}")
+                if response.status_code in (401, 403):
+                    # An auth misconfiguration must show: never served stale.
+                    logger.warning("model_config_fetch_refused", model=model, status=response.status_code)
                 # Not found - use empty config (defaults will be used)
                 logger.debug(
                     "no_model_config_found",
@@ -813,6 +855,7 @@ class LLMRouter:
             # Cache
             self._model_config_cache[model] = config
             self._model_config_expiry[model] = now + self._cache_ttl
+            self._model_config_fetched_at[model] = now
 
             return config
 
@@ -823,7 +866,7 @@ class LLMRouter:
                 error=str(e)
             )
             if model in self._model_config_cache:
-                return self._serve_stale_model_config(model, type(e).__name__)
+                return self._serve_stale_model_config(model, type(e).__name__, now)
             # Return empty config on failure
             return {
                 "model_name": model,

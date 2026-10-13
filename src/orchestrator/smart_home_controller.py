@@ -1482,20 +1482,32 @@ class SmartHomeController:
         return response
 
     @staticmethod
-    def _retried_intent_matches_words(intent: Dict, utterance: UtteranceClassification) -> bool:
+    def _retried_intent_matches_words(intent: Dict, utterance: UtteranceClassification, query: str) -> bool:
         """An answer from a backend that can't promise it read the whole prompt
-        writes only what the user's own words say: the classifier found the same
-        on/off state (and, where it found one, the same device) in them. A read
-        always passes."""
+        writes only what the user's own words say. A read always passes. A write
+        needs an IMPERATIVE utterance whose classifier state (and, where it found
+        one, device) agree with the intent; a lock or unlock must also be the
+        verb the words carry (``_door_verb``, the fast path's own rule)."""
         action = intent.get("action")
         if action == "get_status":
             return True
+        if utterance.kind != UtteranceKind.IMPERATIVE:
+            return False
         if action in ("turn_on", "turn_off"):
             if action != {"on": "turn_on", "off": "turn_off"}.get(utterance.target_state):
                 return False
         elif utterance.device_type is None:
             return False
-        return utterance.device_type is None or intent.get("device_type") == utterance.device_type
+        if utterance.device_type is not None and intent.get("device_type") != utterance.device_type:
+            return False
+        if action == "unlock":
+            return opening_verb_ok(query, "lock")
+        if action == "lock":
+            return _door_verb(
+                (query or "").lower(), ("lock", "locks", "locking", "locked"),
+                ("unlock", "unlocks", "unlocking", "unlocked"),
+            ) == "first"
+        return True
 
     @staticmethod
     def _retried_sequence_matches_words(sequence: Dict, query: str) -> bool:
@@ -1788,7 +1800,7 @@ Return ONLY the JSON, no other text."""
                     device_type=utterance.device_type or "unknown",
                     path="llm_coerced",
                 ).inc()
-            if not whole_prompt_guaranteed and not self._retried_intent_matches_words(intent, utterance):
+            if not whole_prompt_guaranteed and not self._retried_intent_matches_words(intent, utterance, query):
                 logger.info("smart_home_retried_intent_unverified query_len=%d", len(query))
                 return room_context.unprocessable_intent("unverified")
             return intent

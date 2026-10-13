@@ -141,7 +141,8 @@ if PROMETHEUS_AVAILABLE:
     )
 
     # Ollama context sizing (LLMRouter's planner): outcomes are raised,
-    # over_ceiling, unknown_default, truncation_suspected, rejected_by_backend.
+    # over_ceiling, unknown_default, truncation_suspected, rejected_by_backend,
+    # and (path admin) served_stale: a model config served from memory while admin is down.
     LLM_CONTEXT_TOTAL = Counter(
         'athena_llm_context_total',
         'Ollama context planning events by call path, outcome and model',

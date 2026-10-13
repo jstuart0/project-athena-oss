@@ -718,31 +718,35 @@ class TestStrictCallersOutputLimit:
 
 
 class AdminOutage:
-    """A router whose admin model-config endpoint can be switched to fail."""
+    """A router whose admin model-config endpoint can be switched to fail, on a
+    clock the test moves."""
 
     def __init__(self, monkeypatch, row=None, **wire_kwargs):
         self.wire = Wire(monkeypatch, row=row, **wire_kwargs)
         self.router = self.wire.router
         self.mode = "ok"
         self.fetches = 0
+        self.now = [1_000_000.0]
         row_now = lambda: self.wire.row  # noqa: E731
 
         def handler(request):
             self.fetches += 1
             if self.mode == "down":
                 raise httpx.ConnectError("admin down")
-            if self.mode == "503":
-                return httpx.Response(503, json={"detail": "busy"})
-            if self.mode == "404":
-                return httpx.Response(404, json={"detail": "none"})
+            if self.mode in ("503", "401", "403", "404"):
+                return httpx.Response(int(self.mode), json={"detail": "x"})
             return httpx.Response(200, json={"model_name": MODEL, "ollama_options": row_now(), "timeout_seconds": 30})
 
         self.router.client = _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
         self.router._cache_ttl = 0
         self.router._get_model_config = llm_router_module.LLMRouter._get_model_config.__get__(self.router)
+        monkeypatch.setattr(llm_router_module.time, "time", lambda: self.now[0])
 
     def config(self, model=MODEL):
         return run(self.router._get_model_config(model))
+
+    def advance(self, seconds):
+        self.now[0] += seconds
 
 
 class TestAdminOutageKeepsTheLastRow:
@@ -753,7 +757,9 @@ class TestAdminOutageKeepsTheLastRow:
         admin = AdminOutage(monkeypatch)
         assert admin.config()["ollama_options"]["num_ctx"] == 2048
         admin.mode = mode
+        admin.advance(5)
         assert admin.config()["ollama_options"]["num_ctx"] == 2048
+        admin.advance(31)
         admin.config()
         stale = [e for e in logs if e["event"] == "model_config_served_stale"]
         assert len(stale) == 1 and stale[0]["log_level"] == "warning" and stale[0]["model"] == MODEL
@@ -781,10 +787,13 @@ class TestAdminOutageKeepsTheLastRow:
         admin.wire.row = {**ROW_2048, "num_ctx": 4096}
         admin.config()
         admin.mode = "down"
+        admin.advance(40)
         assert admin.config()["ollama_options"]["num_ctx"] == 4096
         admin.mode = "ok"
+        admin.advance(40)
         admin.config()
         admin.mode = "down"
+        admin.advance(40)
         admin.config()
         assert len([e for e in logs if e["event"] == "model_config_served_stale"]) == 2
 
@@ -793,6 +802,105 @@ class TestAdminOutageKeepsTheLastRow:
         admin.config()
         admin.mode = "down"
         assert admin.config("other:1b")["ollama_options"] == {}
+
+
+class TestStaleConfigIsBounded:
+    """X-L5: age limit, a short retry hold, no stale on auth refusal, a counter."""
+
+    def test_past_ten_minutes_it_is_no_config_at_all(self, monkeypatch, logs):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(599)
+        assert admin.config()["ollama_options"]["num_ctx"] == 2048
+        admin.advance(2)
+        assert admin.config()["ollama_options"] == {}
+        assert [e["event"] for e in logs].count("model_config_stale_expired") == 1
+        admin.advance(40)
+        admin.config()
+        assert [e["event"] for e in logs].count("model_config_stale_expired") == 1, "one warning per outage"
+        with pytest.raises(ContextBudgetExceeded):
+            admin.wire.generate(strict=True)
+
+    def test_the_expiry_warning_rearms_after_a_recovery(self, monkeypatch, logs):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(700)
+        admin.config()
+        admin.mode = "ok"
+        admin.advance(40)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(700)
+        admin.config()
+        assert [e["event"] for e in logs].count("model_config_stale_expired") == 2
+
+    def test_recovery_after_expiry_restores_the_row(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(700)
+        assert admin.config()["ollama_options"] == {}
+        admin.mode = "ok"
+        admin.advance(40)
+        assert admin.config()["ollama_options"]["num_ctx"] == 2048
+
+    def test_a_stale_serve_holds_the_cache_for_30_seconds(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(1)
+        admin.config()
+        fetches = admin.fetches
+        admin.advance(29)
+        for _ in range(5):
+            admin.config()
+        assert admin.fetches == fetches, "no admin call within the hold"
+        admin.advance(2)
+        admin.config()
+        assert admin.fetches == fetches + 1
+
+    def test_the_hold_does_not_extend_the_age_limit(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        for _ in range(25):
+            admin.advance(29)
+            admin.config()
+        assert admin.config()["ollama_options"] == {}, "725 s of serves never refreshed the age"
+
+    @pytest.mark.parametrize("status", ["401", "403"])
+    def test_an_auth_refusal_is_not_served_stale_and_is_logged_with_the_status_only(self, monkeypatch, logs, status):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = status
+        admin.advance(5)
+        before = sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL)
+        assert admin.config()["ollama_options"] == {}
+        assert sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL) == before
+        refused = [e for e in logs if e["event"] == "model_config_fetch_refused"]
+        assert len(refused) == 1 and refused[0]["status"] == int(status) and refused[0]["log_level"] == "warning"
+        assert set(refused[0]) <= {"event", "log_level", "model", "status"}
+
+    def test_each_stale_serve_is_counted(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        before = sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL)
+        for _ in range(3):
+            admin.advance(31)
+            admin.config()
+        assert sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL) - before == 3
+
+    def test_an_expired_serve_is_not_counted_as_served(self, monkeypatch):
+        admin = AdminOutage(monkeypatch)
+        admin.config()
+        admin.mode = "down"
+        admin.advance(700)
+        before = sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL)
+        admin.config()
+        assert sample("athena_llm_context_total", path="admin", outcome="served_stale", model=MODEL) == before
 
 
 class TestStartupWarning:

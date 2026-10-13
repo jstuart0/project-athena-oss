@@ -691,7 +691,17 @@ class TestUnparseableAnswers:
 OFFICE_ON = {"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {}}
 
 
-class TestRetriedAnswersMatchTheWords:
+LOCK_FRONT = {"device_type": "lock", "room": "front_door", "action": "lock", "target_scope": "group", "parameters": {}}
+LOCK_QUERY = "would you mind locking the front door lock"
+
+
+
+
+class TestNonOllamaRetryIsWordChecked:
+    """The explicit trade-off of D22: on MLX or a cloud model an answer is acted on only when the
+    user's own words agree with it. Phrasings the classifier can't read as a command get a refusal."""
+
+
     def retried(self, monkeypatch, reply, *, extra=None):
         llm = Scripted(("raise", "unsupported_backend"), default=("reply", reply, "stop"))
         return light_chat(monkeypatch, llm), llm
@@ -778,6 +788,91 @@ class TestRetriedAnswersMatchTheWords:
         chat = light_chat(monkeypatch, llm)
         chat.turn(LIGHT_QUERY)
         assert ("light", "turn_on") in writes(chat)
+
+    def retried_door(self, monkeypatch, reply):
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", reply, "stop"))
+        return door_chat(monkeypatch, llm), llm
+
+    def test_a_retried_unlock_for_a_lock_command_does_not_unlock(self, monkeypatch):
+        door, llm = self.retried_door(monkeypatch, UNLOCK_FRONT)
+        out = door.say(LOCK_QUERY)
+        assert len(llm.calls) == 2
+        assert out.answer == room_context.UNPROCESSABLE_TEXT
+        assert door.calls == [] and door.openings == []
+
+    def test_the_matching_retried_lock_is_accepted(self, monkeypatch):
+        door, llm = self.retried_door(monkeypatch, LOCK_FRONT)
+        door.say(LOCK_QUERY)
+        assert ("lock", "lock", "lock.front_door") in door.calls
+
+    def test_a_retried_lock_for_an_unlock_command_is_refused(self, monkeypatch):
+        door, llm = self.retried_door(monkeypatch, LOCK_FRONT)
+        door.say("would you mind unlocking the front door lock")
+        assert door.calls == []
+
+    def test_a_retried_unlock_after_a_negation_is_refused(self, monkeypatch):
+        door, llm = self.retried_door(monkeypatch, UNLOCK_FRONT)
+        door.say("would you mind not unlocking the front door lock")
+        assert door.openings == []
+
+    @pytest.mark.parametrize("action", ["lock", "unlock"])
+    def test_the_verb_rule_is_the_classifier_independent_second_layer(self, action):
+        from orchestrator.utterance_kind import UtteranceClassification, UtteranceKind
+
+        imperative = UtteranceClassification(kind=UtteranceKind.IMPERATIVE, device_type="lock")
+        intent = {**LOCK_FRONT, "action": action}
+        said = {"lock": "lock the front door", "unlock": "unlock the front door"}
+        other = {"lock": "unlock the front door", "unlock": "lock the front door"}
+        matches = shc.SmartHomeController._retried_intent_matches_words
+        assert matches(intent, imperative, said[action]) is True
+        assert matches(intent, imperative, other[action]) is False
+        assert matches(intent, imperative, "do something with the front door") is False
+
+    @pytest.mark.parametrize("kind", ["UNKNOWN", "STATE_QUESTION"])
+    def test_a_write_needs_an_imperative_utterance_even_when_state_and_device_agree(self, kind):
+        from orchestrator.utterance_kind import UtteranceClassification, UtteranceKind
+
+        said = UtteranceClassification(kind=UtteranceKind[kind], device_type="light", target_state="on")
+        matches = shc.SmartHomeController._retried_intent_matches_words
+        assert matches(LIGHT_ON, said, "the lights on") is False
+        assert matches({**LIGHT_ON, "action": "get_status"}, said, "the lights on") is True
+
+    def test_a_follow_up_like_make_it_a_bit_warmer_is_refused_on_the_retried_path(self, monkeypatch):
+        """No device in the words: the follow-up's referent is not in them either."""
+        warmer = {**LIGHT_ON, "action": "set_color", "parameters": {"hs_colors": [[30, 100]]}}
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", warmer, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        got = asyncio.run(chat.rig.controller.extract_intent(
+            "make it a bit warmer", prev_query="turn on the study lights", prev_response="Done",
+            prev_intent_entities={"device_type": "light", "room": "study", "action": "turn_on", "parameters": {}},
+        ))
+        assert len(llm.calls) == 2, "the follow-up reached the model and its retry"
+        assert got == {"unprocessable": True, "unprocessable_reason": "unverified"}
+
+    def test_with_the_state_question_kill_switch_on_a_retried_write_is_refused(self, monkeypatch):
+        """The kill switch classifies every utterance UNKNOWN: nothing in the words can verify a write."""
+        from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION
+
+        for reply in (LIGHT_ON, {**LIGHT_ON, "action": "set_color"}):
+            llm = Scripted(("raise", "unsupported_backend"), default=("reply", reply, "stop"))
+            chat = light_chat(monkeypatch, llm)
+            got = asyncio.run(chat.rig.controller.extract_intent(LIGHT_QUERY, utterance=UNKNOWN_CLASSIFICATION))
+            assert got == {"unprocessable": True, "unprocessable_reason": "unverified"}
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", {**LIGHT_ON, "action": "get_status"}, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        got = asyncio.run(chat.rig.controller.extract_intent(LIGHT_QUERY, utterance=UNKNOWN_CLASSIFICATION))
+        assert got["action"] == "get_status", "reads still pass"
+
+    def test_a_mixed_device_sequence_is_refused_on_the_retried_path(self, monkeypatch):
+        mixed = {**SEQUENCE, "steps": [
+            {"action": "turn_off", "target": {"device_type": "light", "room": "study"}, "parameters": {}, "delay_after": 0, "at_time": None},
+            {"action": "lock", "target": {"device_type": "lock", "room": "front_door"}, "parameters": {}, "delay_after": 0, "at_time": None},
+        ]}
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", mixed, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        got = asyncio.run(chat.rig.controller.extract_sequence_intent("turn off the lights then lock the door"))
+        assert len(llm.calls) == 2
+        assert got == {"unprocessable": True, "unprocessable_reason": "unverified"}
 
 
 # ---------------------------------------------------------------------------
