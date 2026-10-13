@@ -828,7 +828,15 @@ def explicit_whole_house(query: Optional[str], directory: Optional[RoomDirectory
     if WHOLE_HOUSE_LIGHT_RE.search(text):
         # A room named in another command ("... but play music in the
         # kitchen") is not this cue's room: only the cue's own clause counts.
-        cue_clauses = [c for c in step_clauses(text, directory) if WHOLE_HOUSE_LIGHT_RE.search(c)] or [text]
+        # A fragment with no step of its own ("In the kitchen.") belongs to
+        # the cue's clause.
+        clauses = step_clauses(text, directory)
+        cues = [c for c in clauses if WHOLE_HOUSE_LIGHT_RE.search(c)]
+        fragments = [
+            c for c in clauses
+            if not WHOLE_HOUSE_LIGHT_RE.search(c) and not any(t in _STEP_VERBS for t in tokens(c))
+        ]
+        cue_clauses = [" ".join([c, *fragments]) for c in cues] or [text]
         if all(find_room_mention(c, directory).kind == "none" for c in cue_clauses):
             return WholeHouse(_excluded_rooms(text, directory))
     return None

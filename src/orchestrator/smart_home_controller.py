@@ -296,9 +296,6 @@ _LOCK_CLAUSE_WORDS = frozenset({
 # "lock" after an opening verb is a noun only when the clause ends there or
 # only these closing words follow ("unlock the front door lock please").
 # Anything else after it is the object of the opposite verb.
-# "the (smart) lock on/of/at/to ..." names a lock. Not "in", "up", "down" or "out":
-# "lock in the kids" is a verb with its object.
-_NOUN_PREPOSITIONS = frozenset({"on", "of", "at", "to"})
 _CLOSING_FILLER = frozenset({"please", "pls", "now", "thanks", "thx", "thank", "you", "for", "me"})
 VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
 
@@ -326,10 +323,7 @@ def _door_verb(
                 negated = True
             elif (
                 word in noun_after and seen_first and not negated
-                and (
-                    all(w in _CLOSING_FILLER for w in spoken[i + 1:])
-                    or (spoken[i + 1:i + 2] and spoken[i + 1] in _NOUN_PREPOSITIONS)
-                )
+                and all(w in _CLOSING_FILLER for w in spoken[i + 1:])
             ):
                 continue
             elif word in first or word in second:

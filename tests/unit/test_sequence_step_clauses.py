@@ -478,11 +478,13 @@ class TestTheLockNounExemption:
         ("unlock the front door lock back", False),
         ("unlock front door lock front", False),
         ("unlock the front door lock for me", True),
-        ("unlock the lock on the front door", True),
-        ("unlock the smart lock on the side gate", True),
-        ("unlock the lock at the side gate", True),
-        ("unlock the lock of the side gate", True),
-        ("unlock the lock to the side gate", True),
+        ("unlock the lock", True),
+        ("unlock the lock on the front door", False),
+        ("unlock the smart lock on the side gate", False),
+        ("unlock the front door lock on second thought", False),
+        ("unlock the front door lock at 10pm", False),
+        ("unlock the front door lock to be safe", False),
+        ("unlock the back door lock on the front door", False),
         ("unlock the front door lock in the kids", False),
         ("unlock the front door lock up the house", False),
         ("unlock the front door lock down the back", False),
@@ -562,26 +564,30 @@ class TestCoverStepPlainIsFailSafe:
         assert self.plain("open the blinds", None) is True
 
 
-class TestTheLockNounWithAPreposition:
-    def test_unlock_the_lock_on_the_front_door_unlocks_it(self, monkeypatch):
-        rig = DoorRig(monkeypatch, THREE_LOCKS)
-        rig.run_scoped(lock_intent(room="front_door"), "unlock the lock on the front door")
-        assert rig.openings == [("lock", "unlock", "lock.front_door")]
-
-    def test_unlock_the_smart_lock_on_the_side_gate_unlocks_the_named_lock(self, monkeypatch):
+class TestLockFollowedByAPrepositionIsNeverAnUnlock:
+    @pytest.mark.parametrize("query", [
+        "unlock the lock on the front door",
+        "unlock the smart lock on the side gate",
+        "unlock the front door lock on second thought",
+        "unlock the front door lock at 10pm",
+        "unlock the back door lock on the front door",
+        "unlock the front door lock in the kids",
+        "unlock front door lock back door",
+    ])
+    def test_nothing_is_written(self, monkeypatch, query):
         rig = DoorRig(monkeypatch, {"lock.side_gate": lock_state("Side Gate Lock"), **THREE_LOCKS})
-        rig.run_scoped(lock_intent(room="side_gate"), "unlock the smart lock on the side gate")
-        assert rig.openings == [("lock", "unlock", "lock.side_gate")]
+        for room in ("front_door", "back_door", "side_gate"):
+            answer, _ = rig.run_scoped(lock_intent(room=room), query)
+        assert rig.openings == [], rig.calls
 
-    def test_lock_in_the_kids_is_not_an_unlock(self, monkeypatch):
+    @pytest.mark.parametrize("query,lock", [
+        ("unlock the front door lock", "lock.front_door"),
+        ("unlock the Front Door Lock please", "lock.front_door"),
+    ])
+    def test_the_noun_at_the_end_still_unlocks(self, monkeypatch, query, lock):
         rig = DoorRig(monkeypatch, THREE_LOCKS)
-        rig.run_scoped(lock_intent(room="front_door"), "unlock the front door lock in the kids")
-        assert rig.openings == []
-
-    def test_unlock_front_door_lock_back_door_is_still_refused(self, monkeypatch):
-        rig = DoorRig(monkeypatch, THREE_LOCKS)
-        rig.run_scoped(lock_intent(room="back_door"), "unlock front door lock back door")
-        assert rig.openings == []
+        rig.run_scoped(lock_intent(room="front_door"), query)
+        assert rig.openings == [("lock", "unlock", lock)]
 
 
 class TestButAndANonLightVerbIsNotAnExclusion:
@@ -622,3 +628,36 @@ class TestButAndANonLightVerbIsNotAnExclusion:
 
     def test_but_play_music_is_not_an_exclusion(self):
         assert room_context.has_exclusion("turn off all the lights but play music", self.PLAY) is False
+
+
+class TestAVerblessFragmentBelongsToTheWholeHouseClause:
+    HOUSE = TestSequenceWholeHouseAuthority.HOUSE
+
+    @pytest.mark.parametrize("query", [
+        "Turn off all the lights. In the galley.",
+        "Galley. Turn off everything.",
+        "Turn off all the lights; the galley ones.",
+    ])
+    def test_it_is_not_the_whole_house(self, query):
+        assert room_context.explicit_whole_house(query, self.HOUSE) is None, query
+
+    @pytest.mark.parametrize("query", [
+        "Turn off all the lights. In the galley.",
+        "Galley. Turn off everything.",
+        "Turn off all the lights; the galley ones.",
+    ])
+    def test_only_the_galley_is_written(self, monkeypatch, query):
+        rig = SequenceLightRig(monkeypatch)
+        rig.run_single(light_intent("turn_off"), query)
+        assert rig.written and rig.written <= GALLEY_LEAVES | {"light.galley_all", "light.galley_pair"}, rig.written
+
+    @pytest.mark.parametrize("query", [
+        "turn on everything but play music in the galley",
+        "all lights off but open the study blinds",
+    ])
+    def test_a_fragment_with_its_own_verb_is_another_command(self, query):
+        d = room_context.explicit_whole_house(query, self.HOUSE)
+        assert isinstance(d, room_context.WholeHouse) and d.excluded == (), query
+
+    def test_a_room_in_the_cue_clause_still_counts_beside_a_fragment(self):
+        assert room_context.explicit_whole_house("Turn off all the lights in the galley. Please.", self.HOUSE) is None
