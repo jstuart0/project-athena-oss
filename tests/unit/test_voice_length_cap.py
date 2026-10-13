@@ -151,7 +151,7 @@ def _patch_http(monkeypatch, handler):
 
 
 def _router():
-    return object.__new__(llm_router.LLMRouter)
+    return llm_router.LLMRouter(admin_url="http://admin.test", persist_metrics=False)
 
 
 def _ollama_generate(monkeypatch, body):

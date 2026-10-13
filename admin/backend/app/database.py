@@ -467,10 +467,10 @@ def seed_oss_defaults():
         try:
             from app.services.oss_profiles import apply_profile
 
-            apply_profile(db, "ollama_qwen_small", "fill_missing_only")
+            apply_profile(db, "ollama_qwen_small", "fill_missing_only", startup_seed=True)
             logger.info("oss_profile_seeded", profile="ollama_qwen_small", mode="fill_missing_only")
         except Exception as exc:
-            logger.warning("oss_profile_seed_failed", error=str(exc))
+            logger.warning("oss_profile_seed_failed", error_type=type(exc).__name__)
 
 
 def seed_oss_features():
