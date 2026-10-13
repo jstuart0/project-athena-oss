@@ -61,6 +61,15 @@ class SequenceLightRig(Rig):
 
         return asyncio.run(go())
 
+    def run_single(self, intent, query):
+        async def go():
+            with mp.ha_permission_scope(
+                {"mode": "owner"}, mode="owner", utterance=classify_utterance(query), trusted_voice=True,
+            ):
+                return await self.controller.execute_intent(intent, self.raw, query)
+
+        return asyncio.run(go())
+
     def run(self, steps, query):
         executor = SequenceExecutor(self.controller, self.raw)
 
@@ -469,7 +478,16 @@ class TestTheLockNounExemption:
         ("unlock the front door lock back", False),
         ("unlock front door lock front", False),
         ("unlock the front door lock for me", True),
-        ("unlock the lock on the front door", False),
+        ("unlock the lock on the front door", True),
+        ("unlock the smart lock on the side gate", True),
+        ("unlock the lock at the side gate", True),
+        ("unlock the lock of the side gate", True),
+        ("unlock the lock to the side gate", True),
+        ("unlock the front door lock in the kids", False),
+        ("unlock the front door lock up the house", False),
+        ("unlock the front door lock down the back", False),
+        ("unlock the front door lock out the dog", False),
+        ("unlock the front door no lock on the back door", False),
         ("unlock front door lock back door", False),
         ("unlock the front door lock the back door", False),
         ("unlock the front door no lock it", False),
@@ -542,3 +560,65 @@ class TestCoverStepPlainIsFailSafe:
     def test_a_non_text_target_falls_back_to_the_clauses(self):
         assert self.plain("open the blinds", 7) is True
         assert self.plain("open the blinds", None) is True
+
+
+class TestTheLockNounWithAPreposition:
+    def test_unlock_the_lock_on_the_front_door_unlocks_it(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        rig.run_scoped(lock_intent(room="front_door"), "unlock the lock on the front door")
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
+    def test_unlock_the_smart_lock_on_the_side_gate_unlocks_the_named_lock(self, monkeypatch):
+        rig = DoorRig(monkeypatch, {"lock.side_gate": lock_state("Side Gate Lock"), **THREE_LOCKS})
+        rig.run_scoped(lock_intent(room="side_gate"), "unlock the smart lock on the side gate")
+        assert rig.openings == [("lock", "unlock", "lock.side_gate")]
+
+    def test_lock_in_the_kids_is_not_an_unlock(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        rig.run_scoped(lock_intent(room="front_door"), "unlock the front door lock in the kids")
+        assert rig.openings == []
+
+    def test_unlock_front_door_lock_back_door_is_still_refused(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        rig.run_scoped(lock_intent(room="back_door"), "unlock front door lock back door")
+        assert rig.openings == []
+
+
+class TestButAndANonLightVerbIsNotAnExclusion:
+    """Single-turn: the room after "but <verb>" belongs to that other command,
+    so every light is acted on, the room included."""
+
+    @pytest.mark.parametrize("query", [
+        "turn on everything but play music in the kitchen",
+        "all lights off but open the living room blinds",
+        "turn off all the lights but open the blinds",
+    ])
+    def test_every_light_is_the_target(self, monkeypatch, query):
+        rig = SequenceLightRig(monkeypatch)
+        action = "turn_on" if "turn on" in query else "turn_off"
+        rig.run_single(light_intent(action), query)
+        assert {"light.galley_bulb_1", "light.study_lamp", "light.hall_lamp"} <= rig.written, rig.written
+
+    def test_a_room_named_in_the_lights_own_clause_is_still_that_room(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        answer = rig.run_single(light("galley", "turn_off"), "turn off all the lights in the galley")
+        assert rig.written and rig.written <= GALLEY_LEAVES | {"light.galley_all", "light.galley_pair"}
+
+    def test_the_decision_is_whole_house_with_no_exclusions(self):
+        for q in ("turn on everything but play music in the kitchen", "all lights off but open the living room blinds",
+                  "all lights off but open the blinds"):
+            d = room_context.whole_house_decision(q)
+            assert isinstance(d, room_context.WholeHouse) and d.excluded == (), q
+
+    def test_the_lights_own_clause_with_a_room_is_not_the_whole_house(self):
+        assert room_context.explicit_whole_house("turn off all the lights in the kitchen") is None
+
+    PLAY = TestSequenceWholeHouseAuthority.PLAY
+
+    def test_but_play_room_keeps_the_play_room_excluded(self):
+        d = room_context.whole_house_decision("turn off all the lights but play room", self.PLAY)
+        assert isinstance(d, room_context.WholeHouse) and [r.key for r in d.excluded] == ["play_room"]
+        assert room_context.has_exclusion("turn off all the lights but play room", self.PLAY) is True
+
+    def test_but_play_music_is_not_an_exclusion(self):
+        assert room_context.has_exclusion("turn off all the lights but play music", self.PLAY) is False

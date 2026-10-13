@@ -438,7 +438,9 @@ def _names_scope_room(toks: Sequence[str], spans: Sequence[Tuple[int, int]],
     return False
 
 
-def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> Tuple[int, List[Tuple[int, int]]]:
+def _scan_exclusions(
+    toks: Sequence[str], spans: Sequence[Tuple[int, int]], directory: Optional[RoomDirectory] = None,
+) -> Tuple[int, List[Tuple[int, int]]]:
     """(index where the exclusion clause starts, or ``len(toks)``; the token
     ranges of rooms an opener introduced)."""
     introduced: List[Tuple[int, int]] = []
@@ -450,7 +452,10 @@ def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> T
             i += 1
             continue
         end = i + length
-        if tuple(toks[i:end]) == ("but",) and toks[end:end + 1] and toks[end] in _NON_LIGHT_STEP_VERBS:
+        if (
+            tuple(toks[i:end]) == ("but",) and toks[end:end + 1] and toks[end] in _NON_LIGHT_STEP_VERBS
+            and not _starts_a_room(" ".join(toks[end:]), directory)
+        ):
             i = end  # "all the lights but lock the front door": a second command
             continue
         objects = _object_chain(toks, spans, end)
@@ -469,7 +474,7 @@ def has_exclusion(query: Optional[str], directory: Optional[RoomDirectory] = Non
     Pass the directory so a room counts."""
     toks = tokens(query or "")
     spans = [(m.start, m.end) for m in _chosen_mentions(toks, directory)]
-    return _scan_exclusions(toks, spans)[0] < len(toks)
+    return _scan_exclusions(toks, spans, directory)[0] < len(toks)
 
 
 def has_exclusion_wording(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
@@ -534,7 +539,7 @@ def find_room_mentions(query: Optional[str], directory: Optional[RoomDirectory])
     if not toks:
         return []
     chosen = _choose_spans(toks, directory)
-    cutoff, introduced = _scan_exclusions(toks, [(c[0], c[1]) for c in chosen])
+    cutoff, introduced = _scan_exclusions(toks, [(c[0], c[1]) for c in chosen], directory)
     chosen = [c for c in chosen if (c[0], c[1]) not in introduced]
     return _mentions_from(toks, chosen, cutoff)
 
@@ -820,8 +825,12 @@ def explicit_whole_house(query: Optional[str], directory: Optional[RoomDirectory
         return WholeHouse(kept)
     if WHOLE_HOUSE_ROOM_RE.search(text):
         return WholeHouse(_excluded_rooms(text, directory))
-    if WHOLE_HOUSE_LIGHT_RE.search(text) and find_room_mention(text, directory).kind == "none":
-        return WholeHouse(_excluded_rooms(text, directory))
+    if WHOLE_HOUSE_LIGHT_RE.search(text):
+        # A room named in another command ("... but play music in the
+        # kitchen") is not this cue's room: only the cue's own clause counts.
+        cue_clauses = [c for c in step_clauses(text, directory) if WHOLE_HOUSE_LIGHT_RE.search(c)] or [text]
+        if all(find_room_mention(c, directory).kind == "none" for c in cue_clauses):
+            return WholeHouse(_excluded_rooms(text, directory))
     return None
 
 
