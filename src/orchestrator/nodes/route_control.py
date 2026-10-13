@@ -105,7 +105,7 @@ async def _await_state_question_clarification(
     parameters = {"action": "get_status", "room": room, "awaiting_state_question": True}
     if room_candidates:
         parameters["room_candidates"] = [list(c) for c in room_candidates]
-    await store_conversation_context(
+    await _store_context(
         session_id=state.session_id,
         intent="control",
         query=state.query,
@@ -194,7 +194,7 @@ async def _clear_pending(state: OrchestratorState, prev: Dict[str, Any], ttl: in
     if not state.session_id:
         return
     cleared = _without_pending(prev)
-    await store_conversation_context(
+    await _store_context(
         session_id=state.session_id,
         intent=cleared.get("intent") or "control",
         query=cleared.get("query") or "",
@@ -266,7 +266,7 @@ async def _store_pending_write_confirmation(
         return
     device_type = intent.get("device_type")
     room = intent.get("room")
-    await store_conversation_context(
+    await _store_context(
         session_id=state.session_id,
         intent="control",
         query=query or state.query,
@@ -405,7 +405,7 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         state.retrieved_data = {"intent": intent}
         ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="confirmed").inc()
         if state.session_id and "couldn't" not in result.lower():
-            await store_conversation_context(
+            await _store_context(
                 session_id=state.session_id,
                 intent="control",
                 query=prev.get("query") or state.query,
@@ -435,7 +435,7 @@ async def _clear_room_choice(state: OrchestratorState, prev: Dict[str, Any], ttl
     if not state.session_id:
         return
     cleared = _without_room_choice(prev)
-    await store_conversation_context(
+    await _store_context(
         session_id=state.session_id,
         intent=cleared.get("intent") or "control",
         query=cleared.get("query") or "",
@@ -457,7 +457,7 @@ async def _store_room_choice(
     pending = room_choice.new_pending(
         choice, fingerprint=state.caller_fingerprint, nonce=uuid4().hex, query=query
     )
-    await store_conversation_context(
+    await _store_context(
         session_id=state.session_id,
         intent="control",
         query=query,
@@ -542,6 +542,14 @@ def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
     return bool(
         state.supports_followup and state.session_id and state.caller_fingerprint and not foreign_pending
     )
+
+
+async def _store_context(**fields: Any) -> Any:
+    """``store_conversation_context``, except that a query over the smart-home
+    cap is never stored: it would come back as ``prev_query`` in a later prompt."""
+    if room_context.utf8_len(fields.get("query")) > room_context.SMART_HOME_MAX_QUERY_BYTES:
+        return False
+    return await store_conversation_context(**fields)
 
 
 def _answer_unprocessable(state: OrchestratorState, result: Any) -> bool:
@@ -631,11 +639,8 @@ async def _execute_and_record(
         logger.info("smart_control_executed", action=intent.get('action'), device_type=device_type)
 
         # Store context for future reference using new context system
-        if (
-            state.session_id and not foreign_pending and "couldn't" not in result.lower()
-            and len(store_query or "") <= room_context.SMART_HOME_MAX_QUERY_CHARS
-        ):
-            await store_conversation_context(
+        if state.session_id and not foreign_pending and "couldn't" not in result.lower():
+            await _store_context(
                 session_id=state.session_id,
                 intent="control",
                 query=store_query,
@@ -711,7 +716,7 @@ async def _resolve_pending_room_choice(
         if state.session_id:
             params = dict(prev.get("parameters") or {})
             params[room_choice.PENDING_KEY] = pending
-            await store_conversation_context(
+            await _store_context(
                 session_id=state.session_id, intent="control", query=prev.get("query") or "",
                 entities=prev.get("entities") or {}, parameters=params, response=again,
                 ttl=room_choice.TTL,
@@ -1091,7 +1096,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             device_type=uk.device_type or "unknown", path="get_status_dispatch"
                         ).inc()
                         if state.session_id and not foreign_pending and "couldn't" not in sq_result.lower():
-                            await store_conversation_context(
+                            await _store_context(
                                 session_id=state.session_id,
                                 intent="control",
                                 query=state.query,
@@ -1285,7 +1290,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # Now merge the intent itself
                         intent.update(new_intent)
                         intent['parameters'] = merged_params
-                        logger.info("LLM interpreted follow-up with context", keys=sorted(intent.keys()))
+                        logger.info("LLM interpreted follow-up with context", key_count=len(intent))
 
                     # The merged intent holds the earlier command's stored
                     # decisions. None of them is trusted as it stands: they are
@@ -1349,6 +1354,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                                 prev_intent_entities=prev_intent_for_llm,
                                 utterance=uk,
                             )
+                            if _answer_unprocessable(state, intent):
+                                state.node_timings["route_control"] = time.time() - start
+                                return state
                             if not new_room:
                                 if prev.get("entities", {}).get("room"):
                                     intent['room'] = prev["entities"]["room"]
@@ -1388,7 +1396,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             state.node_timings["route_control"] = time.time() - start
                             return state
 
-                logger.info("Extracted intent", action=intent.get("action"), keys=sorted(intent.keys()))
+                logger.info("Extracted intent", action=intent.get("action"), key_count=len(intent))
 
                 # Execute the command (the original query feeds the room decision and
                 # the fan-out gate; the speaker's room is the default only where the

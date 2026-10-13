@@ -16,7 +16,7 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
-from shared.llm_context import ContextBudgetExceeded
+from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_count_too_low
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
@@ -385,17 +385,25 @@ def _model_object(text: str) -> Dict:
     return stripped
 
 
-SMART_HOME_MAX_QUERY_CHARS = room_context.SMART_HOME_MAX_QUERY_CHARS
-PREV_TEXT_MAX_CHARS = 400
-PREV_INTENT_FIELD_MAX_CHARS = 100
+SMART_HOME_MAX_QUERY_BYTES = room_context.SMART_HOME_MAX_QUERY_BYTES
+PREV_TEXT_MAX_BYTES = 400
+PREV_INTENT_FIELD_MAX_BYTES = 100
 _full_prompt_warned = False
 
 
 def _bounded(value: object, limit: int) -> str:
-    """``value`` as text, cut to ``limit`` characters (a stored turn is input
+    """``value`` as text, cut to ``limit`` UTF-8 bytes (a stored turn is input
     from an earlier request, not a trusted size)."""
     text = value if isinstance(value, str) else json.dumps(value, default=str)
-    return text[:limit]
+    return room_context.cut_bytes(text, limit)
+
+
+def _over_query_cap(query: str, logger) -> bool:
+    size = room_context.utf8_len(query)
+    if size <= SMART_HOME_MAX_QUERY_BYTES:
+        return False
+    logger.info("smart_home_query_over_cap query_bytes=%d", size)
+    return True
 
 
 def _warn_full_prompt_is_ollama_only(model: str, reason: str) -> None:
@@ -1464,7 +1472,42 @@ class SmartHomeController:
             )
             return None
         _warn_full_prompt_is_ollama_only(generate_kwargs.get("model"), exc.reason)
-        return await self.llm_router.generate(**generate_kwargs)
+        response = await self.llm_router.generate(**generate_kwargs)
+        # Not planned or checked by the router: a backend that reports prompt
+        # tokens far under the estimate read a cut prompt.
+        count = response.get("prompt_eval_count") if isinstance(response, dict) else None
+        if reported_count_too_low(estimate_tokens(generate_kwargs.get("prompt")), count):
+            log.warning("smart_home_retried_prompt_cut", model=generate_kwargs.get("model"), prompt_tokens=count)
+            return None
+        return response
+
+    @staticmethod
+    def _retried_intent_matches_words(intent: Dict, utterance: UtteranceClassification) -> bool:
+        """An answer from a backend that can't promise it read the whole prompt
+        writes only what the user's own words say: the classifier found the same
+        on/off state (and, where it found one, the same device) in them. A read
+        always passes."""
+        action = intent.get("action")
+        if action == "get_status":
+            return True
+        if action in ("turn_on", "turn_off"):
+            if action != {"on": "turn_on", "off": "turn_off"}.get(utterance.target_state):
+                return False
+        elif utterance.device_type is None:
+            return False
+        return utterance.device_type is None or intent.get("device_type") == utterance.device_type
+
+    @staticmethod
+    def _retried_sequence_matches_words(sequence: Dict, query: str) -> bool:
+        """Retried sequences: an IMPERATIVE utterance, and every step on the
+        device the classifier found in the words (when it found one)."""
+        utterance = classify_utterance(query)
+        if utterance.kind != UtteranceKind.IMPERATIVE:
+            return False
+        return all(
+            utterance.device_type is None or (step.get("target") or {}).get("device_type") == utterance.device_type
+            for step in sequence.get("steps") or [] if isinstance(step, dict)
+        )
 
     @staticmethod
     def _answer_unusable(llm_response: Optional[Dict]) -> Optional[str]:
@@ -1497,6 +1540,12 @@ class SmartHomeController:
         import logging
         logger = logging.getLogger(__name__)
         from .metrics import state_question_routed_total
+
+        # The one return before the fast-path guard, and no write: a command
+        # longer than the model prompt is planned for is refused before anything
+        # reads it, fast paths included.
+        if _over_query_cap(query, logger):
+            return room_context.unprocessable_intent("too_long")
 
         if utterance is None:
             utterance = classify_utterance(query)
@@ -1553,19 +1602,13 @@ class SmartHomeController:
 
         # The model is told nothing about where the speaker is: a room it
         # returns must be one the utterance names (see ground_intent_rooms).
-        # Past the fast paths the query goes into the model prompt, whose size is
-        # planned for a device command: a longer one is refused before any call.
-        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
-            logger.info("smart_home_query_over_cap query_len=%d", len(query))
-            return room_context.unprocessable_intent("too_long")
-
         # Build conversation context for follow-ups and corrections
         conversation_context = ""
         if prev_query and prev_response:
             # Include previous intent entities so LLM knows what device was controlled
             prev_device_info = ""
             if prev_intent_entities:
-                field = PREV_INTENT_FIELD_MAX_CHARS
+                field = PREV_INTENT_FIELD_MAX_BYTES
                 prev_device_type = _bounded(prev_intent_entities.get('device_type', 'unknown'), field)
                 prev_room = _bounded(prev_intent_entities.get('room', 'unknown'), field)
                 prev_action = _bounded(prev_intent_entities.get('action', 'unknown'), field)
@@ -1577,8 +1620,8 @@ Previous parameters: {prev_params}
 """
             conversation_context = f"""
 CONVERSATION CONTEXT (use this to understand corrections and follow-ups):
-Previous request: "{_bounded(prev_query, PREV_TEXT_MAX_CHARS)}"
-Previous response: "{_bounded(prev_response, PREV_TEXT_MAX_CHARS)}"
+Previous request: "{_bounded(prev_query, PREV_TEXT_MAX_BYTES)}"
+Previous response: "{_bounded(prev_response, PREV_TEXT_MAX_BYTES)}"
 {prev_device_info}
 Current request: "{query}"
 
@@ -1745,6 +1788,9 @@ Return ONLY the JSON, no other text."""
                     device_type=utterance.device_type or "unknown",
                     path="llm_coerced",
                 ).inc()
+            if not whole_prompt_guaranteed and not self._retried_intent_matches_words(intent, utterance):
+                logger.info("smart_home_retried_intent_unverified query_len=%d", len(query))
+                return room_context.unprocessable_intent("unverified")
             return intent
         except ModelOutputNotObject:
             return room_context.unprocessable_intent("not_object")
@@ -1753,17 +1799,13 @@ Return ONLY the JSON, no other text."""
                 return room_context.unprocessable_intent("unparseable")
             # 3.3(c): fallback parsing when the LLM didn't return valid
             # JSON. Never defaults to a write for a non-imperative
-            # utterance -- an IMPERATIVE without explicit on/off vocabulary
-            # falls back to today's is_turn_on/is_turn_off heuristic;
-            # STATE_QUESTION and UNKNOWN always answer get_status.
+            # utterance, and for an IMPERATIVE one only when the classifier
+            # found an explicit on/off in the words (no substring guess: "lit"
+            # is in "split"); everything else answers get_status.
             if utterance.kind == UtteranceKind.IMPERATIVE:
                 if utterance.target_state == "on":
                     fallback_action = "turn_on"
                 elif utterance.target_state == "off":
-                    fallback_action = "turn_off"
-                elif is_turn_on:
-                    fallback_action = "turn_on"
-                elif is_turn_off:
                     fallback_action = "turn_off"
                 else:
                     fallback_action = "get_status"
@@ -1919,8 +1961,7 @@ Return ONLY the JSON, no other text."""
         import logging
         logger = logging.getLogger(__name__)
 
-        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
-            logger.info("smart_home_query_over_cap query_len=%d", len(query))
+        if _over_query_cap(query, logger):
             return room_context.unprocessable_intent("too_long")
 
         current_time = local_now().strftime("%H:%M")
@@ -2008,27 +2049,19 @@ Return ONLY valid JSON."""
                 response_text = response_text.split('```')[1].split('```')[0]
 
             sequence = _model_object(response_text.strip())
+            if not whole_prompt_guaranteed and not self._retried_sequence_matches_words(sequence, query):
+                logger.info("smart_home_retried_sequence_unverified query_len=%d", len(query))
+                return room_context.unprocessable_intent("unverified")
             logger.info(f"Extracted sequence with {len(sequence.get('steps', []))} steps")
             return sequence
 
         except ModelOutputNotObject:
             return room_context.unprocessable_intent("not_object")
         except json.JSONDecodeError as e:
-            if not whole_prompt_guaranteed:
-                return room_context.unprocessable_intent("unparseable")
+            # Unlike a light command there are no words to fall back on: which
+            # steps, in which order and after what delay is the model's answer.
             logger.error(f"Failed to parse sequence JSON: {e}")
-            # Return a simple single-step sequence as fallback
-            return {
-                "type": "sequence",
-                "acknowledge": "Let me try that.",
-                "steps": [{
-                    "action": "turn_on" if "on" in _words(query) else "turn_off",
-                    "target": {"device_type": "light", "room": None},
-                    "parameters": {},
-                    "delay_after": 0,
-                    "at_time": None
-                }]
-            }
+            return room_context.unprocessable_intent("unparseable")
 
     def _directory(self):
         """The deployment's room directory, or None (generic room words only)."""
@@ -6162,8 +6195,7 @@ Do NOT mention rooms that have no current or recent motion."""
         import logging
         logger = logging.getLogger(__name__)
 
-        if len(query) > SMART_HOME_MAX_QUERY_CHARS:
-            logger.info("smart_home_query_over_cap query_len=%d", len(query))
+        if _over_query_cap(query, logger):
             return room_context.unprocessable_intent("too_long")
 
         # Build room context
@@ -6253,35 +6285,19 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = _model_object(text)
-            logger.info("Motion control intent extracted: keys=%s", sorted(intent.keys()))
+            if not whole_prompt_guaranteed and classify_utterance(query).kind != UtteranceKind.IMPERATIVE:
+                logger.info("smart_home_retried_motion_unverified query_len=%d", len(query))
+                return room_context.unprocessable_intent("unverified")
+            logger.info("Motion control intent extracted: key_count=%d", len(intent))
             return intent
 
         except ModelOutputNotObject:
             return room_context.unprocessable_intent("not_object")
         except json.JSONDecodeError as e:
-            if not whole_prompt_guaranteed:
-                return room_context.unprocessable_intent("unparseable")
+            # The old substring fallback ('off' is in "coffee") picked a helper
+            # to switch from the words alone; nothing here writes without an answer.
             logger.error(f"Failed to parse motion control intent: {e}")
-            # Fallback to basic parsing
-            query_lower = query.lower()
-
-            action = "leave_lights_on"  # default
-            if any(x in query_lower for x in ['off', 'nap', 'sleep']):
-                action = "leave_lights_off"
-            elif any(x in query_lower for x in ['disable', 'stop motion', 'no motion']):
-                action = "disable_motion"
-            elif any(x in query_lower for x in ['enable', 'resume', 'reset', 'back on']):
-                action = "enable_motion"
-            elif any(x in query_lower for x in ['brightness', 'bright']):
-                action = "keep_current_brightness"
-
-            return {
-                "device_type": "motion_control",
-                "room": device_room,
-                "action": action,
-                "parameters": {"duration_minutes": 60},
-                "reason": "Motion settings updated"
-            }
+            return room_context.unprocessable_intent("unparseable")
 
     async def _handle_motion_control_intent(self, action: str, parameters: Dict, ha_client, room: str = None, original_query: str = None) -> str:
         """

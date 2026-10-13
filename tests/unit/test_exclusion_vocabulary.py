@@ -272,8 +272,15 @@ def test_the_fast_paths_sit_behind_the_one_guard():
     assert refs(guard, "_fast_path_intent") and guard.test is not None
     returns = [n for n in ast.walk(extract) if isinstance(n, ast.Return)]
     assert returns, "extract_intent returns something"
-    early = [n.lineno for n in returns if n.lineno < guard.lineno]
+    # The one permitted early return is the query-size refusal: it writes nothing.
+    is_refusal = lambda n: (  # noqa: E731
+        isinstance(n.value, ast.Call) and getattr(n.value.func, "attr", None) == "unprocessable_intent"
+        and [a.value for a in n.value.args if isinstance(a, ast.Constant)] == ["too_long"]
+    )
+    early = [n.lineno for n in returns if n.lineno < guard.lineno and not is_refusal(n)]
     assert early == [], f"extract_intent answers before asking _defers_to_model: lines {early}"
+    refusals = [n for n in returns if n.lineno < guard.lineno and is_refusal(n)]
+    assert len(refusals) == 1, "exactly one size refusal may precede the guard"
     assert sum(1 for n in ast.walk(methods["_fast_path_intent"]) if isinstance(n, ast.Return)) >= 20
 
 

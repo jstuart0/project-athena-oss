@@ -1308,14 +1308,14 @@ class TestSequencesReview:
         steps = [step("activate", {"device_type": "scene"}, parameters={"entity_id": "script.good_night"})]
         assert rig.plan(steps, "good night") is None
 
-    def test_the_list_json_fallback_reads_whole_words(self, monkeypatch, stub_admin):
+    def test_a_sequence_with_unparseable_json_is_unprocessable_not_a_guess_from_the_words(self, monkeypatch, stub_admin):
         class LLM:
             async def generate(self, **kw):
                 return {"response": "not json"}
 
         controller = shc.SmartHomeController(entity_manager=None, llm_router=LLM())
         got = asyncio.run(controller.extract_sequence_intent("turn off the front lights then wait"))
-        assert got["steps"][0]["action"] == "turn_off"
+        assert got == {"unprocessable": True, "unprocessable_reason": "unparseable"}
 
 
 # ---------------------------------------------------------------------------

@@ -410,7 +410,9 @@ def store_sites(source: str):
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for node in ast.walk(func):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "store_conversation_context":
+            # Every store goes through `_store_context`, which drops a query over
+            # the smart-home cap and is the only direct caller of the store.
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_store_context":
                 sites.append(func.name)
     return sites
 
@@ -436,5 +438,5 @@ def test_store_sites_respect_foreign_pending():
 
 
 def test_a_planted_unguarded_store_site_fails_the_check():
-    planted = "async def sneaky(state):\n    await store_conversation_context(session_id='s')\n"
+    planted = "async def sneaky(state):\n    await _store_context(session_id='s')\n"
     assert unguarded(planted) == ["sneaky"]

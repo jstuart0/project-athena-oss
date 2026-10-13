@@ -106,16 +106,27 @@ SERVER_DECISION_KEYS: Tuple[str, ...] = (
     "unprocessable", "unprocessable_reason",
 )
 
-# A smart-home command longer than this is refused before any model call: no
-# device command is that long, and the model prompt is sized for one that isn't.
-SMART_HOME_MAX_QUERY_CHARS = 1000
+# A smart-home command longer than this many UTF-8 bytes is refused before any
+# model call: no device command is that long, and the model prompt is sized for
+# one that isn't. Bytes, not characters: the context estimate is per byte, so
+# 4-byte text must not plan a larger context than ASCII.
+SMART_HOME_MAX_QUERY_BYTES = 1000
 QUERY_TOO_LONG_TEXT = "That's too long for a device command."
 UNPROCESSABLE_TEXT = "Sorry, I couldn't work out that command."
 # Why a model call gave nothing to act on: the query was over the cap, the
 # context budget could not hold the whole prompt, the answer hit its token
 # limit, the JSON was not an object, or (a backend that can't promise the whole
 # prompt was read) it did not parse.
-UNPROCESSABLE_REASONS = ("too_long", "budget", "length", "not_object", "unparseable")
+UNPROCESSABLE_REASONS = ("too_long", "budget", "length", "not_object", "unparseable", "unverified")
+
+
+def utf8_len(text: object) -> int:
+    return len(text.encode("utf-8")) if isinstance(text, str) else 0
+
+
+def cut_bytes(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` UTF-8 bytes, on a character boundary."""
+    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def unprocessable_intent(reason: str) -> dict:

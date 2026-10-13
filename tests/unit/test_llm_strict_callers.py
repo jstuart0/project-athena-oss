@@ -441,11 +441,12 @@ class TestBackendsThatCannotHonourTheDemand:
 # Input bounds
 # ---------------------------------------------------------------------------
 
-def padded(base: str, length: int, filler: str = " really") -> str:
+def padded(base: str, size: int, filler: str = " really") -> str:
+    """``base`` extended with ``filler`` to at most ``size`` UTF-8 bytes (exactly, for ASCII)."""
     out = base
-    while len(out) < length:
+    while room_context.utf8_len(out) < size:
         out += filler
-    return out[:length]
+    return room_context.cut_bytes(out, size)
 
 
 class TestInputBounds:
@@ -454,18 +455,32 @@ class TestInputBounds:
         chat = light_chat(monkeypatch, Scripted(("reply", LIGHT_ON, "stop")))
         return chat, chat.rig.controller
 
-    def test_1000_characters_reach_the_model(self, controller):
+    def test_1000_bytes_reach_the_model(self, controller):
         chat, ctl = controller
         query = padded(LIGHT_QUERY, 1000)
-        assert len(query) == 1000
+        assert room_context.utf8_len(query) == 1000
         intent = asyncio.run(ctl.extract_intent(query))
         assert len(ctl.llm_router.calls) == 1 and not intent.get("unprocessable")
 
-    def test_1001_characters_are_refused_before_any_call(self, controller):
+    def test_1001_bytes_are_refused_before_any_call(self, controller):
         chat, ctl = controller
         intent = asyncio.run(ctl.extract_intent(padded(LIGHT_QUERY, 1001)))
         assert intent == {"unprocessable": True, "unprocessable_reason": "too_long"}
         assert ctl.llm_router.calls == []
+
+    @pytest.mark.parametrize("ch,fits,over", [("é", 500, 501), ("日", 333, 334), ("😀", 250, 251)], ids=["2-byte", "3-byte", "4-byte"])
+    def test_the_cap_counts_utf8_bytes_not_characters(self, controller, ch, fits, over):
+        chat, ctl = controller
+        assert asyncio.run(ctl.extract_intent(LIGHT_QUERY + " " + ch * over)) == {"unprocessable": True, "unprocessable_reason": "too_long"}
+        assert ctl.llm_router.calls == []
+        asyncio.run(ctl.extract_intent(LIGHT_QUERY + " " + ch * ((1000 - len(LIGHT_QUERY) - 1) // len(ch.encode()))))
+        assert len(ctl.llm_router.calls) == 1
+
+    def test_a_long_query_is_refused_before_the_fast_paths(self, controller):
+        """A command a fast path would answer by itself, padded past the cap."""
+        chat, ctl = controller
+        intent = asyncio.run(ctl.extract_intent(padded("turn on the study lights", 1001)))
+        assert intent == {"unprocessable": True, "unprocessable_reason": "too_long"}
 
     @pytest.mark.parametrize("caller", ["sequence", "motion"])
     def test_the_other_two_callers_apply_the_same_cap(self, controller, caller):
@@ -499,7 +514,7 @@ class TestInputBounds:
         chat = light_chat(monkeypatch, Scripted(("reply", LIGHT_ON, "stop")))
         long_query = padded("turn on the study lights please", 1500)
         chat.turn(long_query)
-        assert all(len(s["query"]) <= room_context.SMART_HOME_MAX_QUERY_CHARS for s in chat.stores)
+        assert all(room_context.utf8_len(s["query"]) <= room_context.SMART_HOME_MAX_QUERY_BYTES for s in chat.stores)
 
     @staticmethod
     def follow_up(monkeypatch, *, prev_query, prev_response, entities, ch="x"):
@@ -564,31 +579,282 @@ class TestInputBounds:
         assert "V" * 101 not in prompt
         assert "EXTRA-FIELD" not in prompt and "forged" not in prompt
 
-    @pytest.mark.parametrize("ch,limit", [("x", 8192), ("é", 8192), ("😀", 16384)], ids=["ascii", "2-byte", "4-byte"])
-    def test_the_worst_case_plan(self, monkeypatch, ch, limit):
-        """1000 characters of query, 400 of each previous turn, four 100
-        character intent fields: ASCII and 2-byte text plan to 8192. Four-byte
-        text is 1.4 times the bytes for the same characters and plans to the
-        default ceiling at most."""
-        prompts = []
+    @pytest.mark.parametrize("ch", ["x", "é", "日", "😀"], ids=["ascii", "2-byte", "3-byte", "4-byte"])
+    def test_the_worst_case_plan_is_at_most_8192_for_every_prompt(self, monkeypatch, ch):
+        """1000 bytes of query (it appears twice in a follow-up), 400 bytes of
+        each previous turn, four 100-byte intent fields: whatever the encoding,
+        a 2048 row plans no more than 8192 for all three prompts."""
+        prompts = {}
 
         class Capture:
             async def generate(self, **kwargs):
-                prompts.append(kwargs["prompt"])
-                return {"response": json.dumps(LIGHT_ON), "stop_reason": "stop"}
+                prompts[kwargs["max_tokens"]] = kwargs["prompt"]
+                return {"response": "{}", "stop_reason": "stop"}
 
         chat = light_chat(monkeypatch, Capture())
-        asyncio.run(
-            chat.rig.controller.extract_intent(
-                padded("make the study lights go on ", 1000, ch), prev_query=ch * 20_000, prev_response=ch * 20_000,
-                prev_intent_entities={"device_type": ch * 500, "room": ch * 500, "action": ch * 500, "parameters": {"k": ch * 500}},
+        ctl = chat.rig.controller
+        query = padded("make the study lights go on ", 1000, ch)
+        asyncio.run(ctl.extract_intent(
+            query, prev_query=ch * 20_000, prev_response=ch * 20_000,
+            prev_intent_entities={"device_type": ch * 500, "room": ch * 500, "action": ch * 500, "parameters": {"k": ch * 500}},
+        ))
+        asyncio.run(ctl.extract_sequence_intent(padded("turn on the lights then off ", 1000, ch)))
+        asyncio.run(ctl._extract_motion_control_intent(padded("disable motion ", 1000, ch)))
+        assert set(prompts) == {400, 1500, 300}
+        for max_tokens, prompt in prompts.items():
+            plan = plan_context(
+                prompt_text="/no_think\n\n" + prompt, row_ctx=2048, num_predict=max(384, max_tokens), max_tokens=max_tokens,
+                require_full=True, marks=ContextMarks(), model="m",
+                settings=ContextSettings(mode="enforce", ceiling=16384, server_default=0),
             )
+            assert plan.send is not None and plan.send <= 8192, (max_tokens, plan.send, plan.estimate)
+
+    def test_previous_turns_are_cut_at_400_bytes_not_characters(self, monkeypatch):
+        wire, prompts = self.follow_up(
+            monkeypatch, prev_query="é" * 300, prev_response="日" * 300,
+            entities={"device_type": "é" * 80, "room": "light", "action": "turn_on", "parameters": {}},
         )
-        plan = plan_context(
-            prompt_text="/no_think\n\n" + prompts[0], row_ctx=2048, num_predict=384, max_tokens=400, require_full=True,
-            marks=ContextMarks(), model="m", settings=ContextSettings(mode="enforce", ceiling=16384, server_default=0),
-        )
-        assert plan.send is not None and plan.send <= limit, (plan.send, plan.estimate)
+        prompt = prompts[0]["prompt"]
+        assert "é" * 200 in prompt and "é" * 201 not in prompt.split("Previous response:")[0].split("Previous device")[0]
+        assert "日" * 133 in prompt and "日" * 134 not in prompt
+        assert "é" * 50 in prompt and "é" * 51 not in prompt.split("Previous device controlled:")[1]
+
+
+# ---------------------------------------------------------------------------
+# A whole prompt, an unparseable answer: nothing writes unless the words do
+# ---------------------------------------------------------------------------
+
+CALMER_QUERY = "set the study lights to a calmer look"
+GARBLED = "this is not json at all"
+
+
+class TestUnparseableAnswers:
+    def test_a_sequence_with_garbled_json_writes_nothing(self, monkeypatch):
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        out = chat.turn(SEQUENCE_QUERY)
+        assert llm.calls and llm.calls[0]["require_full_prompt"] is True
+        assert out.answer == room_context.UNPROCESSABLE_TEXT and writes(chat) == []
+
+    @pytest.mark.parametrize("query", [MOTION_QUERY, "turn off motion detection", "disable motion in the study after coffee"])
+    def test_motion_with_garbled_json_writes_nothing(self, monkeypatch, query):
+        """The old fallback matched 'off' inside "coffee" and picked a helper to switch."""
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        out = chat.turn(query)
+        assert llm.calls, "the motion path reached the model"
+        assert out.answer == room_context.UNPROCESSABLE_TEXT and writes(chat) == []
+
+    def test_an_imperative_with_an_explicit_target_still_acts(self, monkeypatch):
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        chat.turn(LIGHT_QUERY)
+        assert ("light", "turn_on") in writes(chat)
+
+    def test_an_imperative_without_one_asks_for_a_status_instead_of_guessing(self, monkeypatch):
+        """No explicit on/off in the words: the old substring legs are gone."""
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        controller = chat.rig.controller
+        from orchestrator.utterance_kind import classify_utterance
+        assert classify_utterance(CALMER_QUERY).kind.name == "IMPERATIVE" and classify_utterance(CALMER_QUERY).target_state is None
+        intent = asyncio.run(controller.extract_intent(CALMER_QUERY))
+        assert llm.calls and intent["action"] == "get_status"
+        chat.turn(CALMER_QUERY)
+        assert writes(chat) == []
+
+    def test_a_substring_that_looks_like_on_does_not_turn_anything_on(self, monkeypatch):
+        """An exclusion the room parser can't resolve sends this to the model; with
+        garbled JSON and no explicit state the words alone justify no write."""
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        from orchestrator.utterance_kind import classify_utterance
+        query = "make the lights lit except the mudroom"
+        assert classify_utterance(query).kind.name == "IMPERATIVE" and classify_utterance(query).target_state is None
+        chat.turn(query)
+        assert llm.calls and writes(chat) == []
+
+    @pytest.mark.parametrize("caller", sorted(CASES))
+    def test_every_json_decode_branch_writes_nothing_unless_explicitly_targeted(self, monkeypatch, caller):
+        query, _ = CASES[caller]
+        llm = Scripted(("reply", GARBLED, "stop"))
+        chat = light_chat(monkeypatch, llm)
+        chat.turn(query)
+        explicit = caller == "intent"  # LIGHT_QUERY says "go on"
+        assert bool(writes(chat)) == explicit
+
+
+# ---------------------------------------------------------------------------
+# After a non-strict retry the answer must match the user's own words
+# ---------------------------------------------------------------------------
+
+OFFICE_ON = {"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {}}
+
+
+class TestRetriedAnswersMatchTheWords:
+    def retried(self, monkeypatch, reply, *, extra=None):
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", reply, "stop"))
+        return light_chat(monkeypatch, llm), llm
+
+    def test_a_prompt_example_echoed_for_a_query_that_says_nothing_of_it_writes_nothing(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, OFFICE_ON)
+        out = chat.turn("make the hall lights brighter please")
+        assert len(llm.calls) == 2 or not llm.calls  # fast paths may answer a plain "brighter"
+        out = chat.turn("set the study lights to a calmer look")
+        assert len(llm.calls) >= 2
+        assert out.answer == room_context.UNPROCESSABLE_TEXT and writes(chat) == []
+
+    def test_the_opposite_state_is_refused(self, monkeypatch):
+        off = {**LIGHT_ON, "action": "turn_off"}
+        chat, llm = self.retried(monkeypatch, off)
+        assert chat.turn(LIGHT_QUERY).answer == room_context.UNPROCESSABLE_TEXT
+        assert writes(chat) == []
+
+    def test_the_wrong_device_is_refused(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, {**LIGHT_ON, "device_type": "climate"})
+        assert chat.turn(LIGHT_QUERY).answer == room_context.UNPROCESSABLE_TEXT
+        assert writes(chat) == []
+
+    def test_a_read_passes(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, {**LIGHT_ON, "action": "get_status"})
+        assert chat.turn(LIGHT_QUERY).answer != room_context.UNPROCESSABLE_TEXT
+
+    def test_the_matching_answer_acts(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, LIGHT_ON)
+        chat.turn(LIGHT_QUERY)
+        assert ("light", "turn_on") in writes(chat)
+
+    def test_an_utterance_that_is_not_a_command_gets_no_write(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, LIGHT_ON)
+        out = chat.turn("release the lights in the study somehow")
+        assert writes(chat) == []
+
+    def test_a_retried_sequence_for_a_non_command_is_unverified(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, SEQUENCE)
+        controller = chat.rig.controller
+        got = asyncio.run(controller.extract_sequence_intent("the lights, then off, in a while"))
+        assert got == {"unprocessable": True, "unprocessable_reason": "unverified"}
+
+    def test_a_retried_sequence_on_another_device_is_unverified(self, monkeypatch):
+        other = {**SEQUENCE, "steps": [{**SEQUENCE["steps"][0], "target": {"device_type": "climate", "room": None}}]}
+        chat, llm = self.retried(monkeypatch, other)
+        got = asyncio.run(chat.rig.controller.extract_sequence_intent(SEQUENCE_QUERY))
+        assert got["unprocessable_reason"] == "unverified"
+
+    def test_a_retried_sequence_that_matches_is_returned(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, SEQUENCE)
+        got = asyncio.run(chat.rig.controller.extract_sequence_intent(SEQUENCE_QUERY))
+        assert got["steps"]
+
+    def test_a_retried_motion_answer_for_a_non_command_is_unverified(self, monkeypatch):
+        chat, llm = self.retried(monkeypatch, MOTION)
+        got = asyncio.run(chat.rig.controller._extract_motion_control_intent("motion lights in the office are odd"))
+        assert got["unprocessable_reason"] == "unverified"
+
+    def test_a_retried_prompt_far_below_the_estimate_is_a_cut_prompt(self, monkeypatch):
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", LIGHT_ON, "stop"))
+        original = llm.respond
+
+        def with_count(spec):
+            response = original(spec)
+            response["prompt_eval_count"] = 120
+            return response
+
+        llm.respond = with_count
+        chat = light_chat(monkeypatch, llm)
+        assert chat.turn(LIGHT_QUERY).answer == room_context.UNPROCESSABLE_TEXT
+        assert writes(chat) == []
+
+    def test_a_retried_prompt_near_the_estimate_is_fine(self, monkeypatch):
+        llm = Scripted(("raise", "unsupported_backend"), default=("reply", LIGHT_ON, "stop"))
+        original = llm.respond
+
+        def with_count(spec):
+            response = original(spec)
+            response["prompt_eval_count"] = 4800
+            return response
+
+        llm.respond = with_count
+        chat = light_chat(monkeypatch, llm)
+        chat.turn(LIGHT_QUERY)
+        assert ("light", "turn_on") in writes(chat)
+
+
+# ---------------------------------------------------------------------------
+# Logs and stores
+# ---------------------------------------------------------------------------
+
+class TestLogsAndStores:
+    def test_model_chosen_key_names_are_never_logged(self, monkeypatch, caplog):
+        marker = "PLANTED-KEY-NAME-77b"
+        for query, reply in ((LIGHT_QUERY, {**LIGHT_ON, marker: 1}), (MOTION_QUERY, {**MOTION, marker: 1})):
+            chat = light_chat(monkeypatch, Scripted(("reply", reply, "stop")))
+            with capture_logs() as logs, caplog.at_level("DEBUG"):
+                chat.turn(query)
+            assert marker not in json.dumps(logs, default=str)
+            assert marker not in caplog.text
+
+    def test_the_store_wrapper_refuses_an_over_cap_query_and_passes_others(self, monkeypatch):
+        import orchestrator.nodes.route_control as rc
+
+        stored = []
+
+        async def fake(**fields):
+            stored.append(fields)
+            return True
+
+        monkeypatch.setattr(rc, "store_conversation_context", fake)
+        assert asyncio.run(rc._store_context(session_id="s", query="x" * 1001)) is False
+        assert asyncio.run(rc._store_context(session_id="s", query="é" * 501)) is False
+        assert asyncio.run(rc._store_context(session_id="s", query="x" * 1000)) is True
+        assert asyncio.run(rc._store_context(session_id="s", query=None)) is True
+        assert [f["query"] for f in stored] == ["x" * 1000, None]
+
+    def test_route_control_stores_only_through_the_wrapper(self):
+        source = (SRC / "orchestrator" / "nodes" / "route_control.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        direct = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "store_conversation_context":
+                fn = node
+                while fn in parents and not isinstance(fn, FUNCTIONS):
+                    fn = parents[fn]
+                direct.append(fn.name)
+        assert direct == ["_store_context"]
+        assert "_store_context" in source
+
+    def test_the_state_question_path_stores_no_over_cap_query(self, monkeypatch):
+        chat = light_chat(monkeypatch, Scripted(("reply", LIGHT_ON, "stop")))
+        chat.turn(padded("is the study light on", 1200, " really"))
+        assert all(room_context.utf8_len(s["query"]) <= 1000 for s in chat.stores)
+
+
+def test_a_component_on_the_auto_backend_serves_the_strict_caller_from_ollama_not_mlx(monkeypatch):
+    """Caller level: extract_intent -> real router with backend 'auto': MLX is skipped."""
+    from shared.config import _clear_cache_for_tests
+
+    monkeypatch.setenv("OLLAMA_URL", "http://ollama.test")
+    _clear_cache_for_tests()
+    ollama_reply = {"response": json.dumps(LIGHT_ON), "done": True, "done_reason": "stop", "prompt_eval_count": 5000, "eval_count": 5}
+    wire = Wire(monkeypatch, responder=lambda body: httpx.Response(200, json=ollama_reply))
+    mlx_calls = []
+
+    async def backend_config(model):
+        return {"backend_type": "auto", "endpoint_url": "http://mlx.test", "timeout_seconds": 30}
+
+    async def mlx(*args, **kwargs):
+        mlx_calls.append(1)
+        return {"response": json.dumps({**LIGHT_ON, "action": "turn_off"}), "backend": "mlx"}
+
+    monkeypatch.setattr(wire.router, "_get_backend_config", backend_config)
+    monkeypatch.setattr(wire.router, "_generate_mlx", mlx)
+    chat = light_chat(monkeypatch, wire.router)
+    chat.turn(LIGHT_QUERY)
+    _clear_cache_for_tests()
+    assert mlx_calls == [] and len(wire.requests) == 1
+    assert wire.requests[0]["options"]["num_ctx"] == 8192
+    assert ("light", "turn_on") in writes(chat)
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +917,16 @@ class TestFollowUps:
         assert out.answer == room_context.UNPROCESSABLE_TEXT
         assert writes(chat) == []
 
+    def test_model_chosen_key_names_are_not_logged_on_a_follow_up(self, monkeypatch, caplog, capsys):
+        marker = "PLANTED-FOLLOWUP-KEY-3c9"
+        off = {"device_type": "light", "room": None, "action": "turn_off", "target_scope": "group", "parameters": {}, marker: 1}
+        chat = self.first_turn(monkeypatch, Sequenced(("reply", off, "stop")))
+        with capture_logs() as logs, caplog.at_level("DEBUG"):
+            chat.turn("turn them off", room="study", context_ref_info=FOLLOW_UP)
+        seen = json.dumps(logs, default=str) + caplog.text + capsys.readouterr().out
+        assert "interpreted follow-up" in seen, "the merge log line was emitted and observed"
+        assert marker not in seen
+
     def test_a_failed_second_call_for_different_colors_writes_nothing(self, monkeypatch):
         ok = {"device_type": "light", "room": None, "action": "turn_on", "target_scope": "group", "parameters": {}}
         llm = Sequenced(("reply", ok, "stop"), ("raise", "over_ceiling"))
@@ -663,11 +939,10 @@ class TestFollowUps:
 
 def test_execute_intent_answers_an_unprocessable_result_without_touching_home_assistant(monkeypatch):
     chat = Chat(monkeypatch)
-    for reason in ("too_long", "budget", "length", "not_object", "unparseable"):
+    for reason in ("too_long", "budget", "length", "not_object", "unparseable", "unverified"):
         answer = asyncio.run(
             chat.rig.controller.execute_intent(room_context.unprocessable_intent(reason), chat.rig.raw, original_query="turn on the lights")
         )
         assert answer == (room_context.QUERY_TOO_LONG_TEXT if reason == "too_long" else room_context.UNPROCESSABLE_TEXT)
     assert chat.rig.raw.call_service.await_args_list == []
     assert chat.rig.raw.get_state.await_args_list == []
-
