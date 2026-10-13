@@ -652,6 +652,19 @@ def find_room_mention(query: Optional[str], directory: Optional[RoomDirectory]) 
     return NO_MENTION
 
 
+def names_entity(entity_id: str, friendly_name: Optional[str], text: Optional[str]) -> bool:
+    """Whether the words call an entity by its name: every distinguishing word
+    of its friendly name (else its object id) is in ``text``, and there is at
+    least one. Device nouns, quantifiers, filler and bare numbers ("light",
+    "all", "room", "2") never distinguish: "the office light" may be any of
+    "Office Light 1..3", and the room it names is what the words settle."""
+    name = friendly_name if isinstance(friendly_name, str) and friendly_name.strip() else (
+        entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    )
+    wanted = {t for t in tokens(name) if t not in _NON_ROOM_TOKENS and t not in _DEVICE_NOUNS and not t.isdigit()}
+    return bool(wanted) and wanted <= set(tokens(text or ""))
+
+
 def ground_llm_room(
     llm_room: Optional[str], query: Optional[str], directory: Optional[RoomDirectory],
 ) -> Optional[str]:

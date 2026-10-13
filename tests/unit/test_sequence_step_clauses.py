@@ -661,3 +661,124 @@ class TestAVerblessFragmentBelongsToTheWholeHouseClause:
 
     def test_a_room_in_the_cue_clause_still_counts_beside_a_fragment(self):
         assert room_context.explicit_whole_house("Turn off all the lights in the galley. Please.", self.HOUSE) is None
+
+
+# ---------------------------------------------------------------------------
+# D37: a step takes its room and device from its own words, never from the
+# model alone
+# ---------------------------------------------------------------------------
+
+def _room_step(action, room=None, **extra):
+    return {"action": action, "target": {"device_type": "light", "room": room, **extra},
+            "parameters": {}, "delay_after": 0, "at_time": None}
+
+
+class TestAStepTakesItsRoomAndDeviceFromItsOwnWords:
+    NOT_HALL = GALLEY_LEAVES | {"light.galley_all", "light.galley_pair", "light.study_lamp"}
+
+    def test_a_model_entity_id_the_words_do_not_name_is_dropped(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", None, entity_id="light.galley_all")]
+        assert rig.run(steps, "turn on the hall light") is None
+        assert "entity_id" not in steps[0]["target"]
+        assert steps[0]["target"]["decided_room"] == "hall"
+        assert rig.written and not (rig.written & self.NOT_HALL - {"light.galley_bulb_2"}), rig.written
+        assert "light.galley_all" not in rig.written
+
+    def test_a_model_room_the_words_do_not_name_is_not_used(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "study")]
+        assert rig.run(steps, "turn on the hall light") is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+        assert "light.study_lamp" not in rig.written
+
+    def test_a_model_room_with_no_room_in_the_words_asks(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "study")]
+        assert rig.run(steps, "turn on the lights") == "Which room?"
+        assert rig.raw.call_service.await_count == 0
+
+    def test_a_model_room_with_no_room_in_the_words_uses_the_speakers_room(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "galley")]
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, "turn on the lights", "hall")
+
+        assert asyncio.run(go()) is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_two_rooms_in_two_steps_each_keep_their_own(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "hall"), _room_step("turn_on", "galley")]
+        assert rig.plan(steps, "turn on the hall light then the galley light in 5 minutes") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["hall", "galley"]
+
+    def test_dim_the_study_then_turn_off_the_hall(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("set_brightness", "study"), _room_step("turn_off", "hall")]
+        assert rig.plan(steps, "dim the study, then turn off the hall") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["study", "hall"]
+
+    def test_rooms_swapped_by_the_model_follow_the_words(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_off", "study"), _room_step("set_brightness", "hall")]
+        assert rig.plan(steps, "turn off the hall then dim the study") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["hall", "study"]
+
+    def test_a_referent_clause_may_use_a_room_named_elsewhere(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "hall"), _room_step("set_brightness", "hall")]
+        assert rig.plan(steps, "turn on the hall light then dim it") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["hall", "hall"]
+
+    def test_a_model_multi_room_list_is_grounded_per_room(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_off", "multi_room", rooms=["hall", "study", "attic"])]
+        assert rig.plan(steps, "turn off the hall and study lights") is None
+        assert sorted(steps[0]["target"]["decided_rooms"]) == ["hall", "study"]
+
+    def test_an_entity_named_by_its_friendly_name_is_kept(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", None, entity_id="light.hall_lamp")]
+        assert rig.run(steps, "turn on the hall lamp") is None
+        assert steps[0]["target"]["entity_id"] == "light.hall_lamp"
+        assert rig.written == {"light.hall_lamp"}
+
+    def test_an_entity_named_in_a_referent_clause_is_kept(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", None, entity_id="light.hall_lamp"),
+                 _room_step("set_brightness", None, entity_id="light.hall_lamp")]
+        assert rig.plan(steps, "turn on the hall lamp then dim it") is None
+        assert all(s["target"].get("entity_id") == "light.hall_lamp" for s in steps)
+
+    def test_an_unknown_model_entity_id_is_dropped(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", None, entity_id="light.nowhere")]
+        assert rig.plan(steps, "turn on the hall light") is None
+        assert "entity_id" not in steps[0]["target"]
+
+    def test_whole_house_steps_and_their_exclusions_are_unchanged(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_light_step("turn_off"), _light_step("turn_on", room="hall")]
+        assert rig.plan(steps, "turn off all the lights except the galley, then turn on the hall") is None
+        assert steps[0]["target"]["decided_excluded"] == ["galley"]
+        assert steps[1]["target"]["decided_room"] == "hall"
+
+    def test_an_entity_named_in_another_clause_is_not_a_swapped_step_target(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "study"), _room_step("turn_on", None, entity_id="light.hall_lamp")]
+        assert rig.plan(steps, "turn on the hall lamp then turn on the study light") is None
+        assert "entity_id" not in steps[0]["target"]
+        assert steps[1]["target"].get("entity_id") != "light.hall_lamp"
+        assert steps[1]["target"]["decided_room"] == "study"
+
+    def test_names_entity_needs_every_distinguishing_word_and_ignores_numbers(self):
+        names = room_context.names_entity
+        assert names("light.study_desk", "Study Desk Lamp", "turn on the study desk lamp") is True
+        assert names("light.study_desk", "Study Desk Lamp", "turn on the study light") is False
+        assert names("light.office_0", "Office Light 0", "turn off the office light") is True
+        assert names("light.galley_all", "Galley All", "turn on the hall light") is False
+        assert names("light.x", "Light", "turn on the light") is False
+        assert names("light.hall_lamp", None, "turn on the hall lamp") is True

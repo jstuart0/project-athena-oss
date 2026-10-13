@@ -2843,12 +2843,24 @@ Return ONLY valid JSON."""
             return door_text
         whole_houses = None
         whole_house_index = 0
-        for step in steps:
+        directory = self._directory()
+        clauses = room_context.step_clauses(query, directory)
+        for index, step in enumerate(steps):
             target = step.get('target') or {}
             domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
-            if not domain or target.get('entity_id'):
+            if not domain:
                 continue
+            # The step's own words: its clause when the clauses line up with
+            # the steps, else the whole utterance.
+            clause = clauses[index] if len(clauses) == len(steps) else query
+            if target.get('entity_id') and await self._entity_named_in(
+                target['entity_id'], clause, query, directory,
+            ):
+                continue
+            target.pop('entity_id', None)
             intent = {k: v for k, v in target.items() if k in ('device_type', 'room', 'rooms')}
+            if intent.get('room') != 'whole_house':
+                self._ground_step_room(intent, clause, query, directory)
             if intent.get('room') == 'whole_house':
                 if domain == 'light' and room_context.is_explicit_whole_house(query):
                     # The same exclusion authority as a single command: the
@@ -2874,13 +2886,64 @@ Return ONLY valid JSON."""
                 # it: no step acts on a house nobody named.
                 return room_context.ask_text(room_context.AskRoom())
             outcome = await self._decide_intent_room(
-                intent, None, device_room, step.get('action', 'turn_on'), domain, record=False,
+                intent, clause, device_room, step.get('action', 'turn_on'), domain, record=False,
             )
             if outcome is not None:
                 return outcome
             target.update({k: v for k, v in intent.items() if k in (
                 'room', 'rooms', 'excluded_rooms', 'decided_room', 'decided_rooms', 'decided_excluded', 'room_label')})
         return None
+
+    async def _entity_named_in(self, entity_id, clause: str, query: str, directory) -> bool:
+        """Whether a model's entity id is one the step's own words call by
+        name: in its clause, or in the utterance when the clause names no room
+        of its own ("... then dim it"). A model's id alone never aims a
+        write."""
+        if not isinstance(entity_id, str):
+            return False
+        try:
+            entity = (await self.entity_manager.get_entities()).get(entity_id)
+        except Exception:
+            return False
+        if entity is None:
+            return False
+        name = ((entity or {}).get('attributes') or {}).get('friendly_name')
+        if room_context.names_entity(entity_id, name, clause):
+            return True
+        return (
+            room_context.find_room_mention(clause, directory).kind == "none"
+            and room_context.names_entity(entity_id, name, query)
+        )
+
+    @staticmethod
+    def _ground_step_room(intent: Dict, clause: str, query: str, directory) -> None:
+        """Keep a model's room (or rooms) for a step only where the step's
+        words name it: the room is grounded in the clause like a single
+        intent's. A clause that names a room of its own decides it (the
+        decision reads the clause); a clause that names none may use a room
+        the utterance names elsewhere ("... then dim it"). Anything else is
+        dropped, and the room comes from the clause's words, the speaker's
+        room or a question, never from the model alone."""
+        def grounded(room) -> Optional[str]:
+            if not isinstance(room, str):
+                return None
+            found = room_context.ground_llm_room(room, clause, directory)
+            if found:
+                return found
+            if room_context.find_room_mention(clause, directory).kind != "none":
+                return None
+            return room_context.ground_llm_room(room, query, directory)
+
+        if intent.get('room') == 'multi_room' and isinstance(intent.get('rooms'), list):
+            kept = list(dict.fromkeys(g for g in (grounded(r) for r in intent['rooms']) if g))
+            if len(kept) > 1:
+                intent['rooms'] = kept
+                return
+            intent.pop('rooms', None)
+            intent['room'] = kept[0] if kept else None
+            return
+        intent.pop('rooms', None)
+        intent['room'] = grounded(intent.get('room'))
 
     async def _decide_intent_room(
         self, intent: Dict, original_query: Optional[str], device_room: Optional[str],
