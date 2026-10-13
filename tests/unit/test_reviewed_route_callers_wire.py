@@ -34,6 +34,7 @@ import logging
 import os
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -331,16 +332,18 @@ def _save_proposal(h):
     return call, default
 
 
-@wire_case("src/orchestrator/smart_home_controller.py", "_create_stuck_sensor_alert",
-           requests=[("POST", "/api/alerts/public/create")], routes=["/api/alerts/public/create"],
-           ok=(200, {"id": 1}))
+@wire_case("src/orchestrator/smart_home_controller.py", "_reconcile_stuck_alerts",
+           requests=[("POST", "/api/alerts/public/stuck-sensors/reconcile")],
+           routes=["/api/alerts/public/stuck-sensors/reconcile"],
+           ok=(200, {"created": 0, "updated": 0, "reopened": 0, "resolved": 0}))
 def _stuck_sensor_alert(h):
     controller = object.__new__(h.load("orchestrator.smart_home_controller").SmartHomeController)
     sensor = {"room": "office", "friendly_name": "Office motion", "state": "on", "hours_unchanged": 30.0,
-              "last_changed": "2026-01-01T00:00:00+00:00", "entity_id": "binary_sensor.office_motion"}
+              "last_changed": "2026-01-01T00:00:00+00:00", "entity_id": "binary_sensor.office_motion",
+              "sensor_type": "motion"}
 
     async def call():
-        return await controller._create_stuck_sensor_alert(sensor)
+        return await controller._reconcile_stuck_alerts([sensor], [], datetime.now(timezone.utc))
 
     def default(result):
         assert result is None

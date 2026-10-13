@@ -53,6 +53,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Check sensors now.** The Alerts page has a button that re-reads Home Assistant, updates the stuck-sensor alerts at once, and shows how many sensors it checked and how many old alerts it cleared. It needs the write permission for alerts, and the orchestrator must run the new version (otherwise it says so).
 - **The dashboard names a Home Assistant address block** and shows failed sign-ins per part of Athena (voice commands, room list, voice satellites, speaker room detection, the admin panel, voice pipeline settings), so you can see what is counting toward a ban.
 - The Dashboard shows Home Assistant's real connection in its own card: connected, needs attention (for example "Connected, rooms not loaded") or failing (token rejected, access blocked, can't reach, not responding), with when it was last seen and when it last worked, and what to do next. It comes from the traffic the orchestrator already has with Home Assistant, combined across the orchestrator's replicas, and says plainly when it can only see one replica or when the status service can't be reached. It is based on the last contact, so it can lag while the house is idle; the card says so. `GET /api/service-registry/home-assistant` (read permission) serves it.
 - Assistant settings, "Voice response": spoken-answer limits, the longer limit for step-by-step answers, and an opt-in "didn't catch that" reply for unclear speech picked up from the room (off by default).
@@ -119,6 +120,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Stuck-sensor alerts clear themselves.** An alert for a motion or presence sensor is resolved as soon as the sensor changes, including old alerts that were never closed, and an alert is cleared only for a sensor that was actually seen working (a sensor that is unavailable, or missing while Home Assistant restarts, keeps its alert), and a sensor that gets stuck again reopens its alert instead of failing with a server error. Presence and occupancy sensors, which can report "on" for hours while someone is in the room, are flagged after 24 hours instead of 4; motion and PIR sensors keep 4 hours. A street name was also removed from the list of outdoor sensor names the check skips.
 - **Athena stops using a Home Assistant token after it's rejected.** Across every part of Athena, automatic retries cause at most three failed sign-ins before Athena waits for you to save the key again, however long it waits. Home Assistant counts failed sign-ins per address and never forgets them, so a token that keeps being retried gets the address banned.
 - **A token saved under External API Keys is used everywhere within a minute,** including room lookup, without a restart. Saving the key again retries a stopped token.
 - The Home Assistant status comes from Athena's own connection, not from a registry check that could say "disabled" or "healthy" while Home Assistant was working or broken.

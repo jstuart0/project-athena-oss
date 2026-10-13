@@ -12,6 +12,7 @@ import logging
 import socket
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -140,9 +141,9 @@ def test_a_failed_house_layout_fetch_logs_the_error_type_only(configure, caplog)
     ]
 
 
-def test_a_stuck_sensor_resolve_that_cannot_connect_is_a_warning(configure, caplog):
-    """A transport failure on this keyed call used to be DEBUG only, so a TLS
-    or connection problem after an upgrade left no trace at the default level."""
+def test_a_stuck_sensor_reconcile_that_cannot_connect_is_a_warning(configure, caplog):
+    """A transport failure on this keyed call must show at the default level, so a TLS
+    or connection problem after an upgrade leaves a trace."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     port = closed.getsockname()[1]
@@ -150,10 +151,10 @@ def test_a_stuck_sensor_resolve_that_cannot_connect_is_a_warning(configure, capl
     caplog.set_level(logging.DEBUG)
     configure(f"http://127.0.0.1:{port}", USABLE_KEY)
 
-    asyncio.run(_controller()._resolve_stuck_sensor_alert("binary_sensor.hall_motion"))
+    assert asyncio.run(_controller()._reconcile_stuck_alerts([], [], datetime.now(timezone.utc))) is None
 
-    lines = [r for r in caplog.records if "stuck sensor alert" in r.getMessage()]
+    lines = [r for r in caplog.records if "Stuck sensor alert" in r.getMessage()]
     assert [(r.levelname, r.getMessage()) for r in lines] == [
-        ("WARNING", "Error resolving stuck sensor alert: ConnectError"),
+        ("WARNING", "Stuck sensor alert reconcile failed: ConnectError"),
     ]
     assert str(port) not in caplog.text.replace("httpcore", ""), "no URL in the line"

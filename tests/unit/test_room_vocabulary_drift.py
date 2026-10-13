@@ -38,8 +38,8 @@ ALLOWLIST = {
     # that match sensor names, not rooms a command targets.
     ("src/orchestrator/smart_home_controller.py", "_get_window_sensor_status"):
         "sensor_room_tokens: name fragments of occupancy sensors (motion, out of scope)",
-    ("src/orchestrator/smart_home_controller.py", "_get_all_motion_sensors_with_stuck_detection"):
-        "outdoor_patterns: names of exterior motion sensors to skip (motion, out of scope)",
+    ("src/orchestrator/smart_home_controller.py", "OUTDOOR_SENSOR_PATTERNS"):
+        "names of exterior motion sensors to skip (motion, out of scope)",
     ("src/orchestrator/smart_home_controller.py", "_handle_motion_control_intent"):
         "valid_rooms: the rooms with motion-control helpers in a house's HA (motion, out of scope; "
         "still names a house's rooms and needs its own follow-up)",

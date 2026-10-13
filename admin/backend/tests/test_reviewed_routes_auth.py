@@ -8,7 +8,7 @@ nothing overrides an auth dependency. Only the outbound calls the handlers
 make are stubbed, and a socket guard fails any test that dials out anyway.
 
 Ids are ``g<group>_<route file>_<n>-<case>``. The groups are the order the
-routes are gated in (42, 23 and 28 routes), and the write tests carry their
+routes are gated in (43, 23 and 28 routes), and the write tests carry their
 route's group id too, so ``-k`` selects a group's whole gate:
 
 - ``-k g1_``: 576 tests (546 matrix cases, 30 write and author tests);
@@ -123,6 +123,9 @@ _BODY = {
         "alert_type": "stuck_sensor", "title": "Stuck sensor", "message": "No change for a day",
         "entity_id": "binary_sensor.zz_motion", "dedup_key": "stuck_sensor_zz",
     },
+    ("POST", "/api/alerts/public/stuck-sensors/reconcile"): {"observed_at": "2026-01-01T00:00:00+00:00", "healthy": [], "stuck": [{
+        "entity_id": "binary_sensor.zz_motion", "room": "Zz", "friendly_name": "Zz motion",
+        "sensor_type": "motion", "hours_on": 5.0}]},
     ("POST", "/api/cloud-llm-usage"): {"provider": "openai", "model": "gpt-zz", "input_tokens": 1, "cost_usd": 0.01},
     ("POST", "/api/escalation/state/internal"): {
         "session_id": "zz-session", "escalated_to": "super_complex", "turns_remaining": 5},
@@ -400,13 +403,13 @@ def _expected(op, case):
 # B1 -----------------------------------------------------------------------
 
 def test_matrix_population():
-    assert len(OPS) == 94
-    assert len(MATRIX) == 1222
-    assert len(set(MATRIX_IDS)) == 1222
+    assert len(OPS) == 95
+    assert len(MATRIX) == 1235
+    assert len(set(MATRIX_IDS)) == 1235
     pattern = re.compile(r"^g[123]_[a-z_]+_\d+-[a-z_]+$")
     assert all(pattern.match(case_id) for case_id in MATRIX_IDS)
     by_group = {group: sum(1 for op_id, _ in OPS if op_id.startswith(group + "_")) for group in ("g1", "g2", "g3")}
-    assert by_group == {"g1": 42, "g2": 24, "g3": 28}
+    assert by_group == {"g1": 43, "g2": 24, "g3": 28}
     assert OP_ID[("GET", "/api/features/public")].startswith("g2_")
     assert OP_ID[PROGRESS_OP].startswith("g1_")
     assert OP_ID[("GET", "/api/voice-config/running-config")].startswith("g3_")
@@ -457,7 +460,7 @@ def test_first_match_self_test():
 
 def test_expected_pass_codes_are_pinned():
     assert set(EXPECTED_PASS) == set(REVIEWED)
-    assert len(EXPECTED_PASS) == 94
+    assert len(EXPECTED_PASS) == 95
     assert set(_NOT_200) <= set(REVIEWED)
     assert all(reason.strip() for _status, reason in _NOT_200.values())
     assert not [op for op, status in EXPECTED_PASS.items() if status in {401, 403, 422, 503}]
@@ -569,6 +572,7 @@ def _real_module_id():
 
 WRITES = [
     Write(("POST", "/api/alerts/public/create"), _count(Alert)),
+    Write(("POST", "/api/alerts/public/stuck-sensors/reconcile"), _count(Alert)),
     Write(("POST", "/api/alerts/public/resolve-by-entity"),
           lambda db, api, seeded: _fresh(db, Alert, id=seeded).status,
           seed=lambda db: _alert(db).id),
@@ -594,7 +598,7 @@ WRITES = [
 
 
 def test_write_population():
-    assert len(WRITES) == 12
+    assert len(WRITES) == 13
     assert ("POST", "/api/tool-proposals") in {w.op for w in WRITES}
     non_get = {op for op in REVIEWED if op[0] != "GET"}
     assert {w.op for w in WRITES} == non_get - {("POST", "/api/mcp-security/check-domain")}
@@ -669,7 +673,7 @@ def test_writing_get_population():
     assert ("GET", "/api/escalation/state/{session_id}/public") in {g.op for g in WRITING_GETS}
     assert len(REJECTED_GETS) == 7
     assert {g.op for g in WRITING_GETS} == set(_PRECONDITION)
-    assert len(WRITES) + len(WRITING_GETS) == 17
+    assert len(WRITES) + len(WRITING_GETS) == 18
 
 
 def _seed_get(get, db, owner):

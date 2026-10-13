@@ -30,7 +30,7 @@ from enum import Enum
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from prometheus_client import Counter, Histogram, generate_latest
@@ -9495,6 +9495,18 @@ async def ha_status():
         "replicas_reporting": view["replicas_reporting"],
         "observed_at": view["observed_at"],
     }
+
+
+@app.post("/admin/sensors/stuck-check", dependencies=[Depends(require_service_caller)])
+async def stuck_sensor_check():
+    """Re-read Home Assistant, decide which motion/presence sensors are stuck,
+    and reconcile their alerts. Closed error codes only; 503 when the check
+    can't run."""
+    controller = _runtime.get_smart_controller()
+    if controller is None:
+        return JSONResponse(status_code=503, content={"ok": False, "error": "home_assistant_not_configured"})
+    result = await controller.check_stuck_sensors_now()
+    return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
 
 
 @app.post("/admin/reset-all-circuits", dependencies=[Depends(require_service_caller)])

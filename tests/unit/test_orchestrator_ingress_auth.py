@@ -93,8 +93,8 @@ def _chat_body():
     return {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False}
 
 
-# Each: (method, path, body-or-None). Population is 14 (AU1, amended DC12:
-# the original 8 chat/session routes plus warmup + the 5 /admin/* routes).
+# Each: (method, path, body-or-None). Population is 15 (AU1, amended DC12:
+# the original 8 chat/session routes plus warmup + the 6 /admin/* routes).
 _GATED_ROUTES = [
     ("POST", "/query", _query_body()),
     ("POST", "/query/stream", _query_body()),
@@ -110,6 +110,7 @@ _GATED_ROUTES = [
     ("POST", "/admin/reset-all-circuits", None),
     ("POST", "/admin/invalidate-model-cache", None),
     ("GET", "/admin/ha-status", None),
+    ("POST", "/admin/sensors/stuck-check", None),
 ]
 
 
@@ -121,8 +122,8 @@ def _hit(client, method, path, body):
     return client.post(path, json=body)
 
 
-def test_AU1_population_is_14():
-    assert len(_GATED_ROUTES) == 14
+def test_AU1_population_is_15():
+    assert len(_GATED_ROUTES) == 15
 
 
 def test_AU1_named_member_delete_sessions_present():
@@ -139,6 +140,7 @@ def test_AU1_named_member_admin_routes_present():
     assert ("POST", "/admin/reset-all-circuits", None) in _GATED_ROUTES
     assert ("POST", "/admin/invalidate-model-cache", None) in _GATED_ROUTES
     assert ("GET", "/admin/ha-status", None) in _GATED_ROUTES
+    assert ("POST", "/admin/sensors/stuck-check", None) in _GATED_ROUTES
 
 
 @pytest.mark.parametrize("method,path,body", _GATED_ROUTES)
@@ -382,3 +384,44 @@ def test_AU6_config_read_fresh_per_call(monkeypatch, client):
 
     resp3 = client.get("/sessions", headers={"X-Service-Key": "second-key-value"})
     assert resp3.status_code != 401
+
+
+# Stuck-sensor live check: response shape and closed errors.
+
+def _enforced(monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "enforce")
+    monkeypatch.setenv("SERVICE_API_KEY", REAL_SERVICE_KEY)
+    monkeypatch.delenv("DEV_MODE", raising=False)
+    _clear_cache_for_tests()
+    return {"X-Service-Key": REAL_SERVICE_KEY}
+
+
+def test_stuck_check_without_a_controller_is_a_closed_503(monkeypatch, client):
+    headers = _enforced(monkeypatch)
+    _runtime.set_smart_controller(None)
+    resp = client.post("/admin/sensors/stuck-check", headers=headers)
+    assert resp.status_code == 503
+    assert resp.json() == {"ok": False, "error": "home_assistant_not_configured"}
+
+
+def test_stuck_check_returns_the_controller_summary(monkeypatch, client):
+    headers = _enforced(monkeypatch)
+    summary = {"ok": True, "sensors_checked": 3, "stuck_count": 0, "stuck": [],
+               "reconciled": True, "reconcile": {"created": 0, "updated": 0, "reopened": 0, "resolved": 1}}
+    _runtime.set_smart_controller(SimpleNamespace(check_stuck_sensors_now=mock.AsyncMock(return_value=summary)))
+    try:
+        resp = client.post("/admin/sensors/stuck-check", headers=headers)
+    finally:
+        _runtime.set_smart_controller(None)
+    assert resp.status_code == 200 and resp.json() == summary
+
+
+def test_stuck_check_failure_is_503_with_only_the_code(monkeypatch, client):
+    headers = _enforced(monkeypatch)
+    failure = {"ok": False, "error": "home_assistant_unavailable"}
+    _runtime.set_smart_controller(SimpleNamespace(check_stuck_sensors_now=mock.AsyncMock(return_value=failure)))
+    try:
+        resp = client.post("/admin/sensors/stuck-check", headers=headers)
+    finally:
+        _runtime.set_smart_controller(None)
+    assert resp.status_code == 503 and resp.json() == failure

@@ -4,7 +4,7 @@ Dynamically fetches and caches HA entities for intelligent device control
 """
 import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import structlog
@@ -429,6 +429,10 @@ class HAEntityManager:
             info['friendly_name'] for info in self._light_groups.values()
             if info.get('is_group') and info.get('members')
         ]
+
+    def entities_fetched_at(self) -> datetime:
+        """When the cached states were read from Home Assistant, as an aware UTC time."""
+        return self._cache_time.astimezone(timezone.utc)
 
     async def get_entities(self, force_refresh=False) -> Dict:
         """Get cached entities or refresh if needed"""

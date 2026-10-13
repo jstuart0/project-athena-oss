@@ -41,12 +41,14 @@ GLOBS = (
     "tests/unit/test_room_directory_refresh.py",
     "tests/unit/test_admin_frontend_*.py",
     "tests/unit/test_campaign_ci_wiring.py",
+    "tests/unit/test_stuck_sensor_detection.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
     "admin/backend/tests/test_dashboard_not_checked.py",
     "admin/backend/tests/test_service_urls_accessor.py",
     "admin/backend/tests/test_core_probe.py",
+    "admin/backend/tests/test_stuck_sensor_alerts.py",
 )
 
 # The test files this campaign adds, pinned so a CI checkout at depth 1 (no
@@ -82,6 +84,7 @@ CAMPAIGN_TESTS = (
     "admin/backend/tests/test_dashboard_not_checked.py",
     "admin/backend/tests/test_service_urls_accessor.py",
     "admin/backend/tests/test_core_probe.py",
+    "tests/unit/test_stuck_sensor_detection.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.
@@ -104,6 +107,7 @@ PREEXISTING_SHARED_STATE: Dict[str, str] = {
     "tests/unit/test_gateway_simple_commands_routing.py": "setdefault for SERVICE_API_KEY and ADMIN_API_URL, and a prometheus_client stub only when absent; shared a step at the base",
     "tests/unit/test_room_light_area_tier.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_room_light_dispatch.py": "stubs langgraph and prometheus_client only when absent",
+    "tests/unit/test_reviewed_route_callers_wire.py": "setdefault for ADMIN_API_URL only; shared the orchestrator-behaviour step at the base",
 }
 
 NAMED_MEMBERS = (

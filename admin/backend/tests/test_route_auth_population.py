@@ -126,6 +126,7 @@ REVIEWED_BY_FILE = {
         ("GET", "/api/alerts/public/active-by-type"): ("user", "read:alerts"),
         ("POST", "/api/alerts/public/create"): ("service_or_user", "write"),
         ("POST", "/api/alerts/public/resolve-by-entity"): ("service_or_user", "write"),
+        ("POST", "/api/alerts/public/stuck-sensors/reconcile"): ("service", None),
     },
     "cloud_llm_usage.py": {
         ("GET", "/api/cloud-llm-usage/alerts"): ("user", "read"),
@@ -399,12 +400,12 @@ def test_lists_are_disjoint_and_reasoned():
     public, gated = set(INTENTIONALLY_PUBLIC), set(GATED)
     assert len(public) == 13
     assert len(GUEST_DATA_GATED) == 46
-    assert len(gated) == 140
-    assert sum(len(ops) for ops in REVIEWED_BY_FILE.values()) == 94
+    assert len(gated) == 141
+    assert sum(len(ops) for ops in REVIEWED_BY_FILE.values()) == 95
     assert len(REVIEWED_BY_FILE) == 26
     # No operation under two files, and none already pinned by the
     # guest-data table (a dict merge would hide either).
-    assert len(REVIEWED) == 94
+    assert len(REVIEWED) == 95
     assert not set(REVIEWED) & set(GUEST_DATA_GATED)
     assert public & gated == set()
     assert not USER_ONLY_PINNED & (public | gated)
@@ -466,13 +467,13 @@ def test_gated_named_members():
 
 def test_reviewed_table_totals():
     pins = list(REVIEWED.values())
-    assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 43, "service": 1}
-    assert collections.Counter(perm for _, perm in pins) == {"read": 81, "read:alerts": 1, "write": 11, None: 1}
+    assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 43, "service": 2}
+    assert collections.Counter(perm for _, perm in pins) == {"read": 81, "read:alerts": 1, "write": 11, None: 2}
     grouped = [name for files in REVIEWED_GROUPS.values() for name in files]
     assert sorted(grouped) == sorted(REVIEWED_BY_FILE), "every file is in exactly one group"
     assert tuple(
         sum(len(REVIEWED_BY_FILE[name]) for name in REVIEWED_GROUPS[group]) for group in ("g1", "g2", "g3")
-    ) == (42, 24, 28)
+    ) == (43, 24, 28)
 
 
 # The one non-GET that changes nothing: it answers allow/deny for a URL.
@@ -481,7 +482,7 @@ NON_MUTATING_POSTS = {("POST", "/api/mcp-security/check-domain")}
 
 def test_reviewed_writes_need_write():
     non_get = {op: pin for op, pin in REVIEWED.items() if op[0] != "GET"}
-    assert len(non_get) == 13, sorted(non_get)
+    assert len(non_get) == 14, sorted(non_get)
     lenient = {op for op, pin in non_get.items() if pin != ("service", None) and pin[1] != "write"}
     assert lenient == NON_MUTATING_POSTS
 

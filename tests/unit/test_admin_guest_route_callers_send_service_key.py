@@ -45,7 +45,7 @@ GATED_PATH = re.compile(
     r"/api/(?:room-groups|user-sessions/device|voice-automations"
     r"|internal/emerging-intents|internal/intent-metrics"
     r"|settings/house-layout|settings/directions-origin-placeholders"
-    r"|alerts/public/(?:create|resolve-by-entity)"
+    r"|alerts/public/(?:create|resolve-by-entity|stuck-sensors/reconcile)"
     r"|cloud-llm-usage(?![\w/-])"
     r"|cloud-providers/pricing/"
     r"|component-models/(?:public|component/)"
@@ -72,7 +72,7 @@ GATED_PATH = re.compile(
     r"|/internal/\{download_id\}/progress"
 )
 
-# Every family that holds one of the 94 reviewed routes. Wider than
+# Every family that holds one of the 95 reviewed routes. Wider than
 # GATED_PATH on purpose: the route-mapping tests look at every call into
 # these families and decide by the route it maps to.
 REVIEWED_FAMILY = re.compile(
@@ -106,7 +106,7 @@ PREDECESSOR_TARGETS = {
     "src/orchestrator/main.py": {"get_origin_placeholder_patterns"},
 }
 
-# The callers of the 94 reviewed routes.
+# The callers of the 95 reviewed routes.
 REVIEWED_TARGETS = {
     "src/shared/admin_config.py": {
         "get_intent_routing", "get_provider_routing", "get_llm_backends", "get_feature_flags",
@@ -132,7 +132,7 @@ REVIEWED_TARGETS = {
     },
     "src/orchestrator/self_building_tools.py": {"check_enabled", "_save_proposal"},
     "src/orchestrator/smart_home_controller.py": {
-        "_create_stuck_sensor_alert", "_resolve_stuck_sensor_alert",
+        "_reconcile_stuck_alerts",
     },
     "src/orchestrator/tv_handler.py": {"get_tv_configs", "get_app_configs", "get_feature_flag"},
     "src/orchestrator/music_handler.py": {"get_room_configs"},
@@ -458,10 +458,10 @@ def _predecessor_keys():
 
 # C1 -----------------------------------------------------------------------
 
-def test_population_is_the_sixty_eight_callers():
+def test_population_is_the_sixty_seven_callers():
     results = _all_results()
     every = {(rel, name) for rel, names in TARGETS.items() for name in names}
-    assert len(results) == 68, sorted(every - set(results))
+    assert len(results) == 67, sorted(every - set(results))
     assert len(TARGETS) == 18
     assert not _reviewed_keys() & _predecessor_keys()
     empty = sorted(k for k, calls in results.items() if not calls)
@@ -481,7 +481,7 @@ def test_population_is_the_sixty_eight_callers():
     def count(keys):
         return {area: sum(1 for rel, _n in keys if area_of(rel) == area) for area in AREAS}
 
-    assert count(_reviewed_keys()) == {"shared": 26, "orchestrator": 17, "edge": 9}
+    assert count(_reviewed_keys()) == {"shared": 26, "orchestrator": 16, "edge": 9}
     assert count(_predecessor_keys()) == {"shared": 10, "orchestrator": 6, "edge": 0}
 
 
@@ -526,8 +526,8 @@ def test_no_gated_call_outside_the_named_callers():
     assert not outside, f"{len(outside)} gated call(s) in a function that isn't a named caller: {sorted(outside)}"
     owners = {(entry[0], name) for entry, names in matched for name in names}
     files = {entry[0] for entry, _ in matched}
-    assert len(matched) >= 70, len(matched)
-    assert len(owners) >= 68, len(owners)
+    assert len(matched) >= 69, len(matched)
+    assert len(owners) >= 67, len(owners)
     assert len(files) >= 18, len(files)
     assert ("src/gateway/main.py", "get_feature_flag") in owners
 
@@ -693,7 +693,7 @@ def _family_calls():
 
 def test_each_scanned_call_maps_to_a_service_reachable_route():
     routes = reviewed_routes()
-    assert len(routes) == 94
+    assert len(routes) == 95
     problems, mapped = [], {}
     for rel, name, lineno, method, ops in _family_calls():
         if (rel, name) == DEAD_USER_ROUTE_CALLER:
@@ -714,7 +714,7 @@ def test_each_scanned_call_maps_to_a_service_reachable_route():
     assert not problems, f"{len(problems)} call(s) a service can't make: {problems}"
     # 54 call sites: the 55 per-function entries count lifespan's nested
     # _do_prewarm call under both functions.
-    assert len(mapped) >= 54, len(mapped)
+    assert len(mapped) >= 53, len(mapped)
     proposal = [op for (rel, name, _l), op in mapped.items() if name == "_save_proposal"]
     assert proposal == [("POST", "/api/tool-proposals")]
     progress = [op for (rel, name, _l), op in mapped.items() if name == "send_progress_callback"]
@@ -1183,7 +1183,7 @@ def _without_a_note(keys):
 @pytest.mark.parametrize("area", AREAS, ids=lambda a: f"area_{a}")
 def test_new_callers_note_a_refusal(area):
     keys = _reviewed_keys()
-    assert len(keys) == 52
+    assert len(keys) == 51
     for named in (
         ("src/orchestrator/helpers.py", "get_feature_config"),
         ("src/orchestrator/main.py", "lifespan"),

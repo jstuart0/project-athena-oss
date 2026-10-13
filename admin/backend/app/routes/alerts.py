@@ -18,7 +18,8 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Alert
-from app.utils.service_auth import require_service_or_user_permission, require_user_permission
+from app.services import stuck_sensor_alerts, stuck_sensor_check
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission, verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -95,17 +96,32 @@ async def create_alert_public(
     signed-in user with write permission).
 
     Uses dedup_key to prevent duplicate alerts - if an alert with the same
-    dedup_key already exists and is active, it will be returned instead.
+    dedup_key already exists and is open, it will be returned instead. A
+    resolved or dismissed one is reopened with the new content (dedup_key is
+    unique, so a second row can't be inserted).
     """
-    # Check for existing active alert with same dedup_key
     if alert.dedup_key:
-        existing = db.query(Alert).filter(
-            Alert.dedup_key == alert.dedup_key,
-            Alert.status.in_(['active', 'acknowledged'])
-        ).first()
+        existing = db.query(Alert).filter(Alert.dedup_key == alert.dedup_key).first()
+
+        if existing and existing.status in stuck_sensor_alerts.OPEN_STATUSES:
+            logger.info("alert_deduplicated", dedup_key=alert.dedup_key, existing_id=existing.id)
+            return AlertResponse(**existing.to_dict())
+
+        if existing and existing.alert_type != alert.alert_type:
+            logger.warning("alert_dedup_key_type_mismatch", existing_id=existing.id)
+            raise HTTPException(status_code=409, detail="dedup_key belongs to a different alert type")
 
         if existing:
-            logger.info("alert_deduplicated", dedup_key=alert.dedup_key, existing_id=existing.id)
+            stuck_sensor_alerts.reopen_alert(existing, datetime.now(timezone.utc))
+            existing.severity = alert.severity
+            existing.title = alert.title
+            existing.message = alert.message
+            existing.entity_id = alert.entity_id
+            existing.entity_type = alert.entity_type
+            existing.alert_data = alert.alert_data or {}
+            db.commit()
+            db.refresh(existing)
+            logger.info("alert_reopened", dedup_key=alert.dedup_key, existing_id=existing.id)
             return AlertResponse(**existing.to_dict())
 
     # Create new alert
@@ -175,6 +191,29 @@ async def resolve_alerts_by_entity(
     )
 
     return {"resolved_count": resolved_count}
+
+
+@router.post("/public/stuck-sensors/reconcile", dependencies=[Depends(verify_service_api_key)])
+async def reconcile_stuck_sensor_alerts(
+    body: stuck_sensor_alerts.StuckSensorReconcile,
+    db: Session = Depends(get_db)
+):
+    """
+    Apply what the orchestrator observed: open, refresh or reopen the alert
+    of each stuck sensor and resolve the alert of each sensor seen healthy.
+    Service key only. Sensors not listed are left alone.
+    """
+    return stuck_sensor_alerts.reconcile(db, body, datetime.now(timezone.utc))
+
+
+@router.post("/stuck-sensors/check", dependencies=[Depends(require_user_permission("write:alerts"))])
+async def check_stuck_sensors_now():
+    """The "Check sensors now" button: ask the orchestrator for a live check."""
+    summary, failure = await stuck_sensor_check.run_live_check()
+    if failure:
+        status_code, phrase = stuck_sensor_check.FAILURES[failure]
+        raise HTTPException(status_code=status_code, detail=phrase)
+    return summary
 
 
 @router.get("/public/active-by-type", dependencies=[Depends(require_user_permission("read:alerts"))])

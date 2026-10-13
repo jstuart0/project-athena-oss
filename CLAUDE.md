@@ -180,7 +180,7 @@ When adding a new node, helper, or utility:
 
 **Ingress authentication (ATHENA-89, D10)**
 
-Orchestrator ingress routes (`/query*`, `/v1/chat/completions`, `/sessions*`, `/session/{id}/warmup`, `/admin/*` — 14 routes, including `GET /admin/ha-status`) are gated by `orchestrator/ingress_auth.py::require_service_caller`; mode via `ORCHESTRATOR_INGRESS_AUTH` (`warn`/`enforce`); every in-cluster caller must send `X-Service-Key` and is checked by `tests/unit/test_orchestrator_callers_send_service_key.py`.
+Orchestrator ingress routes (`/query*`, `/v1/chat/completions`, `/sessions*`, `/session/{id}/warmup`, `/admin/*` — 15 routes, including `GET /admin/ha-status` and `POST /admin/sensors/stuck-check`) are gated by `orchestrator/ingress_auth.py::require_service_caller`; mode via `ORCHESTRATOR_INGRESS_AUTH` (`warn`/`enforce`); every in-cluster caller must send `X-Service-Key` and is checked by `tests/unit/test_orchestrator_callers_send_service_key.py`.
 
 **HA link status**
 
@@ -326,6 +326,10 @@ app's routes). `CalendarSource.to_dict_safe()` never carries `ical_url`;
 only `GET /api/calendar-sources/{id}` returns it (audited), and
 `/test-url` takes the URL in the body, never the query string. Calendar logs and status strings carry `safe_error(exc)` (class and
 HTTP status) only, never exception text.
+
+---
+
+**Stuck-sensor alerts**: the orchestrator alone decides a sensor is stuck (`STUCK_ON_HOURS_BY_TYPE`; presence/occupancy 24 h, motion/PIR 4 h; the pure `classify_motion_sensors`) and, after a fetch that returned entities, sends the stuck sensors, the sensors positively seen healthy (state `on`/`off`, parseable `last_changed`, a room) and `observed_at` in one service-key-only call to `POST /api/alerts/public/stuck-sensors/reconcile`. `admin/backend/app/services/stuck_sensor_alerts.py::reconcile` is the only automatic writer of `stuck_sensor` alerts: it reuses the row for a `dedup_key` in any status of the same `alert_type` (`dedup_key` is unique), resolves only alerts of sensors listed healthy (an unavailable or missing sensor keeps its alert), and ignores a row last written from a newer `observed_at`. The live check runs one at a time and answers again from the last result for 30 s. The admin button goes `POST /api/alerts/stuck-sensors/check` -> orchestrator `POST /admin/sensors/stuck-check`, with closed error phrases only.
 
 ---
 

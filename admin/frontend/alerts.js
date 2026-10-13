@@ -31,6 +31,19 @@ function updateAlertsPagePermissions() {
     button.className = enabled
         ? 'px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium transition-colors'
         : 'px-4 py-2 bg-yellow-900/40 text-yellow-200 rounded-lg text-sm font-medium opacity-60 cursor-not-allowed';
+    updateCheckSensorsButton();
+}
+
+function updateCheckSensorsButton() {
+    const button = document.getElementById('alerts-check-sensors-btn');
+    if (!button) return;
+
+    const enabled = canModifyAlerts();
+    button.disabled = !enabled;
+    button.title = enabled ? 'Re-read the motion sensors and update the stuck-sensor alerts' : 'Read-only access: alert actions are disabled for your role.';
+    button.className = enabled
+        ? 'px-4 py-2 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium transition-colors'
+        : 'px-4 py-2 bg-green-900/40 text-green-200 rounded-lg text-sm font-medium opacity-60 cursor-not-allowed';
 }
 
 function toggleAlertsDropdown() {
@@ -424,6 +437,64 @@ async function acknowledgeAllAlerts() {
     } catch (error) {
         console.error('Error acknowledging all alerts:', error);
         alert('Failed to acknowledge alerts');
+    }
+}
+
+function describeSensorCheck(result) {
+    const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+    const stuck = result.stuck || [];
+    let when = 'just now';
+    if (result.cached && result.checked_at) {
+        const seconds = Math.max(0, Math.round((Date.now() - Date.parse(result.checked_at)) / 1000));
+        if (seconds >= 5) when = `${seconds} seconds ago`;
+    }
+    let line = `Checked ${count(result.sensors_checked, 'sensor')} ${when}: `;
+    if (!stuck.length) {
+        line += 'none stuck.';
+    } else {
+        const names = stuck.map(s => s.room).join(', ');
+        line += `${stuck.length} stuck (${names}).`;
+    }
+    if (!result.reconciled) {
+        return `${line} The alerts couldn't be updated.`;
+    }
+    const cleared = result.reconcile ? result.reconcile.resolved : 0;
+    if (cleared) {
+        line += ` Cleared ${count(cleared, 'old alert')}.`;
+    }
+    return line;
+}
+
+async function checkSensorsNow() {
+    if (!canModifyAlerts()) return;
+    const button = document.getElementById('alerts-check-sensors-btn');
+    const output = document.getElementById('alerts-check-sensors-result');
+    if (!button || !output || button.disabled) return;
+
+    button.disabled = true;
+    button.textContent = 'Checking...';
+    output.textContent = '';
+    try {
+        const response = await fetch(`${API_BASE}/api/alerts/stuck-sensors/check`, {
+            method: 'POST',
+            headers: getAuthHeaders()
+        });
+        const body = await response.json().catch(() => ({}));
+        if (response.ok) {
+            output.textContent = describeSensorCheck(body);
+            loadAlertsPage();
+            loadAlertsDropdown();
+        } else {
+            output.textContent = typeof body.detail === 'string'
+                ? body.detail
+                : 'The sensor check failed. Try again.';
+        }
+    } catch (error) {
+        console.error('Error checking sensors:', error && error.name);
+        output.textContent = 'Couldn\'t reach the admin service. Try again.';
+    } finally {
+        button.textContent = 'Check sensors now';
+        updateCheckSensorsButton();
     }
 }
 
