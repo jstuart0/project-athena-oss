@@ -46,6 +46,8 @@ GLOBS = (
     "tests/unit/test_smart_home_intent_prompt.py",
     "tests/unit/test_access_target.py",
     "tests/unit/test_access_intent_policy.py",
+    "tests/unit/test_mode_permission.py",
+    "tests/unit/test_public_refusal_wording.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
@@ -92,6 +94,9 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_exclusion_vocabulary.py",
     "tests/unit/test_access_target.py",
     "tests/unit/test_access_intent_policy.py",
+    "tests/unit/test_mode_permission.py",
+    "tests/unit/test_public_refusal_wording.py",
+    "tests/unit/test_ha_refusal_wiring.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.
@@ -118,6 +123,7 @@ PREEXISTING_SHARED_STATE: Dict[str, str] = {
     "tests/unit/test_reviewed_route_callers_wire.py": "setdefault for ADMIN_API_URL only; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_write_fanout_confirmation.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_state_question_routing.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
+    "tests/unit/test_mode_permission.py": "stubs langgraph and prometheus_client only when absent, the same as test_ha_permission_guard.py in this step; unwired at the base, wired by the guard phase",
     "tests/unit/test_smart_home_controller_permissions.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
 }
 

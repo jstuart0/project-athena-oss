@@ -47,6 +47,7 @@ from orchestrator.mode_permission import (
     intent_write_domains,
     normalize_permissions,
     permission_refusal_message,
+    refusal_message,
     sequence_refusal_message,
 )
 from orchestrator.ha_status_optimizer import (
@@ -386,11 +387,8 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         blk = write_fanout.take_block()
 
         if len(scope.denials) > denials_before:
-            denied_domains = tuple(
-                d.domain for d in scope.denials[denials_before:] if d.reason != "halted_after_denial"
-            )
-            state.answer = permission_refusal_message(
-                denied_domains, scope, partial=scope.allowed_writes > writes_before
+            state.answer = refusal_message(
+                scope.denials[denials_before:], scope, partial=scope.allowed_writes > writes_before
             )
             state.error = "permission_denied"
             return True
@@ -581,12 +579,8 @@ async def _execute_and_record(
             state, None, foreign_pending, text=clarification.text, room_candidates=clarification.candidates,
         )
     elif len(scope.denials) > denials_before:
-        denied_domains = tuple(
-            d.domain for d in scope.denials[denials_before:]
-            if d.reason != "halted_after_denial"
-        )
-        state.answer = permission_refusal_message(
-            denied_domains, scope, partial=scope.allowed_writes > writes_before
+        state.answer = refusal_message(
+            scope.denials[denials_before:], scope, partial=scope.allowed_writes > writes_before
         )
         # ATHENA-128 (3.2(g)): a referent question dispatched through this
         # chain under the read-only scope that was denied for read_only_scope
@@ -1119,12 +1113,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         model="llama3.1:8b"  # Use capable model for automation
                     )
                     if len(scope.denials) > denials_before:
-                        denied_domains = tuple(
-                            d.domain for d in scope.denials[denials_before:]
-                            if d.reason != "halted_after_denial"
-                        )
-                        state.answer = permission_refusal_message(
-                            denied_domains, scope, partial=scope.allowed_writes > writes_before
+                        state.answer = refusal_message(
+                            scope.denials[denials_before:], scope, partial=scope.allowed_writes > writes_before
                         )
                         state.error = "permission_denied"
                     else:
@@ -1190,12 +1180,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                                 background=True
                             )
                             if len(scope.denials) > denials_before:
-                                denied_domains = tuple(
-                                    d.domain for d in scope.denials[denials_before:]
-                                    if d.reason != "halted_after_denial"
-                                )
-                                state.answer = permission_refusal_message(
-                                    denied_domains, scope, partial=scope.allowed_writes > writes_before
+                                state.answer = refusal_message(
+                                    scope.denials[denials_before:], scope,
+                                    partial=scope.allowed_writes > writes_before,
                                 )
                                 state.error = "permission_denied"
                             else:

@@ -28,13 +28,14 @@ wires it into lifespan. See
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import re
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 import structlog
 
@@ -590,31 +591,17 @@ def check_entity_permission(entity_id: str, permissions: Dict[str, Any]) -> bool
     for pattern in restricted_entities:
         try:
             if re.match(pattern, entity_id, re.IGNORECASE):
-                logger.info(
-                    "entity_blocked_by_regex",
-                    entity_id=entity_id,
-                    pattern=pattern,
-                    mode=mode
-                )
+                logger.info("entity_blocked_by_regex", kind="regex", mode=mode)
                 return False
         except re.error:
             # Invalid regex - try simple wildcard match as fallback
             if pattern.endswith("*"):
                 prefix = pattern[:-1]
                 if entity_id.startswith(prefix):
-                    logger.info(
-                        "entity_blocked_by_wildcard",
-                        entity_id=entity_id,
-                        pattern=pattern,
-                        mode=mode
-                    )
+                    logger.info("entity_blocked_by_wildcard", kind="wildcard", mode=mode)
                     return False
             elif pattern == entity_id:
-                logger.info(
-                    "entity_blocked_exact",
-                    entity_id=entity_id,
-                    mode=mode
-                )
+                logger.info("entity_blocked_exact", kind="exact", mode=mode)
                 return False
 
     # Check if entity domain is allowed. An empty allowed_domains has no
@@ -629,25 +616,17 @@ def check_entity_permission(entity_id: str, permissions: Dict[str, Any]) -> bool
     # (select, input_boolean, ...) an owner-during-outage is meant to
     # keep.
     entity_domain = entity_id.split(".")[0] if "." in entity_id else entity_id
+    # Logs carry the domain, never an id: an id with no domain part is a name.
+    logged_domain = entity_domain if "." in entity_id else "none"
     if mode == "guest":
         effective_allowed_domains = allowed_domains or baseline_allowed_domains()
     else:
         effective_allowed_domains = allowed_domains
     if effective_allowed_domains and entity_domain not in effective_allowed_domains:
-        logger.info(
-            "entity_blocked_domain",
-            entity_id=entity_id,
-            domain=entity_domain,
-            allowed_domains=effective_allowed_domains,
-            mode=mode
-        )
+        logger.info("entity_blocked_domain", kind="domain", domain=logged_domain, mode=mode)
         return False
 
-    logger.info(
-        "entity_allowed",
-        entity_id=entity_id,
-        mode=mode
-    )
+    logger.info("entity_allowed", domain=logged_domain, mode=mode)
     return True
 
 
@@ -702,7 +681,15 @@ class HAWritePermissionDenied(Exception):
     exceptions broadly (e.g. _handle_scene_intent's activation try/except)
     must re-raise this one ahead of their catch-all so a denial can't start
     a fallback write chain (D2, wired in Pass B).
+
+    ``reason`` is the denial's reason code (the same value recorded on the
+    scope), so a caller that catches this can pick the matching refusal
+    phrase without reading the scope.
     """
+
+    def __init__(self, message: str = "", *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -742,6 +729,12 @@ class PermissionScope:
     # Server-set: the gateway judged this a trusted voice caller. Only then
     # does an owner's "all the lights" reach every area's lamps.
     trusted_voice: bool = False
+    # D14 rule C: the lowercased ids of the doors this request has already
+    # tried to open (every lock an opening call named, every access cover).
+    # Recorded before the write is awaited, so a failed write still counts,
+    # and shared with a nested scope (ha_permission_scope) and with every
+    # task that copied this scope's context.
+    opened: Set[str] = field(default_factory=set)
 
 
 def degraded_permissions() -> Dict[str, Any]:
@@ -938,6 +931,10 @@ def ha_permission_scope(
     (degraded) scope for a system-initiated write with no request context
     (D3) -- e.g. a background sequence step or the follow-me service.
 
+    A scope opened inside another one is the same request: it shares the
+    outer scope's ``opened`` set, so nesting can never reset the one-door
+    allowance.
+
     A scope must never span an ``await`` that yields control back to a
     different logical request's context without a per-task copy (asyncio
     tasks/gather copy the current context, so this holds for
@@ -946,6 +943,7 @@ def ha_permission_scope(
     raises) -- a drift test asserts no bare `yield` appears inside a `with
     ha_permission_scope(` block anywhere in the tree.
     """
+    outer = _ha_permission_scope_var.get()
     scope = PermissionScope(
         permissions=normalize_permissions(permissions),
         mode=mode,
@@ -954,6 +952,7 @@ def ha_permission_scope(
         read_only=read_only,
         utterance=utterance,
         trusted_voice=trusted_voice,
+        opened=outer.opened if outer is not None else set(),
     )
     token = _ha_permission_scope_var.set(scope)
     try:
@@ -999,10 +998,12 @@ def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> Lis
     """Normalize a call_service payload into a list of pseudo-targets.
 
     See the Design section's "Target normalization (hidden)" for the full
-    contract: entity_id may be read from the top level, ``target``,
-    ``data``, or ``data.target``; "all"/a missing entity/an area-device-
-    floor-label target all become ``f"{domain}.all"``; a bare id without a
-    domain becomes ``f"{domain}.{id}"``.
+    contract: entity_id is read from the top level, ``target``, ``data`` and
+    ``data.target`` and the ids of all four are counted together (a second
+    id hidden in another block can't slip past a one-door rule); "all"/a
+    missing entity/an area-device-floor-label target all become
+    ``f"{domain}.all"``; a bare id without a domain becomes
+    ``f"{domain}.{id}"``.
     """
     data = _as_dict(service_data)
     target_block = _as_dict(data.get("target"))
@@ -1017,19 +1018,18 @@ def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> Lis
     ):
         return [f"{domain}.all"]
 
-    entity_values = (
-        _split_entity_ids(data.get("entity_id"))
-        or _split_entity_ids(target_block.get("entity_id"))
-        or _split_entity_ids(data_block.get("entity_id"))
-        or _split_entity_ids(data_target_block.get("entity_id"))
-    )
+    entity_values: List[str] = []
+    for block in (data, target_block, data_block, data_target_block):
+        for value in _split_entity_ids(block.get("entity_id")):
+            if value not in entity_values:
+                entity_values.append(value)
 
     if not entity_values:
         return [f"{domain}.all"]
 
     targets: List[str] = []
     for raw in entity_values:
-        if raw == "all":
+        if raw.lower() == "all":
             pseudo = f"{domain}.all"
             if pseudo not in targets:
                 targets.append(pseudo)
@@ -1041,11 +1041,147 @@ def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> Lis
     return targets
 
 
+# ---------------------------------------------------------------------------
+# Openings (ATHENA-233, D14): a way in is one concrete door, once per request
+# ---------------------------------------------------------------------------
+#
+# An opening is an unlock, or the opening of a cover that is not clearly a
+# window covering. The controller grounds these in the user's words; this is
+# the backstop that holds when a higher layer is wrong. The sets below repeat
+# access_target's (mode_permission may not import the room modules), and
+# tests/unit/test_ha_permission_guard.py pins them equal.
+
+OPENING_NEEDS_NAMED_TARGET = "opening_needs_named_target"
+UNLOCK_NEEDS_ONE_LOCK = "unlock_needs_one_lock"
+ONE_OPENING_PER_REQUEST = "one_opening_per_request"
+TEMPLATED_SERVICE = "templated_service"
+
+# Services that can let someone in, per domain. HA has no lock.toggle or
+# lock.turn_off; they are listed so an invented one is treated as an opening.
+_OPENING_SERVICES: Dict[str, frozenset] = {
+    "lock": frozenset({"unlock", "open", "turn_off", "toggle"}),
+    "cover": frozenset({"open", "open_cover", "turn_on", "toggle", "set_cover_position"}),
+}
+# homeassistant.* maps onto the target's own domain: turn_off unlocks a lock,
+# turn_on opens a cover, toggle does either.
+_HOMEASSISTANT_OPENING_SERVICES: Dict[str, frozenset] = {
+    "lock": frozenset({"turn_off", "toggle"}),
+    "cover": frozenset({"turn_on", "toggle"}),
+}
+_HOMEASSISTANT_OPENING_CAPABLE = frozenset({"turn_off", "turn_on", "toggle"})
+NON_ACCESS_DEVICE_CLASSES = frozenset({
+    "awning", "blind", "curtain", "damper", "shade", "shutter", "window",
+})
+# Device-form automation steps: ``domain`` + ``type`` -> the service they run.
+_DEVICE_OPENING_SERVICES: Dict[Tuple[str, str], str] = {
+    ("lock", "unlock"): "unlock",
+    ("lock", "open"): "open",
+    ("lock", "toggle"): "toggle",
+    ("cover", "open"): "open_cover",
+    ("cover", "toggle"): "toggle",
+    ("cover", "set_position"): "set_cover_position",
+}
+
+_CONCRETE_DOOR_RE = re.compile(r"(lock|cover)\.[a-z0-9_]+")
+_CONCRETE_ENTITY_RE = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
+
+
+def _normalized_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> List[str]:
+    """``_extract_targets`` output, lowercased, stripped and de-duplicated."""
+    seen: List[str] = []
+    for target in _extract_targets(str(domain).strip().lower(), service_data):
+        norm = target.strip().lower()
+        if norm not in seen:
+            seen.append(norm)
+    return seen
+
+
+def _is_concrete_target(target: str, *, doors_only: bool) -> bool:
+    """One real entity id: not a ``.all`` pseudo-target and, outside the door
+    domains, not a bare id that was only given ``homeassistant.`` as a prefix."""
+    pattern = _CONCRETE_DOOR_RE if doors_only else _CONCRETE_ENTITY_RE
+    if pattern.fullmatch(target) is None:
+        return False
+    domain_part, _, object_part = target.partition(".")
+    return object_part != "all" and (doors_only or domain_part != "homeassistant")
+
+
+def _is_opening_capable(domain: str, service: str) -> bool:
+    if domain == "homeassistant":
+        return service in _HOMEASSISTANT_OPENING_CAPABLE
+    return service in _OPENING_SERVICES.get(domain, ())
+
+
+def _opens(domain: str, service: str, target_domain: str) -> bool:
+    """Whether ``domain.service`` opens an entity of ``target_domain``."""
+    if domain == "homeassistant":
+        return service in _HOMEASSISTANT_OPENING_SERVICES.get(target_domain, ())
+    return service in _OPENING_SERVICES.get(domain, ())
+
+
+def _opening_ids_of(
+    domain: str, service: str, targets: Iterable[str], cover_access: Optional[Mapping[str, bool]]
+) -> List[str]:
+    """The doors an opening call opens: every lock, every cover not known to
+    be a window covering (a cover missing from ``cover_access`` is a way in)."""
+    ids: List[str] = []
+    for target in targets:
+        target_domain = target.split(".", 1)[0]
+        if target_domain not in ("lock", "cover") or not _opens(domain, service, target_domain):
+            continue
+        if target_domain == "cover" and cover_access is not None and not cover_access.get(target, True):
+            continue
+        if target not in ids:
+            ids.append(target)
+    return ids
+
+
+def opening_cover_targets(domain: str, service: str, service_data: Optional[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The concrete cover ids of an opening call, i.e. the ones whose
+    ``device_class`` must be read before the call can be judged."""
+    d, svc = str(domain).strip().lower(), str(service).strip().lower()
+    return tuple(
+        t for t in _normalized_targets(d, service_data)
+        if t.startswith("cover.") and _is_concrete_target(t, doors_only=True) and _opens(d, svc, "cover")
+    )
+
+
+def opening_ids(
+    domain: str,
+    service: str,
+    service_data: Optional[Dict[str, Any]],
+    cover_access: Optional[Mapping[str, bool]] = None,
+) -> Tuple[str, ...]:
+    """The lowercased ids of the doors ``domain.service`` would open (D14 C)."""
+    d, svc = str(domain).strip().lower(), str(service).strip().lower()
+    return tuple(_opening_ids_of(d, svc, _normalized_targets(d, service_data), cover_access))
+
+
+def _opening_denial(
+    domain: str, service: str, targets: List[str], cover_access: Optional[Mapping[str, bool]]
+) -> Optional[str]:
+    """Rules A and B for one call, on the targets as given (before the
+    cross-domain fallback adds any). Returns the denial reason or None."""
+    if not _is_opening_capable(domain, service):
+        return None
+    doors_only = domain != "homeassistant"
+    if not all(_is_concrete_target(t, doors_only=doors_only) for t in targets):
+        return OPENING_NEEDS_NAMED_TARGET
+    ids = _opening_ids_of(domain, service, targets, cover_access)
+    if sum(1 for i in ids if i.startswith("lock.")) > 1:
+        return UNLOCK_NEEDS_ONE_LOCK
+    if any(i.startswith("cover.") for i in ids) and len(targets) != 1:
+        return OPENING_NEEDS_NAMED_TARGET
+    return None
+
+
 def authorize_ha_write(
     domain: str,
     service: str,
     service_data: Optional[Dict[str, Any]],
     permissions: Dict[str, Any],
+    *,
+    cover_access: Optional[Mapping[str, bool]] = None,
 ) -> HAWriteDecision:
     """Authorize one HA write (call_service-shaped) against `permissions`.
 
@@ -1058,9 +1194,17 @@ def authorize_ha_write(
     service's own declared domain, as a pseudo-target) are checked -- a
     generic dispatch service can never reach an entity via a domain that
     wouldn't itself be authorized.
+
+    Openings (D14 A and B), once the entity checks pass: every target of an
+    unlock or door opening must be one concrete ``lock.x``/``cover.x`` id (no
+    ``all``, area, device, floor, label or bare id); at most one lock; and a
+    call that opens an access cover must name exactly one target.
+    ``cover_access`` maps a cover id to whether it is a way in; a cover
+    missing from it is one.
     """
     perms = normalize_permissions(permissions)
     targets = _extract_targets(domain, service_data)
+    named_targets = _normalized_targets(domain, service_data)
 
     extra_targets: List[str] = []
     for target in targets:
@@ -1074,6 +1218,9 @@ def authorize_ha_write(
     denied = [t for t in targets if not check_entity_permission(t, perms)]
     if denied:
         return HAWriteDecision(allowed=False, denied_targets=tuple(denied), reason="entity_or_domain_denied")
+    reason = _opening_denial(str(domain).strip().lower(), str(service).strip().lower(), named_targets, cover_access)
+    if reason:
+        return HAWriteDecision(allowed=False, denied_targets=tuple(named_targets), reason=reason)
     return HAWriteDecision(allowed=True, denied_targets=(), reason="")
 
 
@@ -1125,13 +1272,71 @@ def _walk_automation_steps(steps: Any) -> Iterable[Dict[str, Any]]:
             yield step
 
 
-def _authorize_automation_step(step: Dict[str, Any], perms: Dict[str, Any]) -> HAWriteDecision:
+def _has_template(value: Any) -> bool:
+    """Whether a config value carries a Jinja template anywhere inside it."""
+    if isinstance(value, str):
+        return "{{" in value or "{%" in value or "{#" in value
+    if isinstance(value, dict):
+        return any(_has_template(k) or _has_template(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_has_template(v) for v in value)
+    return False
+
+
+def _step_template_targets(step: Dict[str, Any]) -> bool:
+    return any(_has_template(step.get(key)) for key in ("entity_id", "target", "data"))
+
+
+def _step_service(step: Dict[str, Any]) -> Any:
+    return step.get("service") or step.get("action")
+
+
+def _step_call(step: Dict[str, Any]) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """The ``(domain, service, service_data)`` a leaf step runs, lowercased,
+    for the two forms that can open a door: ``service: domain.name`` and the
+    device form (``domain`` + ``type``). None for anything else."""
+    service = _step_service(step)
+    if isinstance(service, str) and "." in service and not _has_template(service):
+        domain, svc = service.split(".", 1)
+        return domain.strip().lower(), svc.strip().lower(), step
+    device_domain, device_type = step.get("domain"), step.get("type")
+    if service is None and isinstance(device_domain, str) and isinstance(device_type, str):
+        mapped = _DEVICE_OPENING_SERVICES.get((device_domain.strip().lower(), device_type.strip().lower()))
+        if mapped:
+            return device_domain.strip().lower(), mapped, {"entity_id": step.get("entity_id")}
+    return None
+
+
+def _authorize_automation_step(
+    step: Dict[str, Any], perms: Dict[str, Any], cover_access: Optional[Mapping[str, bool]] = None
+) -> HAWriteDecision:
     """Classify and authorize a single leaf automation step (see
-    _walk_automation_steps for what counts as a leaf)."""
+    _walk_automation_steps for what counts as a leaf).
+
+    D14 D: a templated service (or a templated target on an opening service)
+    is denied, as its door can't be known until it runs; the device form
+    (``domain: lock|cover``, ``type: unlock|open``) is an opening and needs
+    one concrete entity, never only a ``device_id``.
+    """
     if set(step.keys()) <= _AUTOMATION_INERT_STEP_KEYS:
         return HAWriteDecision(allowed=True)
 
-    service = step.get("service") or step.get("action")
+    service = _step_service(step)
+    if service and (not isinstance(service, str) or _has_template(service)):
+        return HAWriteDecision(allowed=False, denied_targets=(), reason=TEMPLATED_SERVICE)
+
+    call = _step_call(step)
+    if call is not None:
+        domain, svc, data = call
+        decision = authorize_ha_write(domain, svc, data, perms, cover_access=cover_access)
+        if (
+            not decision.allowed
+            and decision.reason != "entity_or_domain_denied"
+            and _step_template_targets(step)
+        ):
+            return HAWriteDecision(allowed=False, denied_targets=decision.denied_targets, reason=TEMPLATED_SERVICE)
+        return decision
+
     if isinstance(service, str) and "." in service:
         domain, svc = service.split(".", 1)
         return authorize_ha_write(domain, svc, step, perms)
@@ -1148,12 +1353,56 @@ def _authorize_automation_step(step: Dict[str, Any], perms: Dict[str, Any]) -> H
     return HAWriteDecision(allowed=False, denied_targets=(), reason="unknown_automation_step")
 
 
-def authorize_automation_config(automation_id: str, config: Dict[str, Any], permissions: Dict[str, Any]) -> HAWriteDecision:
+def _config_steps(config: Any) -> Iterable[Dict[str, Any]]:
+    cfg = config if isinstance(config, dict) else {}
+    actions = cfg.get("action")
+    if actions is None:
+        actions = cfg.get("actions")
+    return _walk_automation_steps(actions)
+
+
+def automation_opening_cover_targets(config: Dict[str, Any]) -> Tuple[str, ...]:
+    """Every concrete cover id an opening step of ``config`` names: the ids
+    whose ``device_class`` must be read before the config can be judged."""
+    found: List[str] = []
+    for step in _config_steps(config):
+        call = _step_call(step)
+        if call is None:
+            continue
+        for target in opening_cover_targets(*call):
+            if target not in found:
+                found.append(target)
+    return tuple(found)
+
+
+def automation_opening_ids(
+    config: Dict[str, Any], cover_access: Optional[Mapping[str, bool]] = None
+) -> Tuple[str, ...]:
+    """The lowercased ids of every door the steps of ``config`` would open."""
+    found: List[str] = []
+    for step in _config_steps(config):
+        call = _step_call(step)
+        if call is None:
+            continue
+        for door in opening_ids(*call, cover_access=cover_access):
+            if door not in found:
+                found.append(door)
+    return tuple(found)
+
+
+def authorize_automation_config(
+    automation_id: str,
+    config: Dict[str, Any],
+    permissions: Dict[str, Any],
+    *,
+    cover_access: Optional[Mapping[str, bool]] = None,
+) -> HAWriteDecision:
     """Authorize creating/updating an HA automation (create_automation).
 
     Requires `automation.<automation_id>` to pass, then walks every leaf
     step in `config["action"]` (or `config["actions"]`) and authorizes
-    each individually; the first denial denies the whole automation.
+    each individually; the first denial denies the whole automation. Then,
+    across the whole config, at most one door may be opened (D14 D).
     """
     perms = normalize_permissions(permissions)
 
@@ -1163,16 +1412,14 @@ def authorize_automation_config(automation_id: str, config: Dict[str, Any], perm
     if not entity_decision.allowed:
         return entity_decision
 
-    cfg = config if isinstance(config, dict) else {}
-    actions = cfg.get("action")
-    if actions is None:
-        actions = cfg.get("actions")
-
-    for step in _walk_automation_steps(actions):
-        decision = _authorize_automation_step(step, perms)
+    for step in _config_steps(config):
+        decision = _authorize_automation_step(step, perms, cover_access)
         if not decision.allowed:
             return decision
 
+    doors = automation_opening_ids(config, cover_access)
+    if len(doors) > 1:
+        return HAWriteDecision(allowed=False, denied_targets=doors, reason=ONE_OPENING_PER_REQUEST)
     return HAWriteDecision(allowed=True)
 
 
@@ -1412,11 +1659,69 @@ def permission_refusal_message(
     return f"Sorry, I can't control the {noun} in guest mode."
 
 
+# D20: the phrase for a denial reason that is about HOW a door was asked for,
+# not about who may touch it. A refusal from the guard (or sequence
+# pre-authorization, or the agent) stores no pending question, so these state
+# the requirement and never ask "Which one?"; only the controller's own
+# which-door question (room_choice) asks.
+ONE_DOOR_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
+TEMPLATE_REFUSAL = "I can't set that up with a template."
+# The first reason present wins when one turn is denied for several.
+_DOOR_REASON_ORDER = (
+    OPENING_NEEDS_NAMED_TARGET,
+    UNLOCK_NEEDS_ONE_LOCK,
+    ONE_OPENING_PER_REQUEST,
+    TEMPLATED_SERVICE,
+)
+_DOOR_REASON_PHRASES: Dict[str, str] = {
+    OPENING_NEEDS_NAMED_TARGET: ONE_DOOR_REFUSAL,
+    UNLOCK_NEEDS_ONE_LOCK: ONE_DOOR_REFUSAL,
+    ONE_OPENING_PER_REQUEST: ONE_DOOR_REFUSAL,
+    TEMPLATED_SERVICE: TEMPLATE_REFUSAL,
+}
+
+
+def _door_reason_phrase(reasons: Iterable[str], scope: Optional["PermissionScope"]) -> Optional[str]:
+    """The phrase for the first door reason present, or None. A read-only,
+    public, degraded or guest scope never gets one: that refusal outranks
+    these, so a guest hears the guest refusal and not "name the door"."""
+    if scope is None or scope.read_only:
+        return None
+    permissions = scope.permissions or {}
+    if is_public_audience(permissions) or is_stay_read_only(permissions) or permissions.get("mode") != "owner":
+        return None
+    present = set(reasons)
+    for reason in _DOOR_REASON_ORDER:
+        if reason in present:
+            return _DOOR_REASON_PHRASES[reason]
+    return None
+
+
+def refusal_message(denials: Iterable[HADenial], scope: Optional["PermissionScope"], *, partial: bool = False) -> str:
+    """The one refusal wording for the denials a dispatch recorded.
+
+    ``denials`` is the slice of ``scope.denials`` recorded since the dispatch
+    began. A "halted_after_denial" entry only says the scope was closed, so
+    it is never a reason. Precedence (D20): read-only, public, degraded and
+    guest wording first; then the door reasons in ``_DOOR_REASON_ORDER``;
+    anything else is ``permission_refusal_message`` over the denied domains.
+    """
+    live = [d for d in denials if d.reason != "halted_after_denial"]
+    phrase = _door_reason_phrase((d.reason for d in live), scope)
+    if phrase is not None:
+        return phrase
+    return permission_refusal_message(tuple(d.domain for d in live), scope, partial=partial)
+
+
 def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope") -> str:
     """D21: refusal text for a sequence denied at pre-authorization time
     (before scheduling) -- distinct phrasing from permission_refusal_message
     since nothing has been attempted yet ("schedule", not "control").
+    A door reason (D20) uses its fixed phrase unless the scope outranks it.
     """
+    door_phrase = _door_reason_phrase((decision.reason,), scope)
+    if door_phrase is not None:
+        return door_phrase
     domain = None
     if decision.denied_targets:
         first = decision.denied_targets[0]
@@ -1434,21 +1739,28 @@ def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope"
 # PermissionEnforcingHAClient (D1, D20)
 # ---------------------------------------------------------------------------
 
+# D14 C: how a cover is classified before an opening call is judged.
+COVER_CLASS_READ_TIMEOUT_SECONDS = 5.0
+MAX_CLASSIFIED_COVERS = 16
+
+
 def _record_denial(
     scope: PermissionScope, domain: str, service: str, targets: Iterable[str], reason: str
 ) -> None:
     targets = tuple(targets)
     scope.denials.append(HADenial(domain=domain, service=service, targets=targets, reason=reason))
+    # The log carries the reason, the domain and how many targets, never
+    # which ones, and no session id (the denial record on the scope keeps the
+    # targets in memory for the caller).
     logger.warning(
         "ha_write_denied",
         domain=domain,
         service=service,
-        targets=list(targets),
+        target_count=len(targets),
         scope_mode=scope.mode,
         permissions_mode=scope.permissions.get("mode"),
         reason=reason,
         request_id=scope.request_id,
-        session_id=scope.session_id,
     )
     ha_write_denied_total.labels(domain=domain, scope_mode=scope.mode).inc()
 
@@ -1524,7 +1836,44 @@ class PermissionEnforcingHAClient:
     def _deny(self, scope: PermissionScope, domain: str, service: str, targets: Tuple[str, ...], reason: str) -> None:
         scope.halted = True
         _record_denial(scope, domain, service, targets, reason)
-        raise HAWritePermissionDenied(f"{domain}.{service} denied ({reason})")
+        raise HAWritePermissionDenied(f"{domain}.{service} denied ({reason})", reason=reason)
+
+    async def _cover_is_access(self, entity_id: str) -> bool:
+        """Whether a cover is a way in. Fails closed: a failed or malformed
+        read, or a missing device class, means it is."""
+        try:
+            state = await asyncio.wait_for(self._inner.get_state(entity_id), COVER_CLASS_READ_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("cover_class_read_failed", error_class=type(exc).__name__)
+            return True
+        attributes = state.get("attributes") if isinstance(state, Mapping) else None
+        device_class = attributes.get("device_class") if isinstance(attributes, Mapping) else None
+        return not (
+            isinstance(device_class, str) and device_class.strip().lower() in NON_ACCESS_DEVICE_CLASSES
+        )
+
+    async def _classify_covers(self, cover_ids: Iterable[str]) -> Dict[str, bool]:
+        """One read per cover (D14 C step 1), before anything is checked. A
+        cover past the read cap is left out of the map, and so counts as a
+        way in."""
+        ids = tuple(dict.fromkeys(cover_ids))[:MAX_CLASSIFIED_COVERS]
+        if not ids:
+            return {}
+        return dict(zip(ids, await asyncio.gather(*(self._cover_is_access(i) for i in ids))))
+
+    def _record_openings(
+        self, scope: PermissionScope, domain: str, service: str, doors: Tuple[str, ...]
+    ) -> None:
+        """D14 C step 2-3. Called with no ``await`` between it and the check
+        that precedes it, and before the write is awaited: the check, the
+        record and the dispatch are one step as far as other tasks go, so two
+        concurrent opens can't both see an empty set. A failed write keeps
+        its ids recorded."""
+        if not doors:
+            return
+        if len(scope.opened | set(doors)) > 1:
+            self._deny(scope, domain, service, doors, ONE_OPENING_PER_REQUEST)
+        scope.opened.update(doors)
 
     async def call_service(
         self,
@@ -1537,9 +1886,15 @@ class PermissionEnforcingHAClient:
             self._deny(scope, domain, service, tuple(_extract_targets(domain, service_data)), "read_only_scope")
         if scope.halted:
             self._deny(scope, domain, service, (), "halted_after_denial")
-        decision = authorize_ha_write(domain, service, service_data, scope.permissions)
+        covers = opening_cover_targets(domain, service, service_data)
+        cover_access = await self._classify_covers(covers) if covers else {}
+        # No await from here to the inner call (D14 C).
+        if scope.halted:
+            self._deny(scope, domain, service, (), "halted_after_denial")
+        decision = authorize_ha_write(domain, service, service_data, scope.permissions, cover_access=cover_access)
         if not decision.allowed:
             self._deny(scope, domain, service, decision.denied_targets, decision.reason)
+        self._record_openings(scope, domain, service, opening_ids(domain, service, service_data, cover_access))
         scope.allowed_writes += 1
         return await self._inner.call_service(domain, service, service_data)
 
@@ -1549,9 +1904,15 @@ class PermissionEnforcingHAClient:
             self._deny(scope, "automation", "create", (automation_id,), "read_only_scope")
         if scope.halted:
             self._deny(scope, "automation", "create", (), "halted_after_denial")
-        decision = authorize_automation_config(automation_id, config, scope.permissions)
+        covers = automation_opening_cover_targets(config)
+        cover_access = await self._classify_covers(covers) if covers else {}
+        # No await from here to the inner call (D14 C).
+        if scope.halted:
+            self._deny(scope, "automation", "create", (), "halted_after_denial")
+        decision = authorize_automation_config(automation_id, config, scope.permissions, cover_access=cover_access)
         if not decision.allowed:
             self._deny(scope, "automation", "create", decision.denied_targets, decision.reason)
+        self._record_openings(scope, "automation", "create", automation_opening_ids(config, cover_access))
         scope.allowed_writes += 1
         return await self._inner.create_automation(automation_id, config)
 
