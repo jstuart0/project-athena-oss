@@ -70,7 +70,7 @@ def test_every_phrasing_excludes_the_named_room(phrasing):
 def test_apart_from_and_besides_lead_with_the_exclusion_not_a_room():
     for phrasing in ("apart from", "aside from", "besides", "not including", "excepting"):
         toks = f"turn off every light {phrasing} the galley".split()
-        assert rc._exclusion_start(toks) == toks.index(phrasing.split()[0]), phrasing
+        assert rc._scan_exclusions(toks, [])[0] == toks.index(phrasing.split()[0]), phrasing
 
 
 @pytest.mark.parametrize("query", [
@@ -96,25 +96,240 @@ def _controller():
     return shc.SmartHomeController(entity_manager=mock.MagicMock(), llm_router=None)
 
 
+class _Admin:
+    async def get_component_model(self, name):
+        return None
+
+
+class _CountingLlm:
+    """Answers with the whole house minus the galley and counts its calls."""
+
+    def __init__(self, reply=None):
+        self.calls = 0
+        self.reply = reply or json.dumps({
+            "device_type": "light", "room": "whole_house", "excluded_rooms": ["galley"],
+            "action": "turn_off", "target_scope": "group", "parameters": {}, "color_description": None})
+
+    async def generate(self, **kwargs):
+        self.calls += 1
+        return {"response": self.reply}
+
+
+def _extract(query, llm=None, directory=HOUSE):
+    _runtime.set_room_directory(type("P", (), {"current": lambda self: directory})())
+    llm = llm or _CountingLlm()
+    ctl = shc.SmartHomeController(entity_manager=mock.MagicMock(), llm_router=llm)
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        return asyncio.run(ctl.extract_intent(query)), llm
+
+
 @pytest.mark.parametrize("phrasing", PHRASINGS)
-def test_the_fast_path_guards_defer_every_phrasing(phrasing):
-    ctl = _controller()
-    assert ctl._defers_to_exclusion_logic(f"turn off all the lights {phrasing} the galley"), phrasing
-    assert ctl._defers_to_exclusion_logic(f"kill all the lights {phrasing} the galley"), phrasing
+@pytest.mark.parametrize("opening", ["turn off all the lights", "kill all the lights", "flip on all the lights"])
+def test_every_fast_path_family_reads_every_phrasing_as_an_exclusion(opening, phrasing):
+    got, llm = _extract(f"{opening} {phrasing} the galley")
+    assert got.get("room") == "whole_house" and got.get("excluded_rooms") == ["galley"], (opening, phrasing, got)
 
 
 @pytest.mark.parametrize("query", [
     "press the button and turn off all the lights", "the butler said turn off all the lights",
     "what about turning everything off", "turn off all the lights",
 ])
-def test_the_fast_path_guards_do_not_defer_a_word_that_contains_but(query):
-    assert _controller()._defers_to_exclusion_logic(query) is False, query
+def test_the_guard_does_not_defer_a_word_that_contains_but(query):
+    assert _controller()._defers_to_model(query) is False, query
 
 
-def test_a_deferral_word_with_no_excluded_room_defers_to_the_model():
-    ctl = _controller()
-    for word in ("without", "unless", "minus", "skip", "leave", "keep"):
-        assert ctl._defers_to_exclusion_logic(f"turn off all the lights {word} the galley"), word
+# Wordings outside the phrase list: they defer to the model, and the server
+# never answers them by writing the excluded room.
+OTHER_WORDINGS = [
+    "turn off all the lights without the galley", "turn off all the lights unless it is the galley",
+    "turn off all the lights minus the galley", "turn off all the lights and skip the galley",
+    "turn off all the lights, leave the galley on", "turn off all the lights and keep the galley on",
+    "turn off all the lights exclude the galley", "turn off all the lights with the galley excluded",
+    "turn off all the lights with the galley excepted", "turn off all the lights accept the galley",
+    "turn off all the lights save for the galley", "turn off all the lights spare the galley",
+    "turn off all the lights ignoring the galley", "turn off all the lights outside the galley",
+    "turn off all the lights not galley",
+]
+
+
+@pytest.mark.parametrize("query", OTHER_WORDINGS)
+def test_other_wordings_reach_the_model_not_a_fast_path(query):
+    got, llm = _extract(query)
+    assert llm.calls == 1, (query, got)
+
+
+@pytest.mark.parametrize("query", OTHER_WORDINGS)
+def test_other_wordings_never_write_the_excluded_room(monkeypatch, query):
+    rig = Rig(monkeypatch, attic_state="on")
+    llm = _CountingLlm()
+    rig.controller.llm_router = llm
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query))
+    answer = asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert not set(rig.written) & GALLEY_LEAVES, (query, rig.written, answer)
+    assert "light.galley_pair" not in rig.written and "light.galley_all" not in rig.written
+
+
+async def _execute(rig, intent, query, *, speaker=None):
+    from orchestrator import mode_permission as mp
+    from orchestrator.utterance_kind import classify_utterance
+
+    with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(query), trusted_voice=True):
+        return await rig.controller.execute_intent(intent, rig.raw, query, device_room=speaker)
+
+
+def test_flip_the_lights_on_except_the_galley_with_the_speaker_in_the_galley(monkeypatch):
+    query = "flip the lights on except the galley"
+    rig = Rig(monkeypatch, attic_state="on")
+    rig.controller.llm_router = _CountingLlm(json.dumps({
+        "device_type": "light", "room": "whole_house", "excluded_rooms": ["galley"],
+        "action": "turn_on", "target_scope": "group", "parameters": {}}))
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query, device_room="galley"))
+    assert rig.controller.llm_router.calls == 1, "the turn-on fast path must not answer an exclusion"
+    asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert not set(rig.written) & GALLEY_LEAVES, rig.written
+
+
+# ---------------------------------------------------------------------------
+# A phrase used as an opener is not an exclusion
+# ---------------------------------------------------------------------------
+
+OPENERS = [
+    ("aside from that, turn off all the lights in the kitchen", "kitchen"),
+    ("besides the den, turn on the kitchen lights", "kitchen"),
+    ("no, not the bedroom, turn on the kitchen lights", "kitchen"),
+    ("apart from that, turn off the kitchen lights", "kitchen"),
+]
+OPENER_HOUSE = rc.RoomDirectory.build(areas=[
+    Area("area_kitchen", "Kitchen", (), "kitchen"), Area("area_den", "Den", (), "den"),
+    Area("area_bedroom", "Bedroom", (), "bedroom"),
+])
+
+
+@pytest.mark.parametrize("query,room", OPENERS)
+def test_an_opener_is_not_an_exclusion(query, room):
+    assert rc.has_exclusion(query, OPENER_HOUSE) is False, query
+    mention = rc.find_room_mention(query, OPENER_HOUSE)
+    decision = rc.decide_room(mention, query=query, speaker_room="bedroom", directory=OPENER_HOUSE)
+    assert decision == rc.Room(room, room), (query, decision)
+
+
+@pytest.mark.parametrize("query,room", OPENERS)
+def test_an_opener_through_extract_intent_names_the_room_after_it(query, room):
+    got, llm = _extract(query, directory=OPENER_HOUSE)
+    assert got.get("room") == room and not got.get("excluded_rooms"), (query, got)
+
+
+@pytest.mark.parametrize("query", [
+    "aside from that, turn off all the lights in the galley",
+    "besides the study, turn on the galley lights",
+    "no, not the study, turn on the galley lights",
+])
+def test_an_opener_through_execute_intent_writes_the_named_room_and_not_the_rest(monkeypatch, query):
+    rig = Rig(monkeypatch, attic_state="on")
+    llm = _CountingLlm()
+    rig.controller.llm_router = llm
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query))
+    assert intent.get("room") == "galley", (query, intent)
+    asyncio.run(_execute(rig, intent, query, speaker="study"))
+    written = set(rig.written)
+    assert written and written <= GALLEY_LEAVES | {"light.galley_pair", "light.galley_all"}, (query, written)
+    assert "light.study_lamp" not in written and "light.hall_lamp" not in written
+
+
+def test_the_scan_still_starts_an_exclusion_after_a_scope_or_a_room():
+    assert rc.has_exclusion("turn off the lights besides the galley", HOUSE)
+    assert rc.has_exclusion("turn on the study lights but not the galley", HOUSE)
+    assert rc.has_exclusion("everything off except the galley", HOUSE)
+
+
+def test_not_the_kitchen_is_no_answer_to_a_pending_question():
+    from orchestrator import room_choice
+
+    for kind in (room_choice.KIND_ROOM, room_choice.KIND_WHICH):
+        pending = {"kind": kind, "candidates": [["kitchen", "kitchen"], ["den", "den"]], "phrase": "x"}
+        assert room_choice.read_reply(pending, "not the kitchen", OPENER_HOUSE).kind == "none", kind
+        assert room_choice.read_reply(pending, "the kitchen", OPENER_HOUSE).kind == "one", kind
+
+
+# ---------------------------------------------------------------------------
+# One guard, asked before any fast path
+# ---------------------------------------------------------------------------
+
+def test_the_fast_paths_sit_behind_the_one_guard():
+    source = (SRC / "orchestrator" / "smart_home_controller.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SmartHomeController")
+    methods = {n.name: n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    callers = [m for m, node in methods.items()
+               if any(isinstance(c, ast.Attribute) and c.attr == "_fast_path_intent" for c in ast.walk(node))]
+    assert callers == ["extract_intent"], callers
+    calls = [n for n in ast.walk(methods["extract_intent"])
+             if isinstance(n, ast.Attribute) and n.attr == "_fast_path_intent"]
+    assert len(calls) == 1
+    guard = next(n for n in ast.walk(methods["extract_intent"])
+                 if isinstance(n, ast.If) and any(isinstance(c, ast.Attribute) and c.attr == "_defers_to_model"
+                                                  for c in ast.walk(n.test)))
+    assert any(isinstance(c, ast.Attribute) and c.attr == "_fast_path_intent" for b in guard.body for c in ast.walk(b))
+    # Every fast path lives in that one method: extract_intent has no `return {` of its own before the model call.
+    own_returns = [n for n in ast.walk(methods["extract_intent"]) if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+    assert len(own_returns) <= 1, "a fast path answered outside _fast_path_intent, skipping the guard"
+    assert sum(1 for n in ast.walk(methods["_fast_path_intent"]) if isinstance(n, ast.Return)) >= 20
+
+
+def test_a_porch_exclusion_in_either_word_order_never_turns_the_porch_off(monkeypatch):
+    house = rc.RoomDirectory.build(areas=[Area("area_porch", "Porch", (), "porch"), Area("area_den", "Den", (), "den")])
+    for query in ("turn off all the lights, leave the porch on", "turn off all the lights and keep the porch on"):
+        got, llm = _extract(query, llm=_CountingLlm(json.dumps({
+            "device_type": "light", "room": "whole_house", "excluded_rooms": ["porch"],
+            "action": "turn_off", "target_scope": "group", "parameters": {}})), directory=house)
+        assert llm.calls == 1, query
+        assert got["room"] == "whole_house" and got["excluded_rooms"] == ["porch"], (query, got)
+
+
+def test_an_exclusion_with_no_whole_house_wording_never_defaults_to_the_speakers_room(monkeypatch):
+    query = "flip the lights on except the galley"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": None, "action": "turn_on", "target_scope": "group", "parameters": {}}
+    answer = asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert rig.written == [], (rig.written, answer)
+
+
+def test_a_grounded_model_exclusion_turns_off_the_rest_of_the_house(monkeypatch):
+    query = "turn off all the lights, leave the galley on"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": "whole_house", "excluded_rooms": ["galley"],
+              "action": "turn_off", "target_scope": "group", "parameters": {}}
+    asyncio.run(_execute(rig, intent, query, speaker="study"))
+    assert "light.study_lamp" in rig.written and "light.hall_lamp" in rig.written, rig.written
+    assert not set(rig.written) & GALLEY_LEAVES and "light.galley_all" not in rig.written
+
+
+def test_an_exclusion_naming_no_known_room_writes_nothing_through_execute_intent(monkeypatch):
+    query = "turn off all the lights except the sunroom"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": "whole_house", "action": "turn_off", "target_scope": "group",
+              "parameters": {}}
+    answer = asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert rig.written == [], rig.written
+    assert answer, "the speaker is told something"
+
+
+def test_a_wording_the_parser_cannot_read_and_a_model_that_names_no_room_writes_nothing(monkeypatch):
+    query = "turn off all the lights spare the galley"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": "whole_house", "action": "turn_off", "target_scope": "group",
+              "parameters": {}}
+    asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert rig.written == [], rig.written
+
+
+def test_an_unknown_excluded_room_asks_instead_of_writing_the_whole_house():
+    got = rc.decide_room(rc.NO_MENTION, query="turn off all the lights except the sunroom",
+                         speaker_room="study", directory=HOUSE)
+    assert got == rc.AskRoom()
 
 
 def test_apart_from_is_read_as_an_exclusion_not_as_the_room_it_precedes():
@@ -205,6 +420,51 @@ def test_music_excludes_the_room_after_every_phrase(phrasing):
     assert got == ["office"], (phrasing, got)
 
 
+def _music_parse(query, configs):
+    import orchestrator.music_handler as mh
+
+    handler = mh.MusicHandler.__new__(mh.MusicHandler)
+    return asyncio.run(handler._parse_exclusion_pattern(query, configs))
+
+
+MUSIC_ROOMS = {"office": {}, "kitchen": {}, "living_room": {}, "master_bedroom": {"display_name": "Primary Suite"}}
+
+
+def test_music_reads_except_for_and_the_phrases_with_for():
+    assert _music_parse("play jazz everywhere except for the office", MUSIC_ROOMS) == ["office"]
+    assert _music_parse("play jazz in all rooms apart from the kitchen", MUSIC_ROOMS) == ["kitchen"]
+    assert _music_parse("play jazz besides for the office", MUSIC_ROOMS) == ["office"]
+
+
+def test_music_captures_multi_word_rooms():
+    assert _music_parse("play jazz everywhere except the living room", MUSIC_ROOMS) == ["living_room"]
+    assert _music_parse("play jazz except the living room and the office", MUSIC_ROOMS) == ["living_room", "office"]
+    assert _music_parse("play jazz except the primary suite", MUSIC_ROOMS) == ["master_bedroom"]
+    assert _music_parse("play jazz except the office and play it loud", MUSIC_ROOMS) == ["office"]
+
+
+@pytest.mark.parametrize("query", [
+    "play the debut album everywhere", "play a rebut podcast in the office", "play abut the office",
+    "play jazz in the office",
+])
+def test_music_phrases_need_a_left_word_boundary(query):
+    assert _music_parse(query, MUSIC_ROOMS) == [], query
+
+
+def test_music_falls_through_to_the_second_pattern_when_the_first_parses_no_rooms():
+    query = "play rock except the office, everywhere except the sunroom"
+    assert _music_parse(query, MUSIC_ROOMS) == ["office"]
+
+
+def test_music_logs_a_count_not_room_keys():
+    import orchestrator.music_handler as mh
+
+    with mock.patch.object(mh.logger, "info") as info:
+        _music_parse("play jazz everywhere except the office", MUSIC_ROOMS)
+    kwargs = info.call_args.kwargs
+    assert kwargs.get("excluded_count") == 1 and "excluded" not in kwargs
+
+
 # ---------------------------------------------------------------------------
 # Drift: no second list of the exclusion words in the orchestrator
 # ---------------------------------------------------------------------------
@@ -214,14 +474,31 @@ PHRASE_STRINGS = frozenset(" ".join(p) for p in rc.EXCLUSION_PHRASES)
 # The vocabulary's own home is not a second copy of itself.
 DEFINITION_FILE = "src/orchestrator/room_context.py"
 
+SCAN_ROOT = "src"
+
 # (path, enclosing name) -> why it is not an exclusion parser.
 ALLOWLIST = {
-    ("src/orchestrator/validator.py", "_extract_key_entities"): "stopword list of a validator; 'but' there is a function word",
-    ("src/orchestrator/context/detector.py", "<module>"): "correction cue: 'but' marks a follow-up, not a room exclusion",
+    ("src/orchestrator/validator.py", "_extract_key_entities"):
+        "stopword list of a validator; 'but' there is a function word",
+    ("src/orchestrator/context/detector.py", "CONTEXT_REF_PATTERNS"):
+        "correction cue: 'but' marks a follow-up, not a room exclusion",
+    ("src/orchestrator/context/detector.py", "_FOLLOW_UP_LEADING_RE"):
+        "a follow-up opener ('but ...'), not a room exclusion",
+    ("src/orchestrator/complexity_detector.py", "extract_complexity_features"):
+        "counts conjunctions to estimate how complex a request is",
+    ("src/orchestrator/semantic_cache.py", "UNCACHEABLE_PATTERNS"):
+        "a query with 'except' is never answered from the semantic cache; control answers are not cached at all",
+    ("src/orchestrator/smart_home_controller.py", "_LEAVE_ON_RE"):
+        "the 'leave X on but turn off the rest' form: the room is kept, not excluded, and it has its own reading",
+    ("src/orchestrator/smart_home_controller.py", "_fast_path_intent"):
+        "'everything but X' regex kept beside the vocabulary guard, plus the same inverted form",
 }
+
+_RE_CALLS = frozenset({"compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "split"})
 
 
 def _norm(text: str) -> str:
+    text = re.sub(r"\\b", " ", text)
     return " ".join(re.sub(r"\\s[+*]", " ", text).lower().split())
 
 
@@ -233,13 +510,31 @@ def _enclosing(stack):
     for node in reversed(stack):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return node.name
+    for node in reversed(stack):
+        if isinstance(node, ast.Assign) and node.targets and isinstance(node.targets[0], ast.Name):
+            return node.targets[0].id
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            return node.target.id
     return "<module>"
 
 
+def _regex_has_phrase(pattern: str) -> bool:
+    text = _norm(re.sub(r"[()?:^$|\[\]]", " ", pattern))
+    padded = f" {text} "
+    return any(f" {phrase} " in padded for phrase in PHRASE_STRINGS)
+
+
+def _is_re_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and (
+        (isinstance(node.func, ast.Attribute) and node.func.attr in _RE_CALLS)
+        or (isinstance(node.func, ast.Name) and node.func.id in _RE_CALLS)
+    )
+
+
 def scan_source(source: str):
-    """(line, enclosing name, kind): a phrase literal that is a direct operand of
-    ``in``, a member of a list/tuple/set, or part of a regex alternation of two
-    or more phrases."""
+    """(line, enclosing name, kind): a phrase literal that is a member of a
+    list/tuple/set, a direct operand of ``in``, part of a regex alternation of
+    two or more phrases, or a whole word of a pattern passed to ``re``."""
     findings = []
 
     def visit(node, stack):
@@ -249,6 +544,10 @@ def scan_source(source: str):
         elif isinstance(node, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in node.ops):
             if any(_is_phrase(x) for x in [node.left, *node.comparators]):
                 findings.append((node.lineno, _enclosing(stack), "operand"))
+        elif _is_re_call(node):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and _regex_has_phrase(arg.value):
+                    findings.append((node.lineno, _enclosing(stack), "regex-arg"))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "|" in node.value:
             parts = [_norm(re.sub(r"[()?:^$]", "", part)) for part in node.value.split("|")]
             if sum(1 for part in parts if part in PHRASE_STRINGS) >= 2:
@@ -260,15 +559,32 @@ def scan_source(source: str):
     return findings
 
 
-def _tree_findings():
+# Files under src/ that do not parse at the base commit; the scan cannot read
+# them. Compared exactly, so a fixed (or newly broken) file is noticed.
+UNPARSEABLE = {"src/jetson/athena_lite_llm.py"}
+
+
+def _tree_findings(unparseable=None):
     found = {}
-    for path in sorted((ROOT / "src/orchestrator").rglob("*.py")):
+    for path in sorted((ROOT / SCAN_ROOT).rglob("*.py")):
         rel = path.relative_to(ROOT).as_posix()
         if rel == DEFINITION_FILE:
             continue
-        for line, name, kind in scan_source(path.read_text(encoding="utf-8")):
+        try:
+            findings = scan_source(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            if unparseable is not None:
+                unparseable.add(rel)
+            continue
+        for line, name, kind in findings:
             found.setdefault((rel, name), []).append((line, kind))
     return found
+
+
+def test_the_files_the_scan_cannot_parse_are_the_known_ones():
+    seen = set()
+    _tree_findings(seen)
+    assert seen == UNPARSEABLE
 
 
 def test_no_second_exclusion_list_outside_the_allowlist():
@@ -283,7 +599,9 @@ def test_every_allowlist_entry_still_matches_a_finding():
 
 def test_the_scan_floor_sees_real_code_in_at_least_two_files():
     assert len({path for path, _ in _tree_findings()}) >= 2
-    assert len(list((ROOT / "src/orchestrator").rglob("*.py"))) > 20
+    assert len(list((ROOT / SCAN_ROOT / "orchestrator").rglob("*.py"))) > 20
+    scanned = {p.relative_to(ROOT).parts[1] for p in (ROOT / SCAN_ROOT).rglob("*.py")}
+    assert {"orchestrator", "gateway", "shared"} <= scanned, "the scan reaches beyond the orchestrator"
 
 
 def test_the_scanner_reports_a_planted_list():
@@ -295,7 +613,24 @@ def test_the_scanner_reports_a_planted_in_operand():
 
 
 def test_the_scanner_reports_a_planted_regex_alternation():
-    assert scan_source('PATTERN = "(?:except|besides|other\\\\s+than)\\\\s+x"\n') == [(1, "<module>", "alternation")]
+    assert scan_source('PATTERN = "(?:except|besides|other\\\\s+than)\\\\s+x"\n') == [(1, "PATTERN", "alternation")]
+
+
+def test_the_scanner_reports_a_word_boundary_literal():
+    assert scan_source("def f(q):\n    return r'\\bapart from\\b' in q\n") == [(2, "f", "operand")]
+
+
+def test_the_scanner_reports_a_phrase_inside_a_re_call():
+    source = "import re\nPAT = re.compile(r'turn off (?:all|every)\\s+but\\s+x')\ndef f(q):\n    return re.search(r'besides\\s+the', q)\n"
+    assert scan_source(source) == [(2, "PAT", "regex-arg"), (4, "f", "regex-arg")]
+
+
+def test_the_scanner_ignores_a_phrase_inside_a_longer_word_in_a_re_call():
+    assert scan_source("import re\nPAT = re.compile(r'rebut|debut|abutment')\n") == []
+
+
+def test_an_allowlist_entry_names_a_function_or_assignment_not_the_whole_module():
+    assert all(name != "<module>" for _, name in ALLOWLIST)
 
 
 def test_the_scanner_ignores_unrelated_literals():

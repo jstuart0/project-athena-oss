@@ -83,9 +83,13 @@ EXCLUSION_PHRASES: Tuple[Tuple[str, ...], ...] = (
     ("apart", "from"), ("aside", "from"), ("besides",), ("not", "including"), ("not", "the"),
     ("but",),
 )
-# Words that often carry an exclusion without being one of the phrases above;
+# Words that often carry an exclusion without being one of the phrases above
+# ("exclude the galley", "with the galley excepted", "save for", ASR "accept");
 # a fast path that sees one and parsed no excluded room leaves it to the model.
-EXCLUSION_DEFERRAL_WORDS = frozenset({"without", "unless", "minus", "skip", "leave", "keep"})
+EXCLUSION_DEFERRAL_WORDS = frozenset({
+    "without", "unless", "minus", "skip", "leave", "keep",
+    "exclude", "excluded", "excepted", "accept", "save", "spare", "ignoring", "outside",
+})
 _UNIVERSAL_QUANTIFIERS = frozenset({"all", "both", "every", "each"})
 _LIGHT_NOUNS = frozenset({"light", "lights", "lamp", "lamps"})
 _STRIP_DEVICE_NOUNS = frozenset({"light", "lights", "lamp", "lamps", "group", "all"})
@@ -328,35 +332,96 @@ def _singular(token: str) -> Tuple[str, ...]:
     return tuple(forms)
 
 
-def _exclusion_start(toks: Sequence[str]) -> int:
-    for i in range(len(toks)):
-        for keyword in EXCLUSION_PHRASES:
-            if tuple(toks[i:i + len(keyword)]) == keyword:
-                return i
-    return len(toks)
+# What a phrase must follow, in the same utterance, to start an exclusion:
+# something it can take from (a quantifier, a whole-house word, a light noun)
+# or a room. At the front of a sentence ("besides the den, turn on the fan",
+# "no, not the bedroom, turn on the kitchen light") it is an opener, not an
+# exclusion, and the room it introduces is not a target either.
+_SCOPE_WORDS = _UNIVERSAL_QUANTIFIERS | _LIGHT_NOUNS | frozenset({
+    "everything", "everywhere", "house", "whole", "entire", "rooms",
+})
+_OPENER_FILLER = frozenset({"the", "a", "an", "my", "our", "your"})
 
 
-def has_exclusion(query: Optional[str]) -> bool:
-    """True when the utterance contains an exclusion phrase as whole tokens
-    ("button", "butler" and "about" do not contain "but")."""
+def _phrase_at(toks: Sequence[str], i: int) -> int:
+    """Length of the exclusion phrase starting at ``i``, or 0."""
+    for keyword in EXCLUSION_PHRASES:
+        if tuple(toks[i:i + len(keyword)]) == keyword:
+            return len(keyword)
+    return 0
+
+
+def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> Tuple[int, List[Tuple[int, int]]]:
+    """(index where the exclusion clause starts, or ``len(toks)``; the token
+    ranges of rooms an opener introduced)."""
+    introduced: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(toks):
+        length = _phrase_at(toks, i)
+        if not length:
+            i += 1
+            continue
+        if any(t in _SCOPE_WORDS for t in toks[:i]) or any(end <= i for _, end in spans):
+            return i, introduced
+        end = i + length
+        for start, stop in spans:
+            if start >= end and all(t in _OPENER_FILLER for t in toks[end:start]):
+                introduced.append((start, stop))
+        i = end
+    return len(toks), introduced
+
+
+def has_exclusion(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
+    """True when the utterance contains an exclusion: a phrase as whole tokens
+    ("button", "butler" and "about" do not contain "but") that follows a scope
+    or a room. Pass the directory so a room before the phrase counts."""
     toks = tokens(query or "")
-    return _exclusion_start(toks) < len(toks)
+    spans = [(m.start, m.end) for m in _chosen_mentions(toks, directory)]
+    return _scan_exclusions(toks, spans)[0] < len(toks)
+
+
+def has_exclusion_wording(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
+    """True when the utterance may carry an exclusion in any wording: an
+    exclusion phrase, a deferral word ("without", "exclude", "spare"...), or
+    "not <room>". The server cannot always tell which room is left out, so
+    callers treat this as 'do not act on the whole house unasked'."""
+    if has_exclusion(query, directory) or has_exclusion_deferral_word(query):
+        return True
+    toks = tokens(query or "")
+    return any(m.start >= 1 and toks[m.start - 1] == "not" for m in find_room_mentions(query, directory))
 
 
 def has_exclusion_deferral_word(query: Optional[str]) -> bool:
     """True when the utterance contains a word that may carry an exclusion
-    ("without", "unless", "minus", "skip", "leave", "keep")."""
+    ("without", "unless", "minus", "skip", "leave", "keep", "exclude"...)."""
     return any(t in EXCLUSION_DEFERRAL_WORDS for t in tokens(query or ""))
+
+
+def _chosen_mentions(toks: Sequence[str], directory: Optional[RoomDirectory]) -> List[RoomMention]:
+    """The room phrases in ``toks`` before exclusion is decided."""
+    return [
+        RoomMention(phrase=" ".join(toks[i:j]), kind=kind, candidates=candidates, start=i, end=j)
+        for i, j, kind, candidates, _ in _choose_spans(toks, directory)
+    ]
 
 
 def find_room_mentions(query: Optional[str], directory: Optional[RoomDirectory]) -> List[RoomMention]:
     """Every room phrase in the utterance, left to right, non-overlapping.
     The longest phrase wins where two overlap ("master bathroom" beats
-    "bathroom"); at equal length an exact name beats a partial one."""
-    directory = directory if directory is not None else _EMPTY
+    "bathroom"); at equal length an exact name beats a partial one. A room an
+    opener introduces ("besides the den, ...") is left out: it is neither a
+    target nor an exclusion."""
     toks = tokens(query or "")
     if not toks:
         return []
+    chosen = _choose_spans(toks, directory)
+    cutoff, introduced = _scan_exclusions(toks, [(c[0], c[1]) for c in chosen])
+    chosen = [c for c in chosen if (c[0], c[1]) not in introduced]
+    return _mentions_from(toks, chosen, cutoff)
+
+
+def _choose_spans(toks: Sequence[str], directory: Optional[RoomDirectory]) -> List[tuple]:
+    directory = directory if directory is not None else _EMPTY
     found: List[tuple] = []
     for i in range(len(toks)):
         for j in range(min(len(toks), i + directory.max_phrase_len), i, -1):
@@ -397,7 +462,10 @@ def find_room_mentions(query: Optional[str], directory: Optional[RoomDirectory])
                     taken[k] = True
                 chosen.append((i, j, "exact", (ref,), False))
     chosen.sort(key=lambda c: c[0])
-    cutoff = _exclusion_start(toks)
+    return chosen
+
+
+def _mentions_from(toks: Sequence[str], chosen: Sequence[tuple], cutoff: int) -> List[RoomMention]:
     mentions = []
     for i, j, kind, candidates, plural in chosen:
         before = toks[max(0, i - 3):i]
@@ -634,12 +702,28 @@ def decide_room(
     4. The speaker's room, if the directory knows it.
     5. Ask which room.
     """
+    if (
+        allow_whole_house and is_explicit_whole_house(query)
+        and not has_exclusion(query, directory) and has_exclusion_wording(query, directory)
+    ):
+        # "all the lights without the galley", "...spare the galley": the
+        # wording is an exclusion this parser does not read, so the room it
+        # names is not a target and the house is not the answer.
+        return AskRoom()
     whole = explicit_whole_house(query, directory) if allow_whole_house else None
     if whole is not None:
+        if not whole.excluded and has_exclusion_wording(query, directory):
+            # An exclusion that names no room we know: every light would be
+            # written. Ask instead.
+            return AskRoom()
         return whole
     speaker = (directory if directory is not None else _EMPTY).resolves(speaker_room)
     if mention.kind != "none" and not mention.in_exclusion:
         return _decide_mention(mention, speaker)
+    if _excluded_rooms(query or "", directory):
+        # "the lights on except the galley": the speaker's room may be the
+        # one excluded, so it is never the default here.
+        return AskRoom()
     if referent_followup and prev_decision is not None:
         return prev_decision
     if speaker is not None:

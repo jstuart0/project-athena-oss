@@ -324,74 +324,14 @@ class SmartHomeController:
         self.entity_manager = entity_manager
         self.llm_router = llm_router
     
-    async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
-                              prev_query: str = None, prev_response: str = None,
-                              prev_intent_entities: Dict = None,
-                              utterance: Optional[UtteranceClassification] = None) -> Dict:
-        """Use LLM to extract structured intent from natural language query
-
-        Args:
-            query: The user's natural language query
-            light_count: Number of lights to control for color distribution
-            device_room: Room where the voice device is located (used as fallback when no room in query)
-            prev_query: Previous user query (for context in follow-ups)
-            prev_response: Previous assistant response (for context in corrections like "no, just my side")
-            prev_intent_entities: Previous intent entities (device_type, room, action, parameters) for context
-            utterance: ATHENA-128 -- the caller's classify_utterance() result.
-                route_control_node always passes this. When None (no
-                non-route_control caller exists today), classified locally
-                so the 3.3(b)/(c) guarantees still hold standalone.
-        """
+    async def _fast_path_intent(self, query: str, query_lower: str, device_room: Optional[str],
+                                is_turn_on: bool, is_turn_off: bool, has_color: bool) -> Optional[Dict]:
+        """The deterministic answers for the commands the wording settles. None
+        when no fast path applies. The one entry guard is ``_defers_to_model``,
+        asked by ``extract_intent`` before this runs: a fast path never has to
+        check for an exclusion itself."""
         import logging
         logger = logging.getLogger(__name__)
-        from .metrics import state_question_routed_total
-
-        if utterance is None:
-            utterance = classify_utterance(query)
-
-        query_lower = query.lower()
-
-        # Round 17: Typo correction for common misspellings
-        # This enables recognition of "turn of the lihgts" → "turn off the lights"
-        typo_corrections = {
-            # Light misspellings
-            'lihgts': 'lights', 'lighst': 'lights', 'ligths': 'lights', 'litghs': 'lights',
-            'lghts': 'lights', 'lihgt': 'light', 'ligth': 'light', 'ligt': 'light',
-            'lite': 'light', 'lites': 'lights',  # Alternate spellings
-            # On/off misspellings
-            'offf': 'off', 'onn': 'on', 'oon': 'on', 'oof': 'off',
-            # "turn of" → "turn off" (very common typo)
-            'turn of ': 'turn off ', 'turn fo ': 'turn off ',
-            'trun ': 'turn ', 'tunr ': 'turn ', 'tur ': 'turn ',
-            # Switch misspellings
-            'swtich': 'switch', 'swich': 'switch', 'swtch': 'switch',
-            # Thermostat misspellings
-            'theromstat': 'thermostat', 'thermstat': 'thermostat', 'thermastat': 'thermostat',
-            'temprature': 'temperature', 'tempature': 'temperature', 'temperture': 'temperature',
-            # Other common device misspellings
-            'dorr': 'door', 'dor': 'door', 'dooor': 'door',
-            'locl': 'lock', 'lokc': 'lock',
-        }
-        for typo, correction in typo_corrections.items():
-            if typo in query_lower:
-                query_lower = query_lower.replace(typo, correction)
-                logger.info(f"Typo corrected: '{typo}' → '{correction}' in query")
-
-        # FAST PATH: Simple turn on/off commands without color
-        # Skip LLM for basic commands like "turn on the lights" to reduce latency
-        is_turn_on = any(p in query_lower for p in ['turn on', 'switch on', 'lights on'])
-        is_turn_off = any(p in query_lower for p in ['turn off', 'switch off', 'lights off',
-                                                     'kill the lights', 'kill all the lights', 'kill all lights',  # Round 12
-                                                     'cut the lights', 'cut all the lights', 'lights out'])  # Round 12
-
-        # Round 16: "lit" is slang for turn on/bright - "get the kitchen lit", "lemme get it lit"
-        if 'lit' in query_lower and not is_turn_off:
-            is_turn_on = True
-        has_color = any(c in query_lower for c in [
-            'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple', 'pink',
-            'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset', 'sunrise', 'random', 'christmas',
-            'color', 'colors', 'ravens', 'orioles', 'steelers', 'team'
-        ])
 
         # FAST PATH: Lock commands
         lock_command_patterns = [
@@ -667,7 +607,7 @@ class SmartHomeController:
         # SKIP if there's an exclusion pattern (e.g., "except bedroom") - let exclusion logic handle it
         # Check for various exclusion patterns including "everything but" and "all but"
         import re
-        has_exclusion_keywords = self._defers_to_exclusion_logic(query_lower)
+        has_exclusion_keywords = room_context.has_exclusion(query_lower, self._directory())
         # Also check for "everything but X" or "all lights but X" patterns
         if not has_exclusion_keywords:
             has_exclusion_keywords = bool(re.search(r'(everything|all\s+(the\s+)?lights?)\s+but\s+', query_lower))
@@ -935,7 +875,7 @@ class SmartHomeController:
                             'kill all the lights', 'kill all lights', 'kill all',  # Round 12 exclusion support
                             'everything off', 'all off', 'yo everything off']  # Round 14
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
-        has_exclusion_in_query = self._defers_to_exclusion_logic(query_lower)
+        has_exclusion_in_query = room_context.has_exclusion(query_lower, self._directory())
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
             room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             logger.info(f"Fast path 'lights out' or 'kill lights': has_room={bool(room_fields.get('room'))}")
@@ -1012,7 +952,7 @@ class SmartHomeController:
 
             # SPECIAL CASE: "leave X on but turn off the rest" pattern
             # This is an inverted exclusion where the excluded room is mentioned FIRST
-            leave_on_pattern = re.search(r'leave\s+(the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and)\s+turn\s+off', query_lower)
+            leave_on_pattern = self._LEAVE_ON_RE.search(query_lower)
             if leave_on_pattern:
                 excluded = room_context.find_room_mention(leave_on_pattern.group(2).strip(), directory)
                 if excluded.kind != "none":
@@ -1349,6 +1289,83 @@ class SmartHomeController:
                 "parameters": {"temperature": target_temp} if target_temp else {},
                 "color_description": None
             }
+
+        return None
+
+    async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
+                              prev_query: str = None, prev_response: str = None,
+                              prev_intent_entities: Dict = None,
+                              utterance: Optional[UtteranceClassification] = None) -> Dict:
+        """Use LLM to extract structured intent from natural language query
+
+        Args:
+            query: The user's natural language query
+            light_count: Number of lights to control for color distribution
+            device_room: Room where the voice device is located (used as fallback when no room in query)
+            prev_query: Previous user query (for context in follow-ups)
+            prev_response: Previous assistant response (for context in corrections like "no, just my side")
+            prev_intent_entities: Previous intent entities (device_type, room, action, parameters) for context
+            utterance: ATHENA-128 -- the caller's classify_utterance() result.
+                route_control_node always passes this. When None (no
+                non-route_control caller exists today), classified locally
+                so the 3.3(b)/(c) guarantees still hold standalone.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        from .metrics import state_question_routed_total
+
+        if utterance is None:
+            utterance = classify_utterance(query)
+
+        query_lower = query.lower()
+
+        # Round 17: Typo correction for common misspellings
+        # This enables recognition of "turn of the lihgts" → "turn off the lights"
+        typo_corrections = {
+            # Light misspellings
+            'lihgts': 'lights', 'lighst': 'lights', 'ligths': 'lights', 'litghs': 'lights',
+            'lghts': 'lights', 'lihgt': 'light', 'ligth': 'light', 'ligt': 'light',
+            'lite': 'light', 'lites': 'lights',  # Alternate spellings
+            # On/off misspellings
+            'offf': 'off', 'onn': 'on', 'oon': 'on', 'oof': 'off',
+            # "turn of" → "turn off" (very common typo)
+            'turn of ': 'turn off ', 'turn fo ': 'turn off ',
+            'trun ': 'turn ', 'tunr ': 'turn ', 'tur ': 'turn ',
+            # Switch misspellings
+            'swtich': 'switch', 'swich': 'switch', 'swtch': 'switch',
+            # Thermostat misspellings
+            'theromstat': 'thermostat', 'thermstat': 'thermostat', 'thermastat': 'thermostat',
+            'temprature': 'temperature', 'tempature': 'temperature', 'temperture': 'temperature',
+            # Other common device misspellings
+            'dorr': 'door', 'dor': 'door', 'dooor': 'door',
+            'locl': 'lock', 'lokc': 'lock',
+        }
+        for typo, correction in typo_corrections.items():
+            if typo in query_lower:
+                query_lower = query_lower.replace(typo, correction)
+                logger.info(f"Typo corrected: '{typo}' → '{correction}' in query")
+
+        # FAST PATH: Simple turn on/off commands without color
+        # Skip LLM for basic commands like "turn on the lights" to reduce latency
+        is_turn_on = any(p in query_lower for p in ['turn on', 'switch on', 'lights on'])
+        is_turn_off = any(p in query_lower for p in ['turn off', 'switch off', 'lights off',
+                                                     'kill the lights', 'kill all the lights', 'kill all lights',  # Round 12
+                                                     'cut the lights', 'cut all the lights', 'lights out'])  # Round 12
+
+        # Round 16: "lit" is slang for turn on/bright - "get the kitchen lit", "lemme get it lit"
+        if 'lit' in query_lower and not is_turn_off:
+            is_turn_on = True
+        has_color = any(c in query_lower for c in [
+            'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple', 'pink',
+            'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset', 'sunrise', 'random', 'christmas',
+            'color', 'colors', 'ravens', 'orioles', 'steelers', 'team'
+        ])
+
+        if not self._defers_to_model(query_lower):
+            fast_intent = await self._fast_path_intent(
+                query, query_lower, device_room, is_turn_on, is_turn_off, has_color)
+            if fast_intent is not None:
+                return fast_intent
 
         # The model is told nothing about where the speaker is: a room it
         # returns must be one the utterance names (see ground_intent_rooms).
@@ -1793,13 +1810,19 @@ Return ONLY valid JSON."""
     def _explicit_whole_house(self, query: str):
         return room_context.explicit_whole_house(query, self._directory())
 
-    def _defers_to_exclusion_logic(self, query: str) -> bool:
-        """True when a whole-house fast path must leave the utterance to the
-        model: it holds an exclusion phrase, or a word that may carry one
-        ("without", "leave"...) and no excluded room was parsed from it."""
-        if room_context.has_exclusion(query):
-            return True
-        if not room_context.has_exclusion_deferral_word(query):
+    _LEAVE_ON_RE = re.compile(
+        r'leave\s+(the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and)\s+turn\s+off'
+    )
+
+    def _defers_to_model(self, query: str) -> bool:
+        """True when no fast path may answer: the wording holds an exclusion
+        (a phrase after a scope or a room, a word like "without", "exclude" or
+        "spare", or "not <room>") and the room parser took no excluded room
+        out of it. The one guard for every fast path, asked before any runs.
+        The "leave X on but turn off the rest" form has its own reading."""
+        if self._LEAVE_ON_RE.search(query):
+            return False
+        if not room_context.has_exclusion_wording(query, self._directory()):
             return False
         return not self._room_fields(query, whole_house=True, multi=True).get("excluded_rooms")
 
@@ -2415,6 +2438,7 @@ Return ONLY valid JSON."""
                 mention, query=original_query, speaker_room=device_room, directory=directory,
                 allow_whole_house=lights,
             )
+        decision = self._with_grounded_exclusions(decision, intent, original_query, directory, lights)
         scope = current_ha_scope()
 
         if isinstance(decision, room_context.Room):
@@ -2458,6 +2482,19 @@ Return ONLY valid JSON."""
             intent['room'] = None
             return None
         return room_choice.ask(intent, decision, record=record and original_query is not None, read=read)
+
+    def _with_grounded_exclusions(self, decision, intent: Dict, query: Optional[str], directory, lights: bool):
+        """An exclusion the parser cannot read ("leave the porch on") makes
+        ``decide_room`` ask. When the model's whole-house intent names the
+        excluded rooms, and each is a room the utterance itself names
+        (``_ground_intent_rooms``), those rooms are left out instead. Only
+        ever narrows the write."""
+        excluded = intent.get('excluded_rooms')
+        if not (lights and isinstance(decision, room_context.AskRoom) and intent.get('room') == 'whole_house'
+                and isinstance(excluded, list) and excluded and room_context.is_explicit_whole_house(query)):
+            return decision
+        refs = tuple(room_context.RoomRef(room_key(r), self._spoken_room(r)) for r in excluded if isinstance(r, str) and r)
+        return room_context.WholeHouse(refs) if refs else decision
 
     async def _resolve_ambiguous_room(
         self, room: str, prefixes: Sequence[str], intent: Optional[Dict] = None, original_query: Optional[str] = None,

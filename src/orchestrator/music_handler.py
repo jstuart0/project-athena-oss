@@ -899,36 +899,40 @@ class MusicHandler:
         """
         excluded = []
 
-        # Patterns for exclusion
+        # Patterns for exclusion. The phrase starts at a word boundary
+        # ("rebut", "debut" hold "but"), may be followed by "for", and the room
+        # list runs to the end or to a following "play".
+        tail = r'(?:\s+(?:and\s+)?(?:play|please)\b.*|\s*)$'
         patterns = [
-            rf'(?:everywhere|all rooms?)\s+(?:{_EXCLUSION_ALTERNATION})\s+(?:the\s+)?(.+?)(?:\s+play|\s+$|$)',
-            rf'(?:{_EXCLUSION_ALTERNATION})\s+(?:the\s+)?(.+?)(?:\s+play|\s|$)',
+            rf'(?<!\S)(?:everywhere|all rooms?)\s+(?:{_EXCLUSION_ALTERNATION})\s+(?:for\s+)?(?:the\s+)?(.+?){tail}',
+            rf'(?<!\S)(?:{_EXCLUSION_ALTERNATION})\s+(?:for\s+)?(?:the\s+)?(.+?){tail}',
         ]
 
         for pattern in patterns:
             match = re.search(pattern, query)
-            if match:
-                excluded_text = match.group(1).strip()
-                # Parse room list (could be comma or "and" separated)
-                room_parts = re.split(r',\s*|\s+and\s+', excluded_text)
-                for part in room_parts:
-                    part = part.strip().lower().replace("the ", "")
-                    # Try to match to a known room
-                    normalized = part.replace(" ", "_")
-                    if normalized in room_configs:
-                        excluded.append(normalized)
-                    elif normalized + "_room" in room_configs:
-                        excluded.append(normalized + "_room")
-                    else:
-                        # Check display names
-                        for room_key, config in room_configs.items():
-                            display = config.get("display_name", "").lower()
-                            if part == display or part == room_key.replace("_", " "):
-                                excluded.append(room_key)
-                                break
+            if not match:
+                continue
+            excluded_text = match.group(1).strip()
+            # Parse room list (could be comma or "and" separated)
+            room_parts = re.split(r',\s*|\s+and\s+', excluded_text)
+            for part in room_parts:
+                part = re.sub(r'^the\s+', '', part.strip().lower())
+                # Try to match to a known room
+                normalized = part.replace(" ", "_")
+                if normalized in room_configs:
+                    excluded.append(normalized)
+                elif normalized + "_room" in room_configs:
+                    excluded.append(normalized + "_room")
+                else:
+                    # Check display names
+                    for config_key, config in room_configs.items():
+                        display = config.get("display_name", "").lower()
+                        if part == display or part == config_key.replace("_", " "):
+                            excluded.append(config_key)
+                            break
 
-                if excluded:
-                    logger.info("exclusion_pattern_matched", excluded=excluded, query_len=len(query))
+            if excluded:
+                logger.info("exclusion_pattern_matched", excluded_count=len(excluded), query_len=len(query))
                 break
 
         return excluded
