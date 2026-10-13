@@ -67,6 +67,10 @@ _OPENING_ACTIONS = {
     "cover": frozenset({"open", "open_cover", "turn_on", "toggle", "set_cover_position"}),
 }
 
+# Words that make an unclassified cover plain by its NAME. Shutter and window
+# are plain only by device class (a workshop shutter can be a door).
+_NAME_PLAIN_WORDS = frozenset({"blind", "blinds", "shade", "shades", "curtain", "curtains", "awning", "awnings"})
+
 _QUANTIFIERS = frozenset({"all", "every", "each", "both"})
 _UNIVERSAL_ANYWHERE = frozenset({"everything", "everywhere"})
 _PLURAL_DETERMINERS = frozenset({"the", "my", "our", "your", "these", "those"})
@@ -165,7 +169,7 @@ def is_access_cover(entity_id: str, attributes: Optional[Mapping]) -> bool:
         name = entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
     spoken = tokens(name)
     return not (
-        any(t in NON_ACCESS_COVER_WORDS for t in spoken)
+        any(t in _NAME_PLAIN_WORDS for t in spoken)
         and not any(t in _NOUNS["cover"] for t in spoken)
     )
 

@@ -1702,7 +1702,6 @@ class TestTheWordsDecideTheVerb:
         rig = DoorRig(monkeypatch, HOUSE_COVERS)
         run_with_speaker(rig, cover_intent("open", room="garage"), "close the garage", None)
         run_with_speaker(rig, cover_intent("open", room="garage"), "don't open the garage", None)
-        run_with_speaker(rig, cover_intent("open"), "close the blinds", None)
         assert rig.calls == []
 
     def test_a_server_caller_with_no_words_is_untouched(self, monkeypatch):
@@ -1822,3 +1821,143 @@ class TestContinuationRound2:
         door.chat.llm.reply = {"action": "unlock", "room": None, "parameters": {}}  # no device_type: no merge
         door.say("and it", context_ref_info=REF)
         assert door.openings == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 3
+# ---------------------------------------------------------------------------
+
+class TestLockAfterTheVerbIsTheNoun:
+    NAMED = {"lock.front": lock_state("Front Door Lock"), "lock.back": lock_state("Back Door Lock")}
+
+    @pytest.mark.parametrize("query", ["unlock the front door lock", "open the front deadbolt lock", "unlock the Front Door Lock",
+                                       "release the front door lock"])
+    def test_the_noun_after_the_verb_does_not_cancel_it(self, monkeypatch, query):
+        rig = DoorRig(monkeypatch, self.NAMED)
+        rig.run_scoped(lock_intent("unlock"), query)
+        assert rig.openings == [("lock", "unlock", "lock.front")], query
+
+    def test_unlock_the_lock_in_a_one_lock_house(self, monkeypatch):
+        rig = DoorRig(monkeypatch, ONE_LOCK)
+        rig.run_scoped(lock_intent("unlock"), "unlock the lock")
+        assert rig.openings == [("lock", "unlock", "lock.main")]
+
+    def test_the_hint_for_a_lock_named_lock_round_trips(self, monkeypatch):
+        rig = DoorRig(monkeypatch, self.NAMED)
+        answer, _ = rig.run_scoped(lock_intent("unlock"), "unlock the front")
+        assert rig.calls == []
+        phrase = answer.split("'")[1]
+        assert phrase == "unlock the Front Door Lock"
+        rig.run_scoped(lock_intent("unlock"), phrase)
+        assert rig.openings == [("lock", "unlock", "lock.front")]
+
+    def test_lock_the_front_door_lock_locks_and_never_unlocks(self, monkeypatch):
+        rig = DoorRig(monkeypatch, self.NAMED)
+        rig.run_scoped(lock_intent("lock"), "lock the front door lock")
+        assert rig.calls == [("lock", "lock", "lock.front")]
+        rig.run_scoped(lock_intent("unlock"), "lock the front door lock")
+        assert rig.openings == []
+
+    @pytest.mark.parametrize("query", ["lock the door, it's unlocked", "lock the front door lock, it's unlocked"])
+    def test_a_state_word_still_counts(self, monkeypatch, query):
+        rig = DoorRig(monkeypatch, self.NAMED)
+        rig.run_scoped(lock_intent("unlock"), query)
+        assert rig.openings == []
+
+    def test_the_agent_reads_it_the_same_way(self):
+        agent, ha = TestAgentGrounding().agent()
+        asyncio.run(agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+                                           {"query": "unlock the front door lock"}))
+        assert ha.call_service.await_count == 1
+        agent, ha = TestAgentGrounding().agent()
+        result = asyncio.run(agent._exec_ha_service({"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+                                                    {"query": "lock the front door lock"}))
+        assert ha.call_service.await_count == 0 and result == shc.VERB_UNCLEAR_TEXT
+
+    def test_the_noun_rule_in_the_verb_reader(self):
+        verb = shc._door_verb
+        up, down, nouns = ("unlock", "open"), ("lock", "locked"), ("lock", "locks")
+        assert verb("unlock the front door lock", up, down, nouns) == "first"
+        assert verb("open the deadbolt lock", up, down, nouns) == "first"
+        assert verb("lock the front door lock", up, down, nouns) == "second"
+        assert verb("lock it", up, down, nouns) == "second", "a lock before any opening verb is the verb"
+        assert verb("lock the door lock", up, down, nouns) == "second"
+        assert verb("unlock the door that is locked", up, down, nouns) is None, "locked is a state, not the noun"
+        assert verb("unlock it. lock the door", up, down, nouns) is None, "the noun rule stops at the clause"
+
+    def test_opening_verb_ok_treats_locked_as_a_state(self):
+        assert shc.opening_verb_ok("unlock the front door lock", "lock") is True
+        assert shc.opening_verb_ok("unlock the door that is locked", "lock") is False
+        assert shc.opening_verb_ok("unlock the front door", "lock") is True
+
+    def test_more_negators(self, monkeypatch):
+        rig = DoorRig(monkeypatch, THREE_LOCKS)
+        for query in ("cancel the front door unlock", "forget unlocking the front door", "skip unlock of the front door",
+                      "abort the front door unlock", "instead unlock the front door"):
+            rig.run_scoped(lock_intent("unlock", room="front_door"), query)
+        assert rig.openings == []
+        assert shc.opening_verb_ok("cancel the front door unlock", "lock") is False
+
+
+class TestBlindsSkipTheVerbCheck:
+    @pytest.mark.parametrize("query", ["pull up the blinds", "blinds up", "let some light in"])
+    def test_a_model_open_for_blinds_wording_works_as_before(self, monkeypatch, query):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("open"), query, "living_room")
+        assert rig.calls == [("cover", "open_cover", "cover.living_blinds")], query
+
+    def test_a_door_still_needs_the_verb(self, monkeypatch):
+        rig = DoorRig(monkeypatch, HOUSE_COVERS)
+        run_with_speaker(rig, cover_intent("open", room="garage"), "the garage door", None)
+        assert rig.calls == []
+
+
+class TestSequencesNeedTheVerb:
+    def test_lock_then_dim_with_a_model_unlock_does_not_unlock(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, {**THREE_LOCKS, "light.den": {"state": "on", "attributes": {"friendly_name": "Den"}}})
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("turn_off", {"device_type": "light", "entity_id": "light.den"})]
+        text = rig.run_plan(steps, "lock the front door, then dim the lights in 5 minutes")
+        assert text == shc.VERB_UNCLEAR_TEXT and rig.openings == []
+
+    def test_a_negated_unlock_does_not_unlock(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, {**THREE_LOCKS, "light.den": {"state": "on", "attributes": {"friendly_name": "Den"}}})
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("turn_off", {"device_type": "light", "entity_id": "light.den"})]
+        rig.run_plan(steps, "don't unlock the front door, dim the lights")
+        assert rig.openings == []
+
+    def test_unlock_then_a_light_unlocks(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, {**THREE_LOCKS, "light.porch": {"state": "off", "attributes": {"friendly_name": "Porch"}}})
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("turn_on", {"device_type": "light", "entity_id": "light.porch"})]
+        assert rig.run_plan(steps, "unlock the front door, then turn on the porch light") is None
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
+    def test_every_clause_that_holds_the_doors_words_must_open_it(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.plan(steps, "unlock the front door, then lock the front door") == shc.VERB_UNCLEAR_TEXT
+
+    def test_a_single_clause_with_one_door_still_needs_the_verb(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.plan(steps, "the front door") == shc.VERB_UNCLEAR_TEXT
+
+    def test_a_cover_opening_step_needs_the_verb(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, HOUSE_COVERS)
+        steps = [step("open", {"device_type": "cover", "room": "garage"})]
+        assert rig.plan(steps, "close the garage door") == shc.VERB_UNCLEAR_TEXT
+        steps = [step("open", {"device_type": "cover", "room": "garage"})]
+        assert rig.plan(steps, "open the garage door") is None
+
+
+class TestNamePlainRule:
+    def test_shutter_and_window_are_plain_only_by_class(self):
+        from orchestrator import access_target as at
+        assert at.is_access_cover("cover.x", {"friendly_name": "Workshop Shutter"})
+        assert at.is_access_cover("cover.x", {"friendly_name": "Bay Window"})
+        assert not at.is_access_cover("cover.x", {"friendly_name": "Workshop Shutter", "device_class": "shutter"})
+        assert not at.is_access_cover("cover.x", {"friendly_name": "Bay Window", "device_class": "window"})
+        for name in ("Living Room Blinds", "Den Blind", "Bedroom Shade", "Hall Curtains", "Patio Awning"):
+            assert not at.is_access_cover("cover.x", {"friendly_name": name}), name

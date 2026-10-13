@@ -277,7 +277,10 @@ SCENE_PHRASES = {
 # ("have you opened the garage?"); "do close the garage" is a command.
 _QUESTION_OPENERS = frozenset({"is", "are", "was", "were", "did", "does", "whats", "what"})
 _SOFT_QUESTION_OPENERS = frozenset({"do", "have", "check"})
-_NEGATORS = frozenset({"don", "dont", "not", "never", "no", "doesn", "didn", "won", "wont", "cant", "without", "stop"})
+_NEGATORS = frozenset({
+    "don", "dont", "not", "never", "no", "doesn", "didn", "won", "wont", "cant", "without", "stop",
+    "cancel", "forget", "skip", "abort", "instead",
+})
 _CLAUSE_SPLIT = re.compile(r"[,;.!?]|\b(?:and|then|also|plus)\b")
 OPENING_VERBS = {
     "lock": (("unlock", "unlocks", "unlocking", "unbolt", "release", "open", "opens", "undo"),
@@ -288,21 +291,29 @@ OPENING_VERBS = {
 VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
 
 
-def _door_verb(query_lower: str, first: Sequence[str], second: Sequence[str]) -> Optional[str]:
+def _door_verb(
+    query_lower: str, first: Sequence[str], second: Sequence[str], noun_after: Sequence[str] = (),
+) -> Optional[str]:
     """Which of two opposite verbs a command says, by whole words: 'first' or
     'second'. None when it says both ("lock the front door, it's unlocked"),
     neither, or a negator comes before a verb in its own clause ("don't
     unlock the door"). A negation in another clause ("unlock the front door,
     not the back door") or after the verb ("lock the door, no need to
-    confirm") changes nothing."""
+    confirm") changes nothing. A word of ``noun_after`` that follows a
+    ``first`` verb in its clause is a noun ("unlock the front door lock"), not
+    the opposite verb."""
     up = down = False
     for clause in _CLAUSE_SPLIT.split(query_lower or ""):
         spoken = list(_words(clause))
         negated = False
+        seen_first = False
         for i, word in enumerate(spoken):
             if word in _NEGATORS or (word == "can" and spoken[i + 1:i + 2] == ["t"]):
                 negated = True
+            elif word in noun_after and seen_first:
+                continue
             elif word in first or word in second:
+                seen_first = seen_first or word in first
                 if negated:
                     return None
                 up = up or word in first
@@ -320,7 +331,8 @@ def opening_verb_ok(query: Optional[str], domain: str) -> bool:
     verbs = OPENING_VERBS.get(domain)
     if verbs is None or not isinstance(query, str):
         return False
-    return _door_verb(query.lower(), *verbs) == "first"
+    nouns = ("lock", "locks") if domain == "lock" else ()
+    return _door_verb(query.lower(), *verbs, noun_after=nouns) == "first"
 
 
 def scene_grounded(entity_id: str, query: Optional[str], friendly_name: Optional[str] = None) -> bool:
@@ -2523,6 +2535,10 @@ Return ONLY valid JSON."""
                 return f"I couldn't find any {'locks' if domain == 'lock' else 'garage doors'} in the home automation system."
             if opening and (step.get('at_time') or any(self._step_waits(s) for s in steps[:index])):
                 return SCHEDULED_OPENING_REFUSAL
+            if opening and not self._opening_clause_ok(
+                query, target.get('room') or target.get('entity_id'), domain,
+            ):
+                return VERB_UNCLEAR_TEXT
             permitted, _denied = self._split_permitted(list(pool))
             if not permitted:
                 # The permission pre-authorization that follows refuses it.
@@ -2547,6 +2563,21 @@ Return ONLY valid JSON."""
                     intent=None, original_query=None,
                 )
         return None
+
+    @staticmethod
+    def _opening_clause_ok(query: str, model_target, domain: str) -> bool:
+        """Whether the words say to open the door a step is aimed at: the
+        clause that holds the step's door words (the whole utterance when
+        there is one clause or no such words) has an opening verb and no
+        negation before it. A model's action alone never opens."""
+        clauses = [c for c in _CLAUSE_SPLIT.split((query or "").lower()) if c.strip()]
+        if len(clauses) > 1:
+            wanted = frozenset(access_target._target_tokens(model_target, domain))
+            if wanted:
+                holding = [c for c in clauses if wanted <= frozenset(_words(c))]
+                if holding:
+                    return all(opening_verb_ok(c, domain) for c in holding)
+        return opening_verb_ok(query, domain)
 
     @staticmethod
     def _clause_names_door(query: str, model_target, domain: str, labels: Dict[str, str]) -> bool:
@@ -5159,12 +5190,12 @@ Do NOT mention rooms that have no current or recent motion."""
             from . import write_fanout
             opened_door = None
             if action == "open":
-                if original_query is not None and not opening_verb_ok(original_query, 'cover'):
-                    return VERB_UNCLEAR_TEXT
                 plain_ids = [e for e in matched if e not in access_ids]
                 if kind == "plain" and not plain_ids:
                     return "I couldn't find a garage door or cover for that."
                 if carried or (kind != "plain" and not plain_ids) or (original_query is not None and kind == "access"):
+                    if original_query is not None and not opening_verb_ok(original_query, 'cover'):
+                        return VERB_UNCLEAR_TEXT  # a way in needs the words to open it; blinds don't
                     narrow = [e for e in matched if e in access_ids] if len(matched) != len(covers) else []
                     picked = await self._pick_access_cover(covers, access_ids, room, original_query, intent, narrow)
                     if isinstance(picked, str):
