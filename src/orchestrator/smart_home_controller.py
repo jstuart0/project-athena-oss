@@ -202,7 +202,7 @@ _NO_SPEAKER_ROOM = ("unknown", "guest")
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
 ACCESS_CARRY_SECONDS = 60
-_ACCESS_SOURCES = ("replay", "open", "status")
+_ACCESS_SOURCES = ("replay", "open", "status", "plan")
 # The noun a "which door?" question uses ("Which door: front or back?").
 ACCESS_ASK_PHRASE = "door"
 UNKNOWN_SCENE_TEXT = "Unknown scene or routine."
@@ -273,25 +273,54 @@ SCENE_PHRASES = {
 }
 
 
-_QUESTION_OPENERS = frozenset({"is", "are", "was", "were", "did", "does", "do", "has", "have", "whats", "what", "check"})
-_NEGATORS = frozenset({"don", "dont", "not", "never", "no", "doesn", "didn", "won", "wont", "cant", "can", "without", "stop"})
+# "do", "have" and "check" open a question only when it ends in one
+# ("have you opened the garage?"); "do close the garage" is a command.
+_QUESTION_OPENERS = frozenset({"is", "are", "was", "were", "did", "does", "whats", "what"})
+_SOFT_QUESTION_OPENERS = frozenset({"do", "have", "check"})
+_NEGATORS = frozenset({"don", "dont", "not", "never", "no", "doesn", "didn", "won", "wont", "cant", "without", "stop"})
+_CLAUSE_SPLIT = re.compile(r"[,;.!?]|\b(?:and|then|also|plus)\b")
+OPENING_VERBS = {
+    "lock": (("unlock", "unlocks", "unlocking", "unbolt", "release", "open", "opens", "undo"),
+             ("lock", "locks", "locking", "locked", "secure", "bolt", "close", "shut")),
+    "cover": (("open", "opens", "opening", "opened", "raise", "lift"),
+              ("close", "closes", "closing", "closed", "shut", "lower")),
+}
+VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
 
 
 def _door_verb(query_lower: str, first: Sequence[str], second: Sequence[str]) -> Optional[str]:
     """Which of two opposite verbs a command says, by whole words: 'first' or
-    'second'. None when it says both ("lock the
-    front door, it's unlocked"), neither, or negates ("don't unlock").
-    ('can' alone is no negation: "can you unlock" asks politely, so it only
-    counts with 't'.)"""
-    spoken = list(_words(query_lower))
-    up = any(w in first for w in spoken)
-    down = any(w in second for w in spoken)
-    negated = any(w in _NEGATORS - {"can"} for w in spoken) or any(
-        a == "can" and b == "t" for a, b in zip(spoken, spoken[1:])
-    )
-    if negated or up == down:
+    'second'. None when it says both ("lock the front door, it's unlocked"),
+    neither, or a negator comes before a verb in its own clause ("don't
+    unlock the door"). A negation in another clause ("unlock the front door,
+    not the back door") or after the verb ("lock the door, no need to
+    confirm") changes nothing."""
+    up = down = False
+    for clause in _CLAUSE_SPLIT.split(query_lower or ""):
+        spoken = list(_words(clause))
+        negated = False
+        for i, word in enumerate(spoken):
+            if word in _NEGATORS or (word == "can" and spoken[i + 1:i + 2] == ["t"]):
+                negated = True
+            elif word in first or word in second:
+                if negated:
+                    return None
+                up = up or word in first
+                down = down or word in second
+    if up == down:
         return None
     return "first" if up else "second"
+
+
+def opening_verb_ok(query: Optional[str], domain: str) -> bool:
+    """Whether the utterance says to open this kind of door (unlock, open,
+    release for a lock; open, raise for a cover) and not the opposite, and
+    does not negate it. A model's action is only a guess: with no such verb
+    in the words nothing opens."""
+    verbs = OPENING_VERBS.get(domain)
+    if verbs is None or not isinstance(query, str):
+        return False
+    return _door_verb(query.lower(), *verbs) == "first"
 
 
 def scene_grounded(entity_id: str, query: Optional[str], friendly_name: Optional[str] = None) -> bool:
@@ -638,7 +667,7 @@ class SmartHomeController:
         is_status = any(p in query_lower for p in ['is the garage', 'garage status', 'is the door'])
         if is_garage_command:
             words = _words(query_lower)
-            if (words and words[0] in _QUESTION_OPENERS) or 'status' in words or is_status:
+            if (words and (words[0] in _QUESTION_OPENERS or (words[0] in _SOFT_QUESTION_OPENERS and query_lower.rstrip().endswith('?')))) or 'status' in words or is_status:
                 action = 'get_status'  # "is the garage open" asks; it doesn't open
             else:
                 verb = _door_verb(query_lower, ('open', 'opening', 'opened', 'opens', 'raise'),
@@ -2550,7 +2579,7 @@ Return ONLY valid JSON."""
             return
         target.pop('entity_id', None)
         target['decided_access'] = entity_id
-        target['decided_access_src'] = 'open'
+        target['decided_access_src'] = 'plan'
         target['decided_access_at'] = _wall_clock()
 
     async def decide_sequence_rooms(
@@ -4698,17 +4727,6 @@ Do NOT mention rooms that have no current or recent motion."""
         return entity_id.split('.', 1)[-1].replace('_', ' ')
 
     @staticmethod
-    def _status_refusal(domain: str) -> str:
-        """The answer to a door status question when the request may use none
-        of the doors: the refusal for its mode, never a door's name."""
-        import dataclasses
-        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
-        scope = current_ha_scope()
-        if scope is not None and scope.read_only:
-            scope = dataclasses.replace(scope, read_only=False)
-        return permission_refusal_message((domain,), scope)
-
-    @staticmethod
     def _split_permitted(entity_ids: Sequence[str]) -> Tuple[List[str], List[str]]:
         """(ids the request's permissions allow, ids they deny). Without an
         open scope every id counts as allowed: the guard decides at write."""
@@ -4752,7 +4770,8 @@ Do NOT mention rooms that have no current or recent motion."""
         src = intent.get('decided_access_src')
         if src not in _ACCESS_SOURCES:
             return None
-        if opening:
+        if opening and src != 'plan':
+            # A planned sequence carry lasts for that run; the rest, 60 s.
             at = intent.get('decided_access_at')
             if isinstance(at, bool) or not isinstance(at, (int, float)):
                 return None
@@ -4861,11 +4880,9 @@ Do NOT mention rooms that have no current or recent motion."""
                 return "I couldn't find any locks in the home automation system."
 
             if action == "get_status":
-                # A status answer never names a lock the request may not use.
-                readable, _ = self._split_permitted(list(locks))
-                if not readable:
-                    return self._status_refusal("lock")
-                labels = {e: self._spoken_entity(e, locks[e]) for e in readable}
+                # A status read is not a write: it reports every lock, as it
+                # always did (the opening path below uses the permitted set).
+                labels = {e: self._spoken_entity(e, s) for e, s in locks.items()}
                 outcome = self._resolve_door('lock', original_query, room, intent, labels, opening=False)
                 target_ids = self._door_targets(outcome, labels)
                 if target_ids is None:
@@ -4885,6 +4902,8 @@ Do NOT mention rooms that have no current or recent motion."""
                 return permission_refusal_message(("lock",), scope)
             labels = {e: self._spoken_entity(e, locks[e]) for e in permitted}
             opening = action == "unlock"
+            if opening and original_query is not None and not opening_verb_ok(original_query, 'lock'):
+                return VERB_UNCLEAR_TEXT
             outcome = self._resolve_door('lock', original_query, room, intent, labels, opening=opening)
             logger.info("lock_command_resolved", extra={"outcome": type(outcome).__name__, "doors": len(labels)})
 
@@ -5085,12 +5104,12 @@ Do NOT mention rooms that have no current or recent motion."""
         nothing was found or the request may use none. Never a blind."""
         from orchestrator.mode_permission import current_ha_scope, permission_refusal_message, record_precheck_denial
         permitted, denied = self._split_permitted(sorted(access_ids))
-        if not permitted:
-            if action == "close":
-                record_precheck_denial(current_ha_scope(), "cover", "close_cover", denied)
-                return permission_refusal_message(("cover",), current_ha_scope())
-            return self._status_refusal("cover")
-        labels = {e: self._spoken_entity(e, covers[e]) for e in permitted}
+        if action == "close" and not permitted:
+            record_precheck_denial(current_ha_scope(), "cover", "close_cover", denied)
+            return permission_refusal_message(("cover",), current_ha_scope())
+        # A status read is not a write: it reads every access cover.
+        readable = sorted(access_ids) if action == "get_status" else permitted
+        labels = {e: self._spoken_entity(e, covers[e]) for e in readable}
         outcome = self._resolve_door('cover', original_query, room, intent, labels, opening=False)
         if isinstance(outcome, access_target.NotFound):
             return self._door_prompt(outcome, domain='cover', action=action, room=room,
@@ -5129,7 +5148,7 @@ Do NOT mention rooms that have no current or recent motion."""
             ]
             matched = self._match_covers(covers, room, original_query)
             kind = access_target.cover_intent_kind(original_query)
-            permitted_access = self._split_permitted(access_ids)[0]
+            permitted_access = access_ids if action == "get_status" else self._split_permitted(access_ids)[0]
             carried = None
             if kind != "plain":
                 carried = self._honoured_carry(intent, 'cover', permitted_access, opening=action == "open")
@@ -5140,6 +5159,8 @@ Do NOT mention rooms that have no current or recent motion."""
             from . import write_fanout
             opened_door = None
             if action == "open":
+                if original_query is not None and not opening_verb_ok(original_query, 'cover'):
+                    return VERB_UNCLEAR_TEXT
                 plain_ids = [e for e in matched if e not in access_ids]
                 if kind == "plain" and not plain_ids:
                     return "I couldn't find a garage door or cover for that."
@@ -5166,11 +5187,6 @@ Do NOT mention rooms that have no current or recent motion."""
                 if not target_ids:
                     return "I couldn't find a garage door or cover for that."
                 if action == "get_status":
-                    # A status answer never names a door the request may not use.
-                    readable = [e for e in target_ids if e not in access_ids or e in permitted_access]
-                    if not readable:
-                        return self._status_refusal("cover")
-                    target_ids = readable
                     statuses = []
                     for entity_id in target_ids:
                         state = covers[entity_id].get('state', 'unknown')

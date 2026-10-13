@@ -149,12 +149,25 @@ class Choice:
 # ---------------------------------------------------------------------------
 
 def is_access_cover(entity_id: str, attributes: Optional[Mapping]) -> bool:
-    """Whether a cover is a way in. Fails closed: only a device class naming
-    something that is not a door makes it a plain cover."""
-    device_class = attributes.get("device_class") if isinstance(attributes, Mapping) else None
+    """Whether a cover is a way in. Fails closed: a device class naming
+    something that is not a door makes it a plain cover, and so does an
+    unclassified cover whose name says blinds, shades and the like and no
+    door, gate, opener or garage ("Living Room Blinds"). Anything else,
+    "Bay 1" included, is a way in."""
+    attrs = attributes if isinstance(attributes, Mapping) else {}
+    device_class = attrs.get("device_class")
     if isinstance(device_class, str) and device_class.strip().lower() in NON_ACCESS_DEVICE_CLASSES:
         return False
-    return True
+    if isinstance(device_class, str) and device_class.strip():
+        return True
+    name = attrs.get("friendly_name")
+    if not isinstance(name, str) or not name.strip():
+        name = entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    spoken = tokens(name)
+    return not (
+        any(t in NON_ACCESS_COVER_WORDS for t in spoken)
+        and not any(t in _NOUNS["cover"] for t in spoken)
+    )
 
 
 def entity_domain(entity_id: Any) -> Optional[str]:
@@ -258,6 +271,23 @@ def _is_universal(toks: Sequence[str], domain: str) -> bool:
     return False
 
 
+_NEGATING = frozenset({"not", "never", "without"})
+
+
+def _without_negated(query: Optional[str]) -> Optional[str]:
+    """The utterance less what a negation rules out: in each clause, the
+    words from "not" on ("unlock the front door, not the back door" names the
+    front door only)."""
+    if not query:
+        return query
+    kept = []
+    for clause in re.split(r"[,;.]", query):
+        words = list(tokens(clause))
+        cut = next((i for i, w in enumerate(words) if w in _NEGATING), len(words))
+        kept.extend(words[:cut])
+    return " ".join(kept)
+
+
 def _is_bare_referent(toks: Sequence[str], label: str, domain: str) -> bool:
     """Whether the words say nothing but "it" for the carried door: no name
     word (blinds included) or access noun that isn't part of its own name,
@@ -330,6 +360,7 @@ def resolve(
     """
     if domain not in DOMAINS:
         return Unnamed(())
+    query = _without_negated(query)
     refs = tuple(Ref(eid, label) for eid, label in entities.items())
     dist = {r.entity_id: _distinguishing(r.label, domain) for r in refs}
     toks = list(tokens(query)) if query else []
@@ -337,7 +368,10 @@ def resolve(
     named_by = TOKENS_AND_NOUN if noun_present(query, domain) else TOKENS
 
     if isinstance(carried, str) and carried in entities:
-        if carried_trusted or _is_bare_referent(toks, entities[carried], domain):
+        if carried_trusted or (
+            _is_bare_referent(toks, entities[carried], domain)
+            and all(r.entity_id == carried for r in _query_matches(refs, dist, qset))
+        ):
             return Named((Ref(carried, entities[carried]),), CARRIED)
     if not toks:
         return Unnamed(refs)

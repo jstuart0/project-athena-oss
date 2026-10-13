@@ -1278,8 +1278,11 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     # stripped here, and only what _carry_decision puts back
                     # (same caller, same audience) goes on.
                     room_context.strip_server_keys(intent)
-                    if intent.get('device_type') in ('lock', 'cover') and not new_intent.get('action'):
-                        # A door command never inherits an earlier unlock or open.
+                    if intent.get('device_type') in ('lock', 'cover') and not (
+                        new_intent.get('device_type') and new_intent.get('action')
+                    ):
+                        # The merge didn't run: a door command never keeps an
+                        # earlier unlock or open.
                         intent['action'] = 'get_status'
                     follow_up = {"fingerprint": state.caller_fingerprint, "audience": _audience_class(state)}
 

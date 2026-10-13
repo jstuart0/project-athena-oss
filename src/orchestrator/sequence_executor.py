@@ -22,6 +22,7 @@ from shared.local_time import local_now, local_tz
 
 logger = logging.getLogger(__name__)
 
+_READ_ACTIONS = frozenset({"get_status", "status", "check", "read"})
 ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 
 # ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
@@ -334,6 +335,10 @@ class SequenceExecutor:
 
         if await self._opening_unplanned(target, action):
             return ONE_DOOR_STEP_REFUSAL
+
+        if entity_id and action in _READ_ACTIONS:
+            # A read is not a service: there is nothing to call.
+            return "I can't read a status in the middle of a sequence."
 
         if entity_id:
             # Direct entity control: gated on its own target like every

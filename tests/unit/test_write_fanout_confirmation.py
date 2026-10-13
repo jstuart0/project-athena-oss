@@ -827,11 +827,22 @@ class TestPendingStored:
         assert _written(h.client) == []
 
     def test_seven_locks_from_non_imperative_prompts(self):
+        # No verb in the words: a model's "unlock" is only a guess, so nothing
+        # is written and no pending is stored.
         h = _Harness(
             llm_text='{"device_type": "lock", "room": null, "action": "unlock", "target_scope": "group", "parameters": {}}',
             n_lights=0, n_locks=7,
         )
         out = h.run(_state54("doors please", room=None))
+        assert _written(h.client) == []
+        assert "unlock 7" not in out.answer and "not sure" in out.answer
+
+    def test_seven_locks_asked_to_unlock_ask_which_door(self):
+        h = _Harness(
+            llm_text='{"device_type": "lock", "room": null, "action": "unlock", "target_scope": "group", "parameters": {}}',
+            n_lights=0, n_locks=7,
+        )
+        out = h.run(_state54("unlock the doors please", room=None))
         assert _written(h.client) == []
         # An unlock never fans out: seven locks and no name ask which door.
         assert out.answer.endswith("?"), out.answer
