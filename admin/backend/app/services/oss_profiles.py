@@ -190,9 +190,10 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
     mlx_small = os.getenv("ATHENA_MLX_SMALL_MODEL", "qwen3-4b-mlx")
     mlx_large = os.getenv("ATHENA_MLX_LARGE_MODEL", "qwen3-8b-mlx")
     # Output length is not a profile concern: callers pass max_tokens (see
-    # helpers.answer_max_tokens) and a model row's num_predict would override it
-    # for every caller of that model. Rows here set the context window
-    # (num_ctx, num_batch) and never num_predict or mirostat*; their timeouts
+    # helpers.answer_max_tokens) and a model row's num_predict or max_tokens
+    # would cap every caller of that model, so reconcile must never write one.
+    # Rows here set the context window (num_ctx, num_batch) and never
+    # num_predict, max_tokens or mirostat*; their timeouts
     # stay at 90 s or more so a first apply never shortens one.
     profiles = {
         "ollama_qwen_small": {
@@ -213,7 +214,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 "_default": {
                     "backend_type": "ollama",
                     "temperature": 0.4,
-                    "max_tokens": 256,
                     "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192, "num_batch": 256},
@@ -221,7 +221,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 ollama_default: {
                     "backend_type": "ollama",
                     "temperature": 0.4,
-                    "max_tokens": 256,
                     "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192, "num_batch": 256},
@@ -229,7 +228,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 "qwen3:8b": {
                     "backend_type": "ollama",
                     "temperature": 0.4,
-                    "max_tokens": 384,
                     "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192, "num_batch": 256},
@@ -258,7 +256,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 mlx_small: {
                     "backend_type": "mlx",
                     "temperature": 0.3,
-                    "max_tokens": 192,
                     "timeout_seconds": 40,
                     "keep_alive_seconds": -1,
                     "mlx_options": {"chat_template_kwargs": {"enable_thinking": False}},
@@ -266,7 +263,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 mlx_large: {
                     "backend_type": "mlx",
                     "temperature": 0.3,
-                    "max_tokens": 256,
                     "timeout_seconds": 45,
                     "keep_alive_seconds": -1,
                     "mlx_options": {"chat_template_kwargs": {"enable_thinking": False}},
@@ -274,7 +270,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 ollama_default: {
                     "backend_type": "ollama",
                     "temperature": 0.4,
-                    "max_tokens": 256,
                     "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192, "num_batch": 256},
@@ -305,7 +300,6 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                 "_default": {
                     "backend_type": "ollama",
                     "temperature": 0.5,
-                    "max_tokens": 256,
                     "timeout_seconds": 90,
                     "keep_alive_seconds": -1,
                     "ollama_options": {"num_ctx": 8192},

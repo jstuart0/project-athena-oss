@@ -90,6 +90,7 @@ def test_shipped_rows_set_the_context_only_never_output_caps_or_short_timeouts(m
     seen = 0
     for name, profile in oss_profiles.profile_registry().items():
         for model, spec in profile["model_configurations"].items():
+            assert "max_tokens" not in spec, (name, model)
             if spec.get("backend_type") != "ollama":
                 continue
             seen += 1
@@ -207,6 +208,20 @@ def test_reconcile_on_a_managed_row_replaces_its_options(db, monkeypatch):
     db.commit()
     oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
     assert options_of(db, DEFAULT_MODEL) == NEW_ROW_OPTIONS
+
+
+def test_reconcile_on_a_managed_row_leaves_max_tokens_untouched(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    row = default_row(db)
+    row.max_tokens = 1234
+    row.ollama_options = {"num_ctx": 2048}
+    db.commit()
+    oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
+    row = default_row(db)
+    assert row.ollama_options == NEW_ROW_OPTIONS and row.max_tokens == 1234
+    owned = [path for path in oss_profiles.get_ownership_map(db) if path.endswith(".max_tokens") and path.startswith("ModelConfiguration:")]
+    assert owned == []
 
 
 def test_reconcile_leaves_a_detached_field_untouched(db, monkeypatch):
