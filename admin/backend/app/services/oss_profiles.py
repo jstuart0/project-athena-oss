@@ -193,8 +193,9 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
     # helpers.answer_max_tokens) and a model row's num_predict or max_tokens
     # would cap every caller of that model, so reconcile must never write one.
     # Rows here set the context window (num_ctx, num_batch) and never
-    # num_predict, max_tokens or mirostat*; their timeouts
-    # stay at 90 s or more so a first apply never shortens one.
+    # num_predict, max_tokens or mirostat*; the Ollama
+    # rows' timeouts stay at 90 s or more so a first apply never shortens one
+    # (the MLX rows keep their own 40 and 45 s).
     profiles = {
         "ollama_qwen_small": {
             "name": "ollama_qwen_small",
@@ -562,6 +563,21 @@ def mark_detached(ownership: Dict[str, Dict[str, Any]], path: str, active_profil
     }
 
 
+SKIP_RESET = object()
+
+
+def column_reset_value(target: Any, field_name: str) -> Any:
+    """What a managed field with no profile value goes back to: its column's
+    default (never None for a column that has one), None for a column without
+    one, and SKIP_RESET when the default is computed (the field is left alone)."""
+    columns = getattr(getattr(target, "__table__", None), "columns", None)
+    column = columns.get(field_name) if columns is not None else None
+    default = getattr(column, "default", None)
+    if default is None:
+        return None
+    return default.arg if default.is_scalar else SKIP_RESET
+
+
 def reset_profile_field(
     db: Session,
     record_type: str,
@@ -701,8 +717,11 @@ def reset_profile_record(
         if field_name in desired_values:
             continue
         if hasattr(target, field_name):
+            reset_to = column_reset_value(target, field_name)
+            if reset_to is SKIP_RESET:
+                continue
             previous_state.setdefault(field_name, getattr(target, field_name, None))
-            setattr(target, field_name, None)
+            setattr(target, field_name, reset_to)
             ownership[path] = {
                 "profile": active_profile,
                 "managed": True,
@@ -1336,17 +1355,41 @@ def inherited_model_config_fields(default_row: Optional[ModelConfiguration], con
     return {"timeout_seconds": config_spec["timeout_seconds"]} if "timeout_seconds" in config_spec else {}
 
 
+def new_row_ollama_options(default_row: Optional[ModelConfiguration], config_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Options for a model row the profile creates: what the model runs on today.
+
+    A model with no row resolves to `_default`, whose options carry no num_ctx
+    unless an operator set one, so Ollama runs it at the server default. The new
+    row keeps `_default`'s options and never lowers that context: num_ctx is the
+    largest of the profile's, the stated server default and `_default`'s. With
+    the server default unknown (a fresh install) the profile's value stands.
+    """
+    options = dict((default_row.ollama_options or {}) if default_row is not None else {})
+    profile_options = config_spec.get("ollama_options") or {}
+    for key, value in profile_options.items():
+        options.setdefault(key, value)
+    candidates = [
+        profile_options.get("num_ctx"),
+        get_config().llm_server_default_context,
+        (default_row.ollama_options or {}).get("num_ctx") if default_row is not None else None,
+    ]
+    sizes = [value for value in candidates if isinstance(value, int) and not isinstance(value, bool) and value > 0]
+    if sizes:
+        options["num_ctx"] = max(sizes)
+    return options
+
+
 def apply_profile(
     db: Session,
     profile_name: str,
     mode: str,
     current_user: Optional[User] = None,
     *,
-    keep_active_profile: bool = False,
+    startup_seed: bool = False,
 ) -> Dict[str, Any]:
-    """Apply a shipped profile. `keep_active_profile` (the startup seed) writes
-    the active-profile setting only when none is set; an explicit apply always
-    makes the applied profile active."""
+    """Apply a shipped profile. The startup seed (`startup_seed`) writes the
+    active-profile setting only when none is set and leaves a pending runtime
+    reload alone; an explicit apply always makes the applied profile active."""
     profiles = profile_registry()
     if profile_name not in profiles:
         raise ValueError(f"Unknown profile '{profile_name}'")
@@ -1359,6 +1402,7 @@ def apply_profile(
     profile = profiles[profile_name]
     ownership = get_ownership_map(db)
     touched: List[str] = []
+    created_options: Dict[str, Dict[str, Any]] = {}
 
     gateway = ensure_gateway_config(db)
     primary_model = next((decision.selected_model for decision in plan.component_assignments.values() if decision.component_name == "intent_classifier"), profile.get("preferred_models", [None])[0])
@@ -1419,20 +1463,25 @@ def apply_profile(
         if config_spec:
             config = model_config_map.get(decision.selected_model)
             if not config:
+                default_row = model_config_map.get("_default")
+                created_options[decision.selected_model] = new_row_ollama_options(default_row, config_spec)
                 config = ModelConfiguration(
                     model_name=decision.selected_model,
-                    **inherited_model_config_fields(model_config_map.get("_default"), config_spec),
+                    ollama_options={},
+                    **inherited_model_config_fields(default_row, config_spec),
                 )
                 db.add(config)
                 db.flush()
                 # Several components select the same model: reuse the row just
                 # created (model_name is unique) instead of inserting it again.
                 model_config_map[decision.selected_model] = config
+            if decision.selected_model in created_options and "ollama_options" in config_spec:
+                config_spec = {**config_spec, "ollama_options": created_options[decision.selected_model]}
             for field_name, desired in config_spec.items():
                 apply_owned_field(config, field_name, desired, mode, ownership, "ModelConfiguration", decision.selected_model, profile_name, touched)
 
     set_ownership_map(db, ownership)
-    if not (keep_active_profile and previous_active_profile):
+    if not (startup_seed and previous_active_profile):
         set_setting_text(db, ACTIVE_PROFILE_KEY, profile_name, "Currently active OSS initialization profile.")
     last_run = {
         "last_action": "apply_profile",
@@ -1449,7 +1498,9 @@ def apply_profile(
     record_profile_run(db, last_run)
 
     reload_plan = compute_reload_plan(touched)
-    if reload_plan["required_action"] == "restart_required":
+    if startup_seed and runtime_sync_state(db).get("state") == "pending_reload":
+        pass  # an operator-pending restart stays pending
+    elif reload_plan["required_action"] == "restart_required":
         set_runtime_sync_state(db, {
             "state": "pending_reload",
             "required_action": reload_plan["required_action"],

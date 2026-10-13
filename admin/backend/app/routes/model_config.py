@@ -8,7 +8,7 @@ while llm_backends handles routing decisions (which backend to use).
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import structlog
 
 from app.database import get_db
@@ -123,6 +123,29 @@ class ModelConfigResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    # A row whose column is NULL (a profile reset used to cause that) must not
+    # fail validation: the router would then drop every row's options. The
+    # values are the column defaults.
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _temperature_default(cls, value):
+        return 0.7 if value is None else value
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _max_tokens_default(cls, value):
+        return 2048 if value is None else value
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _timeout_default(cls, value):
+        return 60 if value is None else value
+
+    @field_validator("keep_alive_seconds", mode="before")
+    @classmethod
+    def _keep_alive_default(cls, value):
+        return -1 if value is None else value
 
 
 # Preset configurations for quick setup

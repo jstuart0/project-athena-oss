@@ -19,12 +19,22 @@ import app.database as database
 from app.database import Base
 from app.models import ModelConfiguration
 from app.services import oss_profiles
+from app.routes.model_config import ModelConfigResponse
+from shared.config import _clear_cache_for_tests
 from shared.llm_context import ContextMarks, ContextSettings, plan_context
 
 DEFAULT_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 PROFILE = "ollama_qwen_small"
 SH_INTENT_PROMPT_BYTES = 12919  # the captured sh_intent prompt
 MIGRATION_050_ROWS = {"qwen3:4b": {"num_ctx": 4096}, "llama3.2:3b": {"num_ctx": 4096}, "phi3:mini": {"num_ctx": 4096}, "_default": {}}
+
+
+@pytest.fixture(autouse=True)
+def fresh_config(monkeypatch):
+    monkeypatch.delenv("LLM_SERVER_DEFAULT_CONTEXT", raising=False)
+    _clear_cache_for_tests()
+    yield
+    _clear_cache_for_tests()
 
 
 @pytest.fixture
@@ -297,3 +307,155 @@ def test_components_sharing_a_model_with_no_backend_row_create_one_backend(db, m
     selected = [d for d in (assignments.values() if isinstance(assignments, dict) else assignments) if d["selected_model"] == DEFAULT_MODEL]
     assert len(selected) >= 2
     assert db.query(oss_profiles.LLMBackend).filter(oss_profiles.LLMBackend.model_name == DEFAULT_MODEL).count() == 1
+
+
+def set_server_default(monkeypatch, value):
+    monkeypatch.setenv("LLM_SERVER_DEFAULT_CONTEXT", str(value))
+    _clear_cache_for_tests()
+
+
+def set_default_row_options(db, options):
+    row = db.query(ModelConfiguration).filter(ModelConfiguration.model_name == "_default").one()
+    row.ollama_options = options
+    db.commit()
+
+
+def test_a_known_server_default_is_never_lowered_by_a_new_row(db, monkeypatch):
+    set_server_default(monkeypatch, 65536)
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL) == {"num_ctx": 65536, "num_batch": 256}
+
+
+def test_an_unknown_server_default_uses_the_profile_value(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL)["num_ctx"] == 8192
+
+
+def test_a_small_server_default_does_not_lower_the_profile_value(db, monkeypatch):
+    set_server_default(monkeypatch, 4096)
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL)["num_ctx"] == 8192
+
+
+def test_a_new_row_keeps_the_default_rows_options_and_its_larger_context(db, monkeypatch):
+    seed_migration_050(db)
+    set_default_row_options(db, {"num_ctx": 16384, "top_k": 20})
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL) == {"num_ctx": 16384, "top_k": 20, "num_batch": 256}
+
+
+def test_a_larger_profile_value_beats_a_smaller_default_row_context(db, monkeypatch):
+    seed_migration_050(db)
+    set_default_row_options(db, {"num_ctx": 4096, "top_k": 20})
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL)["num_ctx"] == 8192
+    assert options_of(db, DEFAULT_MODEL)["top_k"] == 20
+
+
+def test_an_existing_row_is_never_touched_by_the_context_rule(db, monkeypatch):
+    set_server_default(monkeypatch, 65536)
+    seed_migration_050(db)
+    db.add(ModelConfiguration(model_name=DEFAULT_MODEL, backend_type="ollama", ollama_options={"num_ctx": 2048}))
+    db.commit()
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert options_of(db, DEFAULT_MODEL) == {"num_ctx": 2048}
+    oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
+    assert options_of(db, DEFAULT_MODEL) == {"num_ctx": 2048}
+
+
+def test_the_new_rows_options_are_profile_owned_and_reconcile_keeps_the_larger_size(db, monkeypatch):
+    set_server_default(monkeypatch, 65536)
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    path = oss_profiles.ownership_key("ModelConfiguration", DEFAULT_MODEL, "ollama_options")
+    assert oss_profiles.get_ownership_map(db)[path]["managed"] is True
+    oss_profiles.apply_profile(db, PROFILE, "reconcile_profile")
+    # reconcile writes the shipped value back (an explicit operator action)
+    assert options_of(db, DEFAULT_MODEL)["num_ctx"] == 8192
+
+
+def test_reset_never_nulls_a_column_that_has_a_default(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    ownership = oss_profiles.get_ownership_map(db)
+    for field in ("max_tokens", "timeout_seconds", "temperature", "keep_alive_seconds", "description"):
+        ownership[oss_profiles.ownership_key("ModelConfiguration", DEFAULT_MODEL, field)] = {
+            "profile": PROFILE, "managed": True, "detached": False, "updated_at": "x",
+        }
+    oss_profiles.set_ownership_map(db, ownership)
+    db.commit()
+    row = default_row(db)
+    row.max_tokens = 1234
+    db.commit()
+    oss_profiles.reset_profile_record(db, "ModelConfiguration", DEFAULT_MODEL)
+    row = default_row(db)
+    assert row.max_tokens == 2048  # the column default, not None; timeout is the profile's own 90
+    assert row.timeout_seconds == 90 and row.keep_alive_seconds == -1
+    assert float(row.temperature) == 0.4  # the profile's own value, written by the reset
+    assert row.description is None  # a column without a default may still go back to None
+    assert row.ollama_options == NEW_ROW_OPTIONS
+
+
+def test_the_public_model_config_response_survives_null_columns(db, monkeypatch):
+    seed_migration_050(db)
+    startup(monkeypatch, DEFAULT_MODEL)
+    row = default_row(db)
+    row.max_tokens = None
+    row.timeout_seconds = None
+    row.temperature = None
+    row.keep_alive_seconds = None
+    response = ModelConfigResponse(**row.to_dict())  # what the public route returns
+    assert (response.max_tokens, response.timeout_seconds, response.temperature, response.keep_alive_seconds) == (2048, 60, 0.7, -1)
+    assert response.ollama_options == NEW_ROW_OPTIONS
+
+
+def test_startup_leaves_a_pending_reload_pending(db, monkeypatch):
+    seed_migration_050(db)
+    pending = {
+        "state": "pending_reload",
+        "required_action": "restart_required",
+        "affected_services": ["gateway"],
+        "last_failure": None,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    oss_profiles.set_runtime_sync_state(db, dict(pending))
+    db.commit()
+    startup(monkeypatch, DEFAULT_MODEL)
+    assert oss_profiles.runtime_sync_state(db) == pending
+
+
+def test_an_explicit_apply_still_records_its_own_sync_state(db, monkeypatch):
+    seed_migration_050(db)
+    oss_profiles.set_runtime_sync_state(db, {"state": "pending_reload", "required_action": "restart_required", "affected_services": ["gateway"], "last_failure": None, "updated_at": "x"})
+    db.commit()
+    startup(monkeypatch, DEFAULT_MODEL)
+    oss_profiles.apply_profile(db, PROFILE, "fill_missing_only")
+    assert oss_profiles.runtime_sync_state(db)["updated_at"] != "x"
+
+
+class _Recorder:
+    def __init__(self):
+        self.entries = []
+
+    def __getattr__(self, level):
+        return lambda event, **fields: self.entries.append({"event": event, "level": level, **fields})
+
+    def __bool__(self):
+        return True
+
+
+def test_a_failed_seed_logs_the_error_type_only(db, monkeypatch):
+    seed_migration_050(db)
+    recorder = _Recorder()
+    monkeypatch.setattr(database, "logger", recorder)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("could not reach http://10.9.8.7:11434/secret-path")
+
+    monkeypatch.setattr(oss_profiles, "apply_profile", boom)
+    startup(monkeypatch, DEFAULT_MODEL)
+    failed = [e for e in recorder.entries if e["event"] == "oss_profile_seed_failed"]
+    assert failed == [{"event": "oss_profile_seed_failed", "level": "warning", "error_type": "RuntimeError"}]
