@@ -113,7 +113,7 @@ def _reset_runtime():
 # ---------------------------------------------------------------------------
 
 async def _case_lock_unlock_front(controller, ha_client):
-    return await controller._handle_lock_intent("unlock", "front", ha_client)
+    return await controller._handle_lock_intent("unlock", "front", ha_client, "unlock the front door")
 
 
 async def _case_lock_lock_all(controller, ha_client):
@@ -137,7 +137,8 @@ async def _case_scene_goodbye_fallback(controller, ha_client):
     good-bye fallback (light.turn_off all + lock.lock all), which must
     never fire after the activation attempt is itself denied (D20)."""
     return await controller._handle_scene_intent(
-        "activate", {"entity_id": "script.leaving_nonexistent"}, ha_client, original_query="goodbye"
+        "activate", {"entity_id": "script.leaving_nonexistent"}, ha_client,
+        original_query="goodbye leaving nonexistent",
     )
 
 
@@ -149,7 +150,8 @@ async def _case_scene_goodbye_fallback_scene_domain(controller, ha_client):
     (domain='scene', service='scene.turn_on') -- same fallback-suppression
     guarantee, different domain/service pair reaching authorize_ha_write."""
     return await controller._handle_scene_intent(
-        "activate", {"entity_id": "scene.leaving_nonexistent"}, ha_client, original_query="goodbye"
+        "activate", {"entity_id": "scene.leaving_nonexistent"}, ha_client,
+        original_query="goodbye leaving nonexistent",
     )
 
 
@@ -248,7 +250,8 @@ class TestScenePermissionDenialDoesNotStartFallback:
         async def _drive():
             with mp.ha_permission_scope(perms, mode="guest") as scope:
                 result = await controller._handle_scene_intent(
-                    "activate", {"entity_id": "scene.leaving_party"}, ha_client, original_query="goodbye"
+                    "activate", {"entity_id": "scene.leaving_party"}, ha_client,
+                    original_query="goodbye leaving party",
                 )
                 return result, list(scope.denials)
 
@@ -269,16 +272,25 @@ _EXECUTE_INTENT_CASES = [
 ]
 
 
+_EXECUTE_INTENT_QUERIES = {
+    "lock": "unlock the front door",
+    "cover": "open the garage door",
+    "fan": "turn on the office fan",
+    "scene": "run the leaving routine",
+}
+
+
 class TestExecuteIntentGuestRefusalText:
     @pytest.mark.parametrize("name,intent", _EXECUTE_INTENT_CASES, ids=[c[0] for c in _EXECUTE_INTENT_CASES])
     def test_execute_intent_guest_refusal_text(self, name, intent):
+        query = _EXECUTE_INTENT_QUERIES[name]
         controller = _controller()
         ha_client = _raw_ha_client()
         perms = _guest_perms(allowed_intents=["control"])
 
         async def _drive():
             with mp.ha_permission_scope(perms, mode="guest"):
-                return await controller.execute_intent(dict(intent), ha_client)
+                return await controller.execute_intent(dict(intent), ha_client, original_query=query)
 
         result = _run(_drive())
         assert "guest mode" in result.lower(), (name, result)
@@ -324,7 +336,7 @@ class TestOwnerAndAllowedPaths:
 
         async def _drive():
             with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
-                return await controller._handle_lock_intent("unlock", "front", ha_client)
+                return await controller._handle_lock_intent("unlock", "front", ha_client, "unlock the front door")
 
         result = _run(_drive())
         assert "unlocked" in result.lower()
@@ -372,7 +384,7 @@ class TestControllerViaRuntimeProxySingleDenial:
 
         async def _drive():
             with mp.ha_permission_scope(perms, mode="guest") as scope:
-                result = await controller._handle_lock_intent("unlock", "front", proxy)
+                result = await controller._handle_lock_intent("unlock", "front", proxy, "unlock the front door")
                 return result, len(scope.denials)
 
         result, denial_count = _run(_drive())
@@ -393,7 +405,8 @@ class TestUnscopedExecuteIntent:
         ha_client = _raw_ha_client()
 
         result = _run(controller.execute_intent(
-            {"device_type": "lock", "action": "unlock", "room": "front"}, ha_client
+            {"device_type": "lock", "action": "unlock", "room": "front"}, ha_client,
+            original_query="unlock the front door",
         ))
         assert "couldn't verify permissions" in result.lower() or "right now" in result.lower()
         ha_client.call_service.assert_not_awaited()

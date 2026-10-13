@@ -16,9 +16,13 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import json
 
+from orchestrator import access_target
+from orchestrator.room_context import SERVER_DECISION_KEYS
 from shared.local_time import local_now, local_tz
 
 logger = logging.getLogger(__name__)
+
+ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 
 # ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
 # so a caller that only needs the pure has_sequence_timing/
@@ -328,6 +332,9 @@ class SequenceExecutor:
 
         logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} (has_room={bool(room)})")
 
+        if await self._opening_unplanned(target, action):
+            return ONE_DOOR_STEP_REFUSAL
+
         if entity_id:
             # Direct entity control: gated on its own target like every
             # other write (a refusal is returned as the step result).
@@ -346,10 +353,41 @@ class SequenceExecutor:
             }
             # The room was decided when the sequence was planned; the executor
             # never decides (and never asks).
-            for key in ('decided_room', 'decided_rooms', 'decided_excluded', 'room_label', 'rooms', 'excluded_rooms'):
+            for key in SERVER_DECISION_KEYS + ('rooms', 'excluded_rooms'):
                 if key in target:
                     intent[key] = target[key]
             return await self.smart_controller.execute_intent(intent, self.ha_client)
+
+    async def _opening_unplanned(self, target: Dict, action: Any) -> bool:
+        """Whether this step opens a way in (an unlock, or opening an access
+        cover) without the planning-time decision of which door.
+
+        A step carrying ``decided_access`` and no model entity id is the
+        planned one. A step that still carries an entity id never runs,
+        except a cover that is plainly not a way in (blinds). A lock step
+        with neither never runs. A cover step with neither goes to the cover
+        handler, which opens a plain cover by room and never an access cover
+        without a decision."""
+        entity_id = target.get('entity_id')
+        domain = access_target.opening_domain(entity_id, target.get('device_type'))
+        if domain is None or not access_target.is_opening_action(domain, action):
+            return False
+        if entity_id:
+            if domain == 'cover' and isinstance(entity_id, str):
+                try:
+                    known = (await self.smart_controller.entity_manager.get_entities()).get(entity_id)
+                except Exception:
+                    known = None
+                if known is not None and not access_target.is_access_cover(entity_id, known.get('attributes')):
+                    return False
+            logger.warning("sequence_opening_refused", extra={"reason": "entity_id_not_planned"})
+            return True
+        if target.get('decided_access'):
+            return False
+        if domain == 'cover':
+            return False
+        logger.warning("sequence_opening_refused", extra={"reason": "no_decision"})
+        return True
 
     async def _execute_direct_action(self, entity_id: str, action: str, parameters: Dict):
         """Execute action directly on an entity."""
@@ -439,10 +477,10 @@ class SequenceExecutor:
             return 0
 
         tz = local_tz()
-        target = _next_local_occurrence(now, time(hour, minute, second), tz)
-        wait_seconds = max(0.0, (target - now.astimezone(timezone.utc)).total_seconds())
-        target = target.astimezone(tz)
-        logger.info(f"Calculated wait for {time_str}: {wait_seconds:.1f}s (until {target})")
+        wake_at = _next_local_occurrence(now, time(hour, minute, second), tz)
+        wait_seconds = max(0.0, (wake_at - now.astimezone(timezone.utc)).total_seconds())
+        wake_at = wake_at.astimezone(tz)
+        logger.info(f"Calculated wait for {time_str}: {wait_seconds:.1f}s (until {wake_at})")
 
         return wait_seconds
 

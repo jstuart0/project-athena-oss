@@ -833,9 +833,13 @@ class TestPendingStored:
         )
         out = h.run(_state54("doors please", room=None))
         assert _written(h.client) == []
+        # An unlock never fans out: seven locks and no name ask which door.
         assert out.answer.endswith("?"), out.answer
-        assert "unlock 7" in out.answer
+        assert "unlock 7" not in out.answer
         assert h.stores and h.stores[-1]["ttl"] == 60
+        pending = h.stores[-1]["parameters"]["awaiting_room_choice"]
+        assert pending["kind"] == "access"
+        assert len(pending["candidates"]) == 7
 
 
 class TestBareRepliesResolve:
@@ -1866,13 +1870,13 @@ class TestSingleTargetGatesDirect:
 
     @pytest.mark.parametrize("name", ["climate", "bed_warmer", "motion", "scene"])
     def test_question_is_blocked_at_one_target(self, name):
-        answer, block, raw = self._call(name, "is it on in the office?")
+        answer, block, raw = self._call(name, "is it on in the office?" if name != "scene" else "is good night on in the office?")
         assert raw.call_service.await_count == 0, (name, raw.call_service.await_args_list)
         assert block is not None and sum(len(w.entity_ids) for w in block.writes) == 1, (name, block)
 
     @pytest.mark.parametrize("name", ["climate", "bed_warmer", "motion", "scene"])
     def test_command_proceeds(self, name):
-        answer, block, raw = self._call(name, "please do it now")
+        answer, block, raw = self._call(name, "please do it now" if name != "scene" else "please run good night now")
         assert block is None, name
         assert raw.call_service.await_count >= 1, (name, answer)
 

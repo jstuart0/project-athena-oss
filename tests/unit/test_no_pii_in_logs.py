@@ -60,7 +60,16 @@ ROOM_SCOPE = (
     "src/orchestrator/ha_entity_manager.py", "src/orchestrator/sequence_executor.py",
     "src/orchestrator/write_fanout.py", "src/orchestrator/nodes/route_control.py",
     "src/gateway/main.py", "src/gateway/speaker_room.py", "src/shared/ha_registry.py",
+    "src/orchestrator/access_target.py",
 )
+# In those files a door decision (which lock or cover a command acted on) is a
+# location too, and so is a whole intent, step or target: each can hold a room,
+# an area or a door's id. Log key names (``sorted(intent.keys())``) and counts.
+DOOR_DECISION_PREFIX = "decided_access"
+WHOLE_OBJECT_NAMES = frozenset({"intent", "step", "target", "sequence", "steps"})
+ORCHESTRATOR_PREFIX = "src/orchestrator/"
+# Calls through which a whole object stays whole (``str(intent)``).
+_TRANSPARENT_CALLS = frozenset({"str", "repr", "dict", "list", "format", "dumps"})
 _ROOM_TOKENS = tuple(tuple(k.split("_")) for k in ROOM_KEYS)
 # A Home Assistant device id names a physical speaker in a house. The gateway
 # handles them on every voice request, so none may reach one of its logs
@@ -409,8 +418,33 @@ def _is_device_id_name(identifier: str) -> bool:
     return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _DEVICE_ID_TOKENS)
 
 
+def _whole_objects(node: ast.AST):
+    """``whole:<name>`` for a whole intent, step or target placed in a logged
+    value: bare, in an f-string, in a %/+ expression or tuple, or through
+    ``str()``/``repr()``. A method call on it (``intent.get("action")``), an
+    attribute or a subscript, ``sorted()`` and ``len()`` are not the whole."""
+    if node is None:
+        return
+    if isinstance(node, ast.Name):
+        if node.id in WHOLE_OBJECT_NAMES:
+            yield f"whole:{node.id}"
+    elif isinstance(node, (ast.JoinedStr, ast.FormattedValue, ast.BinOp, ast.BoolOp, ast.IfExp, ast.Tuple,
+                           ast.List, ast.Set, ast.Starred)):
+        for child in ast.iter_child_nodes(node):
+            yield from _whole_objects(child)
+    elif isinstance(node, ast.Dict):
+        for value in node.values:
+            yield from _whole_objects(value)
+    elif isinstance(node, ast.Call) and _final_name(node.func) in _TRANSPARENT_CALLS:
+        for arg in node.args:
+            yield from _whole_objects(arg)
+        if isinstance(node.func, ast.Attribute):
+            yield from _whole_objects(node.func.value)
+
+
 def _matches(identifier: str, filename: str = "") -> bool:
-    if filename in ROOM_SCOPE and _is_room_name(identifier):
+    if filename in ROOM_SCOPE and (_is_room_name(identifier) or identifier.startswith(DOOR_DECISION_PREFIX)
+                                   or identifier.startswith("whole:")):
         return True
     if filename.startswith(DEVICE_ID_SCOPE_PREFIX) and _is_device_id_name(identifier):
         return True
@@ -603,6 +637,8 @@ def _call_hits(call: ast.Call, *, filename: str = "", inspected: list | None = N
         hits.extend(i for i in _identifiers(arg) if _matches(i, filename))
     for value in values:
         hits.extend(_text_slices(value, inspected))
+        if filename in ROOM_SCOPE and filename.startswith(ORCHESTRATOR_PREFIX):
+            hits.extend(_whole_objects(value))
     if filename.endswith(CACHE_KEY_FILE) and any(
         (isinstance(n, ast.Name) and n.id == "cache_key") or (isinstance(n, ast.keyword) and n.arg == "cache_key")
         for n in ast.walk(call)
@@ -955,6 +991,53 @@ def test_room_and_area_values_are_flagged_in_room_resolving_files():
         assert not found, call
     found, _ = find_pii_logs('logger.info(f"lights in {room}")', "src/gateway/livekit_routes.py")
     assert not found
+
+
+def test_a_door_decision_or_a_whole_intent_in_an_orchestrator_log_is_flagged():
+    scoped = "src/orchestrator/smart_home_controller.py"
+    flagged = (
+        'logger.info(f"carried {decided_access}")',
+        'logger.info("x", decided_access=intent.get("decided_access"))',
+        'logger.info("x", src=intent["decided_access_src"])',
+        'logger.info(f"interpreted: {intent}")',
+        'logger.info("interpreted: %s", intent)',
+        'logger.info("interpreted: " + str(intent))',
+        'logger.info("x", step=step)',
+        'logger.info("x", t=target)',
+        'logger.info("x", ids=f"{steps}")',
+    )
+    for call in flagged:
+        found, _ = find_pii_logs(call, scoped)
+        assert found, call
+    fine = (
+        'logger.info("x", action=intent.get("action"))',
+        'logger.info("x", keys=sorted(intent.keys()))',
+        'logger.info("x", keys=sorted(intent))',
+        'logger.info("x", n=len(steps))',
+        'logger.info("x", has_decision=bool(intent.get("decided_access")))',
+        'logger.info("x", outcome=type(outcome).__name__)',
+    )
+    for call in fine:
+        found, _ = find_pii_logs(call, scoped)
+        assert not found, call
+    found, _ = find_pii_logs('logger.info(f"interpreted: {intent}")', "src/gateway/main.py")
+    assert not found, "scoped to the orchestrator files"
+    found, _ = find_pii_logs('logger.info(f"interpreted: {intent}")', "src/orchestrator/helpers.py")
+    assert not found, "scoped to the files that resolve rooms and doors"
+
+
+def test_access_target_is_scanned_and_has_no_logger_at_all():
+    path = "src/orchestrator/access_target.py"
+    assert path in ROOM_SCOPE
+    tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] + [getattr(node, "module", None) or ""]
+            assert not any(n.split(".")[0] in ("logging", "structlog") for n in names)
+        if isinstance(node, ast.Name):
+            assert node.id not in ("logger", "log"), "the door resolver logs nothing"
+    planted, _ = find_pii_logs('import logging\nlogger = logging.getLogger(__name__)\nlogger.info("x", room=room)', path)
+    assert planted, "a logger planted in the resolver is caught"
 
 
 def test_a_device_id_in_a_gateway_log_is_flagged():

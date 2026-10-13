@@ -9,8 +9,8 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
-from . import room_choice, room_context
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from . import access_target, room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
@@ -19,7 +19,7 @@ from shared.config import get_config
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
-from shared.ha_registry import room_key
+from shared.ha_registry import room_key, tokens as _words
 
 
 _jarvis_key_warned = False
@@ -198,6 +198,88 @@ _DECIDED_DOMAINS = {
     "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
 }
 _NO_SPEAKER_ROOM = ("unknown", "guest")
+
+# A door decision (decided_access) carried from an earlier opening or status
+# read opens a door only this long after it was made.
+ACCESS_CARRY_SECONDS = 60
+_ACCESS_SOURCES = ("replay", "open", "status")
+# The noun a "which door?" question uses ("Which door: front or back?").
+ACCESS_ASK_PHRASE = "door"
+UNKNOWN_SCENE_TEXT = "Unknown scene or routine."
+_SCENE_NOT_DISTINGUISHING = frozenset({
+    "scene", "script", "routine", "mode", "the", "a", "an", "of", "to", "for", "and", "my", "in", "on", "at",
+})
+SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening; ask me when you want it."
+# What a sequence step target may carry in from a model: where, what and how.
+# Everything else, the server's decision keys above all, is dropped.
+_SEQUENCE_TARGET_KEYS = ("device_type", "room", "rooms", "entity_id", "target_scope", "excluded_rooms")
+ONE_DOOR_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
+_wall_clock = time.time
+
+
+# The phrases the fast path maps to a scene or routine. The server's own
+# table: it is also what grounds a model-chosen scene that the words call by
+# one of these phrases (``_handle_scene_intent``).
+SCENE_PHRASES = {
+    # Movie mode
+    'movie mode': 'scene.movie_mode',
+    'movie time': 'scene.movie_mode',
+    'watch a movie': 'scene.movie_mode',
+    'start movie': 'scene.movie_mode',
+    # Bedtime / Good night
+    'good night': 'script.good_night',
+    'goodnight': 'script.good_night',
+    'bedtime': 'script.good_night',
+    'time for bed': 'script.good_night',
+    'going to bed': 'script.good_night',
+    'night mode': 'script.good_night',
+    # Morning
+    'good morning': 'script.good_morning',
+    'morning mode': 'script.good_morning',
+    'wake up': 'script.good_morning',
+    # Leaving
+    'i am leaving': 'script.leaving',
+    "i'm leaving": 'script.leaving',
+    'im leaving': 'script.leaving',
+    'goodbye': 'script.leaving',
+    'leaving home': 'script.leaving',
+    'heading out': 'script.leaving',
+    # Arriving
+    'i am home': 'script.arriving',
+    "i'm home": 'script.arriving',
+    'im home': 'script.arriving',
+    "i'm back": 'script.arriving',
+    'im back': 'script.arriving',
+    'home now': 'script.arriving',
+    # Romantic / Mood
+    'romantic mode': 'scene.romantic',
+    'date night': 'scene.romantic',
+    'set the mood': 'scene.romantic',  # Round 15
+    'make it romantic': 'scene.romantic',  # Round 14
+    # Round 17: more romantic patterns
+    'vibes for my girl': 'scene.romantic',
+    'my girl comes over': 'scene.romantic',
+    'girlfriend coming': 'scene.romantic',
+    'romantic vibes': 'scene.romantic',
+    # Relaxation
+    'relax mode': 'scene.relax',
+    'chill mode': 'scene.relax',
+    # Party
+    'party mode': 'scene.party',
+    'party time': 'scene.party',
+    'party vibes': 'scene.party',  # Round 16: "gimme the party vibes"
+    'party vibe': 'scene.party',  # Round 16
+}
+
+
+def _model_object(text: str) -> Dict:
+    """A model's JSON object with the server-only keys removed (the room and
+    door decisions are the server's to make). Anything that is not an object
+    is as unparseable as bad JSON."""
+    parsed = room_context.strip_server_keys(json.loads(text))
+    if parsed is None:
+        raise json.JSONDecodeError("not a JSON object", text, 0)
+    return parsed
 
 
 def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
@@ -410,21 +492,12 @@ class SmartHomeController:
             else:
                 action = 'lock'
 
-            # Determine which door
-            if 'back' in query_lower:
-                room = 'back_door'
-            elif 'front' in query_lower:
-                room = 'front_door'
-            elif 'all' in query_lower or 'the doors' in query_lower or 'my doors' in query_lower or 'the locks' in query_lower or 'in the house' in query_lower:
-                # "lock all doors", "lock all the doors", "lock the doors", "my doors", "all the locks", "locks in the house" -> all doors
-                room = 'all_doors'
-            else:
-                room = 'front_door'  # Default to front door
-
-            logger.info(f"Fast path lock command: action={action}, has_room={bool(room)}")
+            # Which door is the words' to say: the lock handler reads them
+            # (access_target), so nothing here picks a door or defaults to one.
+            logger.info(f"Fast path lock command: action={action}")
             return {
                 "device_type": "lock",
-                "room": room,
+                "room": None,
                 "action": action,
                 "target_scope": "group",
                 "parameters": {},
@@ -541,57 +614,7 @@ class SmartHomeController:
 
         # FAST PATH: Scene and routine commands
         # These map to HA scenes or scripts
-        scene_patterns = {
-            # Movie mode
-            'movie mode': 'scene.movie_mode',
-            'movie time': 'scene.movie_mode',
-            'watch a movie': 'scene.movie_mode',
-            'start movie': 'scene.movie_mode',
-            # Bedtime / Good night
-            'good night': 'script.good_night',
-            'goodnight': 'script.good_night',
-            'bedtime': 'script.good_night',
-            'time for bed': 'script.good_night',
-            'going to bed': 'script.good_night',
-            'night mode': 'script.good_night',
-            # Morning
-            'good morning': 'script.good_morning',
-            'morning mode': 'script.good_morning',
-            'wake up': 'script.good_morning',
-            # Leaving
-            'i am leaving': 'script.leaving',
-            "i'm leaving": 'script.leaving',
-            'im leaving': 'script.leaving',
-            'goodbye': 'script.leaving',
-            'leaving home': 'script.leaving',
-            'heading out': 'script.leaving',
-            # Arriving
-            'i am home': 'script.arriving',
-            "i'm home": 'script.arriving',
-            'im home': 'script.arriving',
-            "i'm back": 'script.arriving',
-            'im back': 'script.arriving',
-            'home now': 'script.arriving',
-            # Romantic / Mood
-            'romantic mode': 'scene.romantic',
-            'date night': 'scene.romantic',
-            'set the mood': 'scene.romantic',  # Round 15
-            'make it romantic': 'scene.romantic',  # Round 14
-            # Round 17: more romantic patterns
-            'vibes for my girl': 'scene.romantic',
-            'my girl comes over': 'scene.romantic',
-            'girlfriend coming': 'scene.romantic',
-            'romantic vibes': 'scene.romantic',
-            # Relaxation
-            'relax mode': 'scene.relax',
-            'chill mode': 'scene.relax',
-            # Party
-            'party mode': 'scene.party',
-            'party time': 'scene.party',
-            'party vibes': 'scene.party',  # Round 16: "gimme the party vibes"
-            'party vibe': 'scene.party',  # Round 16
-        }
-        for pattern, scene_entity in scene_patterns.items():
+        for pattern, scene_entity in SCENE_PHRASES.items():
             if pattern in query_lower:
                 logger.info(f"Fast path scene: pattern='{pattern}', entity={scene_entity}")
                 return {
@@ -1518,7 +1541,7 @@ Return ONLY the JSON, no other text."""
             elif '```' in text:
                 text = text.split('```')[1].split('```')[0].strip()
 
-            intent = json.loads(text)
+            intent = _model_object(text)
             self._ground_intent_rooms(intent, query)
             # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
             # function with a write action, even if the LLM (or a hostile
@@ -1780,7 +1803,7 @@ Return ONLY valid JSON."""
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0]
 
-            sequence = json.loads(response_text.strip())
+            sequence = _model_object(response_text.strip())
             logger.info(f"Extracted sequence with {len(sequence.get('steps', []))} steps")
             return sequence
 
@@ -1854,6 +1877,10 @@ Return ONLY valid JSON."""
     def _ground_intent_rooms(self, intent: Dict, query: str) -> None:
         """Keep a model's room and exclusions only where the utterance names
         them (whole tokens); ``whole_house`` only for whole-house wording."""
+        if intent.get("device_type") in ("lock", "cover"):
+            # A door is matched against doors (access_target), never turned
+            # into a room: "front_door" must stay a door name.
+            return
         directory = self._directory()
         room = intent.get("room")
         if isinstance(room, str):
@@ -2032,7 +2059,8 @@ Return ONLY valid JSON."""
                 if outcome is not None:
                     return outcome
                 room = intent.get('room')
-            elif not room:
+            elif not room and device_type not in ('lock', 'cover'):
+                # A door is never inherited from where the speaker stands.
                 room = _plain_speaker_room(device_room)
                 if room:
                     intent['room'] = room  # Update intent so downstream handlers have it
@@ -2069,7 +2097,7 @@ Return ONLY valid JSON."""
 
             # Handle lock control
             if device_type == 'lock':
-                return _finish(await self._handle_lock_intent(action, room, ha_client, original_query))
+                return _finish(await self._handle_lock_intent(action, room, ha_client, original_query, intent=intent))
 
             # Handle fan control
             if device_type == 'fan':
@@ -2077,7 +2105,7 @@ Return ONLY valid JSON."""
 
             # Handle cover/garage door control
             if device_type == 'cover':
-                return _finish(await self._handle_cover_intent(action, room, ha_client, original_query))
+                return _finish(await self._handle_cover_intent(action, room, ha_client, original_query, intent=intent))
 
             # Handle scene/routine activation
             if device_type == 'scene':
@@ -2348,6 +2376,95 @@ Return ONLY valid JSON."""
                 refused = True
         return permitted, refused
 
+    @staticmethod
+    def _step_waits(step: Dict) -> bool:
+        """Whether running this step holds up the ones after it (a time, or a
+        delay that isn't plainly zero)."""
+        if step.get('at_time'):
+            return True
+        delay = step.get('delay_after')
+        if delay is None or delay is False:
+            return False
+        return isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay > 0
+
+    async def _plan_sequence_doors(self, steps: Sequence[Dict], query: str) -> Optional[str]:
+        """Settle every lock and access-cover step of a sequence before
+        anything is scheduled.
+
+        A step's domain is its entity id's prefix when it has one, else its
+        device type. An opening step (an unlock, or opening an access cover)
+        must name exactly one door in the sequence's own words, may not wait
+        for a time or behind a delay (the scope's mode could be stale by
+        then), and there may be only one per plan; it comes out carrying
+        ``decided_access`` and no model entity id. Returns the answer to give
+        (a question, a hint, a refusal) with nothing scheduled and nothing
+        stored, or None."""
+        entities: Optional[Dict] = None
+        planned = []
+        for index, step in enumerate(steps):
+            target = step['target']
+            entity_id = target.get('entity_id')
+            domain = access_target.opening_domain(entity_id, target.get('device_type'))
+            if domain is None:
+                continue
+            if entities is None:
+                entities = await self.entity_manager.get_entities()
+            pool = {k: v for k, v in entities.items() if k.startswith(f"{domain}.")}
+            if domain == 'cover':
+                if isinstance(entity_id, str) and entity_id in pool:
+                    plain = not access_target.is_access_cover(entity_id, (pool[entity_id] or {}).get('attributes'))
+                else:
+                    plain = (access_target.mentions_non_access_cover(query)
+                             and not access_target.noun_present(query, 'cover'))
+                pool = {k: v for k, v in pool.items() if access_target.is_access_cover(k, (v or {}).get('attributes'))}
+                if plain or not pool:
+                    continue
+            opening = access_target.is_opening_action(domain, step.get('action'))
+            if opening and target.get('device_type') not in (None, domain):
+                return ONE_DOOR_REFUSAL
+            planned.append((index, step, domain, pool, opening))
+
+        openings = [p for p in planned if p[4]]
+        if len(openings) > 1:
+            return "I can unlock or open one door at a time."
+        for index, step, domain, pool, opening in planned:
+            target = step['target']
+            if not pool:
+                return f"I couldn't find any {'locks' if domain == 'lock' else 'garage doors'} in the home automation system."
+            if opening and (step.get('at_time') or any(self._step_waits(s) for s in steps[:index])):
+                return SCHEDULED_OPENING_REFUSAL
+            permitted, _denied = self._split_permitted(list(pool))
+            if not permitted:
+                # The permission pre-authorization that follows refuses it.
+                continue
+            labels = {e: self._spoken_entity(e, pool[e]) for e in permitted}
+            model_target = target.get('room') or target.get('entity_id')
+            outcome = access_target.resolve(
+                access_target.narrow_to_target(query, model_target, domain), domain=domain, model_target=model_target,
+                carried=None, entities=labels, area_entities=self._door_areas(domain, tuple(labels)),
+                directory=self._directory(),
+            )
+            named = isinstance(outcome, access_target.Named) and (
+                outcome.named_by in access_target.OPENING_SOURCES or not opening
+            )
+            if named:
+                self._set_step_door(step, outcome.refs[0].entity_id, domain)
+            elif opening or isinstance(outcome, (access_target.Ambiguous, access_target.InArea, access_target.NotFound)):
+                return self._door_prompt(
+                    outcome, domain=domain, action=str(step.get('action')), room=target.get('room'),
+                    intent=None, original_query=None,
+                )
+        return None
+
+    @staticmethod
+    def _set_step_door(step: Dict, entity_id: str, domain: str) -> None:
+        target = step['target']
+        target.pop('entity_id', None)
+        target['device_type'] = domain
+        target['decided_access'] = entity_id
+        target['decided_access_src'] = 'open'
+        target['decided_access_at'] = _wall_clock()
+
     async def decide_sequence_rooms(
         self, steps: Sequence[Dict], query: str, device_room: Optional[str],
     ) -> Optional[str]:
@@ -2359,7 +2476,19 @@ Return ONLY valid JSON."""
         Each light/fan/switch/media step comes out carrying its decision
         (decided_room and friends), so the executor never decides. Returns the
         question or refusal to answer with (nothing scheduled, nothing
-        recorded), or None when every step is decided."""
+        recorded), or None when every step is decided.
+
+        Every step target is first rebuilt from an allowlist, so nothing a
+        model wrote under a server-only key survives, and each lock and cover
+        step is settled by ``_plan_sequence_doors``."""
+        for step in steps:
+            step['target'] = {
+                k: v for k, v in (step.get('target') if isinstance(step.get('target'), dict) else {}).items()
+                if k in _SEQUENCE_TARGET_KEYS
+            }
+        door_text = await self._plan_sequence_doors(steps, query)
+        if door_text is not None:
+            return door_text
         for step in steps:
             target = step.get('target') or {}
             domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
@@ -4468,102 +4597,221 @@ Do NOT mention rooms that have no current or recent motion."""
             logger.error(f"Entity state query error ({domain}): {e}")
             return f"I couldn't check the {noun} status right now."
 
-    async def _handle_lock_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
-        """Handle lock control and status queries"""
-        from orchestrator.mode_permission import ensure_permission_enforcing
+    # -- doors: locks and the covers that let someone in --------------------
+
+    @staticmethod
+    def _spoken_entity(entity_id: str, state_data: Optional[Dict]) -> str:
+        name = ((state_data or {}).get('attributes') or {}).get('friendly_name')
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return entity_id.split('.', 1)[-1].replace('_', ' ')
+
+    @staticmethod
+    def _split_permitted(entity_ids: Sequence[str]) -> Tuple[List[str], List[str]]:
+        """(ids the request's permissions allow, ids they deny). Without an
+        open scope every id counts as allowed: the guard decides at write."""
+        from orchestrator.mode_permission import check_entity_permission, current_ha_scope
+        scope = current_ha_scope()
+        if scope is None:
+            return list(entity_ids), []
+        allowed: List[str] = []
+        denied: List[str] = []
+        for entity_id in entity_ids:
+            (allowed if check_entity_permission(entity_id, scope.permissions) else denied).append(entity_id)
+        return allowed, denied
+
+    def _door_areas(self, domain: str, ids: Sequence[str]) -> Dict[str, Tuple[str, ...]]:
+        """Room key -> the given ids in that room's registry area. Empty when
+        no registry is loaded."""
+        snapshot = self._registry_snapshot()
+        if snapshot is None:
+            return {}
+        wanted = set(ids)
+        areas: Dict[str, Tuple[str, ...]] = {}
+        for area in snapshot.areas:
+            members = tuple(e for e in snapshot.entities_in(area.area_id, domain) if e in wanted)
+            if members:
+                areas[area.key] = members
+        return areas
+
+    @staticmethod
+    def _honoured_carry(intent: Optional[Dict], domain: str, permitted: Sequence[str], *, opening: bool) -> Optional[str]:
+        """The door a server decision carries into this command, or None.
+
+        The id must be a permitted ``<domain>.`` entity. An opening may use
+        it only after the answer to "which door?" (src ``replay``), or from
+        an earlier opening or status read no more than
+        ``ACCESS_CARRY_SECONDS`` ago. The caller's fingerprint and audience
+        were checked where the decision was copied in (route_control)."""
+        if not isinstance(intent, dict):
+            return None
+        carried = intent.get('decided_access')
+        if not isinstance(carried, str) or not carried.startswith(f"{domain}.") or carried not in permitted:
+            return None
+        src = intent.get('decided_access_src')
+        if src not in _ACCESS_SOURCES:
+            return None
+        if opening and src != 'replay':
+            at = intent.get('decided_access_at')
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                return None
+            if not 0 <= _wall_clock() - at <= ACCESS_CARRY_SECONDS:
+                return None
+        return carried
+
+    @staticmethod
+    def _record_access_decision(intent: Optional[Dict], entity_id: str, src: str) -> None:
+        """Record the door a command acted on, for a follow-up. The caller's
+        fingerprint and audience are stamped by route_control."""
+        if not isinstance(intent, dict):
+            return
+        intent['decided_access'] = entity_id
+        intent['decided_access_src'] = src
+        intent['decided_access_at'] = _wall_clock()
+        intent.pop('decided_access_fp', None)
+        intent.pop('decided_access_aud', None)
+
+    @staticmethod
+    def _clear_access_decision(intent: Optional[Dict]) -> None:
+        """Locking or closing leaves no door to carry: "lock it" then "unlock
+        it" asks which door."""
+        if isinstance(intent, dict):
+            for key in ("decided_access", "decided_access_fp", "decided_access_aud",
+                        "decided_access_src", "decided_access_at"):
+                intent.pop(key, None)
+
+    def _door_prompt(
+        self, outcome, *, domain: str, action: str, room: Optional[str], intent: Optional[Dict],
+        original_query: Optional[str],
+    ) -> str:
+        """The answer to a door command that must not write: a hint when one
+        door is in play, the question when several are, "not found" for a
+        name nothing answers to."""
+        verb = 'unlock' if domain == 'lock' else 'open'
+        if isinstance(outcome, access_target.NotFound):
+            return f"I couldn't find a door called {outcome.phrase}."
+        refs = outcome.refs
+        if not refs:
+            return f"I couldn't find a door to {verb}."
+        lead = f"I can {verb} one door at a time. " if isinstance(outcome, access_target.Every) else ""
+        if len(refs) == 1:
+            return f"{lead}Say '{verb} the {refs[0].label}' if you want me to {verb} it."
+        pending = dict(intent) if isinstance(intent, dict) else {"device_type": domain, "action": action, "room": room}
+        question = room_choice.ask(
+            pending,
+            room_context.AskWhich(tuple(room_context.RoomRef(r.entity_id, r.label) for r in refs), ACCESS_ASK_PHRASE),
+            record=original_query is not None,
+            kind=room_choice.KIND_ACCESS,
+        )
+        return f"{lead}{question}"
+
+    def _resolve_door(
+        self, domain: str, original_query: Optional[str], room, intent: Optional[Dict],
+        labels: Dict[str, str], *, opening: bool,
+    ):
+        carried = self._honoured_carry(intent, domain, tuple(labels), opening=opening)
+        return access_target.resolve(
+            original_query, domain=domain, model_target=room, carried=carried, entities=labels,
+            area_entities=self._door_areas(domain, tuple(labels)), directory=self._directory(),
+        )
+
+    @staticmethod
+    def _door_targets(outcome, labels: Dict[str, str]) -> Optional[List[str]]:
+        """The ids a lock, close or status command acts on for an outcome:
+        the named door, those a question was about, or every door; None when
+        nothing was found."""
+        if isinstance(outcome, access_target.NotFound):
+            return None
+        refs = outcome.refs
+        return [r.entity_id for r in refs] if refs else list(labels)
+
+    async def _handle_lock_intent(
+        self, action: str, room: str, ha_client, original_query: str = None, *, intent: Optional[Dict] = None,
+    ) -> str:
+        """Lock control and status.
+
+        An unlock acts on exactly one lock, and only one the user's words
+        name (``access_target``); a room, an area or a model's guess never
+        names it. Locking and status may use whatever is named, or every lock
+        when nothing is."""
+        from orchestrator.mode_permission import (
+            current_ha_scope, ensure_permission_enforcing, permission_refusal_message, record_precheck_denial,
+        )
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
         try:
-            # Get all lock entities from HA
             all_entities = await self.entity_manager.get_entities()
             locks = {k: v for k, v in all_entities.items() if k.startswith('lock.')}
 
             if not locks:
                 return "I couldn't find any locks in the home automation system."
 
-            # Filter by room if specified
-            target_locks = []
-            query_lower = (original_query or "").lower()
-
-            # Special handling for "all_doors" - include all locks
-            if room and room.lower() in ['all_doors', 'all doors', 'all']:
-                logger.info(f"Lock intent: targeting all doors ({len(locks)} locks)")
-                target_locks = list(locks.items())
-            else:
-                for entity_id, state_data in locks.items():
-                    friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id).lower()
-                    entity_lower = entity_id.lower()
-
-                    # Match by room name or lock name
-                    if room:
-                        room_lower = room.lower().replace('_', ' ')
-                        if room_lower in friendly_name or room_lower in entity_lower:
-                            target_locks.append((entity_id, state_data))
-                    elif 'front' in query_lower and ('front' in friendly_name or 'front' in entity_lower):
-                        target_locks.append((entity_id, state_data))
-                    elif 'back' in query_lower and ('back' in friendly_name or 'back' in entity_lower):
-                        target_locks.append((entity_id, state_data))
-                    elif not room:
-                        # No specific lock mentioned, include all
-                        target_locks.append((entity_id, state_data))
-
-            if not target_locks:
-                return f"I couldn't find a lock matching '{room or 'your request'}'."
-
             if action == "get_status":
-                # Report lock status
-                statuses = []
-                for entity_id, state_data in target_locks:
-                    friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id.split('.')[-1].replace('_', ' '))
-                    state = state_data.get('state', 'unknown')
-                    statuses.append(f"{friendly_name} is {state}")
-                return ". ".join(statuses) + "."
+                labels = {e: self._spoken_entity(e, s) for e, s in locks.items()}
+                outcome = self._resolve_door('lock', original_query, room, intent, labels, opening=False)
+                target_ids = self._door_targets(outcome, labels)
+                if target_ids is None:
+                    return self._door_prompt(outcome, domain='lock', action=action, room=room,
+                                             intent=intent, original_query=original_query)
+                if len(target_ids) == 1:
+                    self._record_access_decision(intent, target_ids[0], 'status')
+                return ". ".join(f"{labels[e]} is {locks[e].get('state', 'unknown')}" for e in target_ids) + "."
+
+            if action not in ("lock", "unlock"):
+                return "I'm not sure what you want to do with the lock."
+
+            scope = current_ha_scope()
+            permitted, denied = self._split_permitted(list(locks))
+            if not permitted:
+                record_precheck_denial(scope, "lock", action, denied)
+                return permission_refusal_message(("lock",), scope)
+            labels = {e: self._spoken_entity(e, locks[e]) for e in permitted}
+            opening = action == "unlock"
+            outcome = self._resolve_door('lock', original_query, room, intent, labels, opening=opening)
+            logger.info("lock_command_resolved", extra={"outcome": type(outcome).__name__, "doors": len(labels)})
+
+            if opening:
+                if not (isinstance(outcome, access_target.Named) and outcome.named_by in access_target.OPENING_SOURCES):
+                    return self._door_prompt(outcome, domain='lock', action=action, room=room,
+                                             intent=intent, original_query=original_query)
+                target_ids = [outcome.refs[0].entity_id]
+            else:
+                target_ids = self._door_targets(outcome, labels)
+                if target_ids is None:
+                    return self._door_prompt(outcome, domain='lock', action=action, room=room,
+                                             intent=intent, original_query=original_query)
 
             # ATHENA-128 4.3 (bob r2 (1)): gated unconditionally at the
             # try-body level, before either write branch, so the gate
             # dominates both -- an elif chain would let the gate placed in
             # one arm miss the sibling arm's write entirely.
             from . import write_fanout
-            _lock_service = action if action in ("lock", "unlock") else "lock"
             _lock_prompt = write_fanout.gate(
-                "lock", _lock_service, tuple(e for e, _ in target_locks), original_query, room=room,
+                "lock", action, tuple(target_ids), original_query, room=room,
             )
             if _lock_prompt:
                 return _lock_prompt
+            if denied and isinstance(outcome, (access_target.Every, access_target.Unnamed)):
+                record_precheck_denial(scope, "lock", action, denied)
 
             if action == "lock":
-                # Lock the door(s)
+                self._clear_access_decision(intent)
                 await asyncio.gather(*[
                     ha_client.call_service("lock", "lock", {"entity_id": entity_id})
-                    for entity_id, _ in target_locks
+                    for entity_id in target_ids
                 ])
-                # If locking all doors, say "all doors" instead of listing them
-                if len(target_locks) > 2:
-                    return f"Done! I've locked all {len(target_locks)} doors."
-                else:
-                    lock_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_locks])
-                    return f"Done! I've locked {lock_names}."
+                if len(target_ids) > 2:
+                    return f"Done! I've locked all {len(target_ids)} doors."
+                return f"Done! I've locked {', '.join(labels[e] for e in target_ids)}."
 
-            if action == "unlock":
-                # Unlock the door(s)
-                await asyncio.gather(*[
-                    ha_client.call_service("lock", "unlock", {"entity_id": entity_id})
-                    for entity_id, _ in target_locks
-                ])
-                # If unlocking all doors, say "all doors" instead of listing them
-                if len(target_locks) > 2:
-                    return f"Done! I've unlocked all {len(target_locks)} doors."
-                else:
-                    lock_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_locks])
-                    return f"Done! I've unlocked {lock_names}."
-
-            else:
-                return "I'm not sure what you want to do with the lock."
+            await ha_client.call_service("lock", "unlock", {"entity_id": target_ids[0]})
+            self._record_access_decision(intent, target_ids[0], 'open')
+            return f"Done! I've unlocked {labels[target_ids[0]]}."
 
         except Exception as e:
-            logger.error(f"Lock control error: {e}")
+            logger.error(f"Lock control error: {type(e).__name__}")
             return "I couldn't control the lock right now."
 
     async def _handle_fan_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
@@ -4656,84 +4904,155 @@ Do NOT mention rooms that have no current or recent motion."""
             logger.error(f"Fan control error: {e}")
             return "I couldn't control the fan right now."
 
-    async def _handle_cover_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
-        """Handle cover/garage door control commands"""
+    @staticmethod
+    def _match_covers(covers: Dict[str, Dict], room: Optional[str], original_query: Optional[str]) -> List[str]:
+        """The covers a room or keyword picks out: those whose name holds the
+        room, else (no room) those named for the garage when the query says
+        it, else every cover. Opening a way in is decided separately."""
+        query_lower = (original_query or "").lower()
+        matched: List[str] = []
+        for entity_id, state_data in covers.items():
+            friendly_name = ((state_data or {}).get('attributes') or {}).get('friendly_name', entity_id).lower()
+            entity_lower = entity_id.lower()
+            if room:
+                room_lower = room.lower().replace('_', ' ')
+                if room_lower in friendly_name or room_lower in entity_lower:
+                    matched.append(entity_id)
+            elif 'garage' in query_lower:
+                if 'garage' in friendly_name or 'garage' in entity_lower:
+                    matched.append(entity_id)
+            else:
+                matched.append(entity_id)
+        return matched
+
+    async def _pick_access_cover(
+        self, covers: Dict[str, Dict], access_ids: Sequence[str], room,
+        original_query: Optional[str], intent: Optional[Dict],
+    ) -> Union[str, List[str]]:
+        """The one garage, gate or door cover the user's words name, as a
+        one-item list; else the text to answer with (a hint, a question, a
+        refusal). Writes nothing."""
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message, record_precheck_denial
+        if not access_ids:
+            return "I couldn't find a garage door or cover for that."
+        permitted, denied = self._split_permitted(sorted(access_ids))
+        if not permitted:
+            record_precheck_denial(current_ha_scope(), "cover", "open_cover", denied)
+            return permission_refusal_message(("cover",), current_ha_scope())
+        labels = {e: self._spoken_entity(e, covers[e]) for e in permitted}
+        outcome = self._resolve_door('cover', original_query, room, intent, labels, opening=True)
+        if not (isinstance(outcome, access_target.Named) and outcome.named_by in access_target.OPENING_SOURCES):
+            return self._door_prompt(outcome, domain='cover', action='open', room=room,
+                                     intent=intent, original_query=original_query)
+        return [outcome.refs[0].entity_id]
+
+    async def _handle_cover_intent(
+        self, action: str, room: str, ha_client, original_query: str = None, *, intent: Optional[Dict] = None,
+    ) -> str:
+        """Cover and garage door control.
+
+        Opening a way in (a garage, gate or door cover: ``is_access_cover``)
+        acts on exactly one cover the user's words name; a room never names
+        it. Blinds and the like keep their room and name matching. Closing
+        and status keep today's matching."""
         from orchestrator.mode_permission import ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
         try:
-            # Get all cover entities from HA
             all_entities = await self.entity_manager.get_entities()
             covers = {k: v for k, v in all_entities.items() if k.startswith('cover.')}
 
             if not covers:
                 return "I couldn't find any garage doors or covers in the home automation system."
 
-            # Filter by room if specified
-            target_covers = []
-            query_lower = (original_query or "").lower()
-
-            for entity_id, state_data in covers.items():
-                friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id).lower()
-                entity_lower = entity_id.lower()
-
-                # Match by room name or keyword
-                if room:
-                    room_lower = room.lower().replace('_', ' ')
-                    if room_lower in friendly_name or room_lower in entity_lower:
-                        target_covers.append((entity_id, state_data))
-                elif 'garage' in query_lower:
-                    if 'garage' in friendly_name or 'garage' in entity_lower:
-                        target_covers.append((entity_id, state_data))
-                else:
-                    target_covers.append((entity_id, state_data))
-
-            if not target_covers:
-                return f"I couldn't find a garage door or cover matching '{room or 'your request'}'."
+            access_ids = [
+                e for e, s in covers.items() if access_target.is_access_cover(e, (s or {}).get('attributes'))
+            ]
+            matched = self._match_covers(covers, room, original_query)
 
             if action == "get_status":
+                if not matched:
+                    return "I couldn't find a garage door or cover for that."
+                if len(matched) == 1 and matched[0] in access_ids:
+                    self._record_access_decision(intent, matched[0], 'status')
                 statuses = []
-                for entity_id, state_data in target_covers:
-                    friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id.split('.')[-1].replace('_', ' '))
-                    state = state_data.get('state', 'unknown')
+                for entity_id in matched:
+                    state = covers[entity_id].get('state', 'unknown')
                     state_desc = "open" if state == "open" else "closed" if state == "closed" else state
-                    statuses.append(f"The {friendly_name} is {state_desc}")
+                    statuses.append(f"The {self._spoken_entity(entity_id, covers[entity_id])} is {state_desc}")
                 return ". ".join(statuses) + "."
+
+            if action not in ("open", "close"):
+                return "I'm not sure what you want to do with the garage door."
+
+            from . import write_fanout
+            opened_door = None
+            if action == "open":
+                plain_ids = [e for e in matched if e not in access_ids]
+                carried = self._honoured_carry(intent, 'cover', self._split_permitted(access_ids)[0], opening=True)
+                say_access = access_target.noun_present(original_query, 'cover')
+                if carried or not plain_ids or (original_query is not None and say_access):
+                    picked = await self._pick_access_cover(covers, access_ids, room, original_query, intent)
+                    if isinstance(picked, str):
+                        return picked
+                    target_ids, opened_door = picked, picked[0]
+                elif original_query is None and len(plain_ids) != len(matched):
+                    return ONE_DOOR_REFUSAL
+                else:
+                    target_ids = plain_ids
+            else:
+                if not matched:
+                    return "I couldn't find a garage door or cover for that."
+                target_ids = matched
 
             # ATHENA-128 4.3 (bob r2 (1)): unconditional gate dominates both
             # write branches.
-            from . import write_fanout
             _cover_service = "open_cover" if action == "open" else "close_cover"
             _cover_prompt = write_fanout.gate(
-                "cover", _cover_service, tuple(e for e, _ in target_covers), original_query, room=room,
+                "cover", _cover_service, tuple(target_ids), original_query, room=room,
             )
             if _cover_prompt:
                 return _cover_prompt
 
-            if action == "open":
-                await asyncio.gather(*[
-                    ha_client.call_service("cover", "open_cover", {"entity_id": entity_id})
-                    for entity_id, _ in target_covers
-                ])
-                cover_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_covers])
-                return f"Done! I've opened the {cover_names}."
-
-            if action == "close":
-                await asyncio.gather(*[
-                    ha_client.call_service("cover", "close_cover", {"entity_id": entity_id})
-                    for entity_id, _ in target_covers
-                ])
-                cover_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_covers])
-                return f"Done! I've closed the {cover_names}."
-
-            else:
-                return "I'm not sure what you want to do with the garage door."
+            await asyncio.gather(*[
+                ha_client.call_service("cover", _cover_service, {"entity_id": entity_id})
+                for entity_id in target_ids
+            ])
+            if opened_door is not None:
+                self._record_access_decision(intent, opened_door, 'open')
+            elif action == "close":
+                self._clear_access_decision(intent)
+            names = ', '.join(self._spoken_entity(e, covers[e]) for e in target_ids)
+            return f"Done! I've {'opened' if action == 'open' else 'closed'} the {names}."
 
         except Exception as e:
-            logger.error(f"Cover control error: {e}")
+            logger.error(f"Cover control error: {type(e).__name__}")
             return "I couldn't control the garage door right now."
+
+    async def _scene_grounded(self, entity_id: str, query: str) -> bool:
+        """Whether the utterance calls for this scene or script: it says one of
+        the server's own phrases for it (``SCENE_PHRASES``), or every
+        distinguishing word of its id, or of its name in Home Assistant. Words
+        like "scene", "script", "routine" and "mode" never count."""
+        query_lower = query.lower()
+        if any(mapped == entity_id and phrase in query_lower for phrase, mapped in SCENE_PHRASES.items()):
+            return True
+        said = frozenset(_words(query))
+        names = [entity_id.split('.', 1)[1]]
+        try:
+            entity = (await self.entity_manager.get_entities()).get(entity_id) or {}
+            friendly = (entity.get('attributes') or {}).get('friendly_name')
+            if isinstance(friendly, str):
+                names.append(friendly)
+        except Exception:
+            pass
+        for name in names:
+            wanted = frozenset(t for t in _words(name) if t not in _SCENE_NOT_DISTINGUISHING)
+            if wanted and wanted <= said:
+                return True
+        return False
 
     async def _handle_scene_intent(self, action: str, parameters: Dict, ha_client, original_query: str = None) -> str:
         """Handle scene and routine activation commands"""
@@ -4742,8 +5061,8 @@ Do NOT mention rooms that have no current or recent motion."""
         import logging
         logger = logging.getLogger(__name__)
 
-        entity_id = parameters.get('entity_id', '')
-        if not entity_id:
+        entity_id = parameters.get('entity_id', '') if isinstance(parameters, dict) else ''
+        if not entity_id or not isinstance(entity_id, str):
             return "I couldn't determine which scene or routine to activate."
 
         query_lower = (original_query or "").lower()
@@ -4759,7 +5078,12 @@ Do NOT mention rooms that have no current or recent motion."""
                 service = 'turn_on'
                 entity_type = 'routine'
             else:
-                return f"Unknown scene or routine: {entity_id}"
+                return UNKNOWN_SCENE_TEXT
+
+            # A scene or routine runs only when the words call for it: a
+            # model's pick is never enough, and the id is never echoed.
+            if original_query is not None and not await self._scene_grounded(entity_id, original_query):
+                return UNKNOWN_SCENE_TEXT
 
             # Computed unconditionally (not just on the success path): the
             # fallback-exhausted message below also references scene_name,
@@ -5502,8 +5826,8 @@ Return ONLY the JSON, no other text."""
             elif '```' in text:
                 text = text.split('```')[1].split('```')[0].strip()
 
-            intent = json.loads(text)
-            logger.info(f"Motion control intent extracted: {intent}")
+            intent = _model_object(text)
+            logger.info("Motion control intent extracted: keys=%s", sorted(intent.keys()))
             return intent
 
         except json.JSONDecodeError as e:

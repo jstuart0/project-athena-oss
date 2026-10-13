@@ -68,6 +68,7 @@ from orchestrator.context.detector import context_ref_view
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator import room_choice, room_context, write_fanout
 from orchestrator.room_choice import storable_intent as _storable_intent
+from orchestrator.turn_capture import audience_class_for
 
 logger = structlog.get_logger(__name__)
 
@@ -470,21 +471,63 @@ async def _store_room_choice(
     )
 
 
-_DECISION_KEYS = ("decided_room", "decided_rooms", "decided_excluded", "room_label")
+_ROOM_DECISION_KEYS = ("decided_room", "decided_rooms", "decided_excluded", "room_label")
+_ACCESS_DECISION_KEYS = (
+    "decided_access", "decided_access_fp", "decided_access_aud", "decided_access_src", "decided_access_at",
+)
 
 
 def _drop_decision(intent: Dict[str, Any]) -> None:
-    for key in _DECISION_KEYS + ("referent_followup",):
+    for key in room_context.SERVER_DECISION_KEYS:
         intent.pop(key, None)
 
 
-def _carry_decision(intent: Dict[str, Any], earlier: Dict[str, Any]) -> None:
+def _audience_class(state: OrchestratorState) -> str:
+    """The audience class of this turn, from the server-derived audience."""
+    return audience_class_for(state.knowledge_audience)
+
+
+def _stamp_access_decision(state: OrchestratorState, intent: Dict[str, Any]) -> None:
+    """The controller records which door a command acted on; the caller it
+    belongs to is known here, and only here."""
+    if intent.get("decided_access") and "decided_access_fp" not in intent:
+        intent["decided_access_fp"] = state.caller_fingerprint
+        intent["decided_access_aud"] = _audience_class(state)
+
+
+def _carry_access(
+    intent: Dict[str, Any], earlier: Dict[str, Any], *, fingerprint: Optional[str], audience: str,
+) -> None:
+    """A door decision from the earlier command ("unlock it") goes on only for
+    the same caller and audience and the same kind of door. Whether an
+    opening may still use it (replay, or recent enough) is the controller's
+    to say when it opens."""
+    carried = earlier.get("decided_access")
+    device_type = intent.get("device_type")
+    if (
+        not isinstance(carried, str) or device_type not in ("lock", "cover")
+        or not carried.startswith(f"{device_type}.")
+        or earlier.get("device_type") != device_type
+        or not fingerprint or earlier.get("decided_access_fp") != fingerprint
+        or earlier.get("decided_access_aud") != audience
+    ):
+        return
+    for key in _ACCESS_DECISION_KEYS:
+        if key in earlier:
+            intent[key] = earlier[key]
+
+
+def _carry_decision(
+    intent: Dict[str, Any], earlier: Dict[str, Any], *, fingerprint: Optional[str] = None, audience: str = "",
+) -> None:
     """A referent follow-up ("turn them off") acts where the earlier command
     did. After a whole-house command it is the same explicit scope, so the
-    fan-out gate treats it as one (no confirmation)."""
+    fan-out gate treats it as one (no confirmation). A door decision is
+    carried first (``_carry_access``), whatever the room decision was."""
+    _carry_access(intent, earlier, fingerprint=fingerprint, audience=audience)
     if not earlier.get("decided_room"):
         return
-    for key in _DECISION_KEYS:
+    for key in _ROOM_DECISION_KEYS:
         if key in earlier:
             intent[key] = earlier[key]
     intent["referent_followup"] = earlier["decided_room"] == "whole_house"
@@ -531,6 +574,7 @@ async def _execute_and_record(
     blk = write_fanout.take_block()
     choice = room_choice.take()
     clarification = room_choice.take_clarification()
+    _stamp_access_decision(state, intent)
 
     if clarification is not None:
         await _await_state_question_clarification(
@@ -643,7 +687,7 @@ async def _resolve_pending_room_choice(
         pending = {**pending, "reasked": True}
         again = room_context.ask_text(
             room_context.AskWhich(room_choice.candidate_refs(pending), pending.get("phrase") or "")
-            if pending.get("kind") == room_choice.KIND_WHICH else room_context.AskRoom()
+            if pending.get("kind") in (room_choice.KIND_WHICH, room_choice.KIND_ACCESS) else room_context.AskRoom()
         )
         state.answer = again
         if state.session_id:
@@ -664,7 +708,17 @@ async def _resolve_pending_room_choice(
     state.prev_context = None
     chosen = outcome.room
     intent = dict(pending.get("intent") or {})
-    smart_controller._set_decided(intent, chosen.key, chosen.label)
+    room_context.strip_server_keys(intent)
+    if pending.get("kind") == room_choice.KIND_ACCESS:
+        intent.update({
+            "decided_access": chosen.key,
+            "decided_access_fp": state.caller_fingerprint,
+            "decided_access_aud": _audience_class(state),
+            "decided_access_src": "replay",
+            "decided_access_at": time.time(),
+        })
+    else:
+        smart_controller._set_decided(intent, chosen.key, chosen.label)
     first_turn_query = pending.get("query") or ""
     await _execute_and_record(
         state, scope, intent, original_query=first_turn_query, uk=real_uk,
@@ -1013,6 +1067,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             device_type=uk.device_type or "unknown", path="write_blocked"
                         ).inc()
                     else:
+                        _stamp_access_decision(state, state_question_intent)
                         state.answer = sq_result
                         state.retrieved_data = {"intent": state_question_intent}
                         state_question_routed_total.labels(
@@ -1213,7 +1268,14 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # Now merge the intent itself
                         intent.update(new_intent)
                         intent['parameters'] = merged_params
-                        logger.info(f"LLM interpreted follow-up with context: {intent}")
+                        logger.info("LLM interpreted follow-up with context", keys=sorted(intent.keys()))
+
+                    # The merged intent holds the earlier command's stored
+                    # decisions. None of them is trusted as it stands: they are
+                    # stripped here, and only what _carry_decision puts back
+                    # (same caller, same audience) goes on.
+                    room_context.strip_server_keys(intent)
+                    follow_up = {"fingerprint": state.caller_fingerprint, "audience": _audience_class(state)}
 
                     # If a new room is named, the earlier decision is dropped and
                     # the command decides afresh; otherwise ("turn them off") it
@@ -1225,7 +1287,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     else:
                         if prev.get("entities", {}).get("room"):
                             intent['room'] = prev["entities"]["room"]
-                        _carry_decision(intent, prev_params)
+                        _carry_decision(intent, prev_params, **follow_up)
 
                     # Handle reversal patterns - "turn them back on", "turn it back off"
                     # ATHENA-128 (3.2(e)): skipped for STATE_QUESTION -- a
@@ -1267,7 +1329,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             if not new_room:
                                 if prev.get("entities", {}).get("room"):
                                     intent['room'] = prev["entities"]["room"]
-                                _carry_decision(intent, prev_params)
+                                _carry_decision(intent, prev_params, **follow_up)
                         logger.info(f"Modifier adjustment applied: {ref_info.get('ref_types')}")
 
                     # Ensure we have required fields
@@ -1300,7 +1362,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             state.node_timings["route_control"] = time.time() - start
                             return state
 
-                logger.info(f"Extracted intent: {intent}")
+                logger.info("Extracted intent", action=intent.get("action"), keys=sorted(intent.keys()))
 
                 # Execute the command (the original query feeds the room decision and
                 # the fan-out gate; the speaker's room is the default only where the

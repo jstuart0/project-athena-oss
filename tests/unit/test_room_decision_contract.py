@@ -150,7 +150,9 @@ def test_every_scheduled_step_carries_its_decision(monkeypatch):
 
 def test_the_executor_hands_the_decision_to_execute_intent():
     source = (Path(__file__).resolve().parents[2] / "src" / "orchestrator" / "sequence_executor.py").read_text()
-    assert "decided_room" in source
+    assert "SERVER_DECISION_KEYS" in source, "the executor copies the server's decision keys, from the one tuple"
+    from orchestrator.room_context import SERVER_DECISION_KEYS
+    assert "decided_room" in SERVER_DECISION_KEYS
 
 
 def test_the_speaker_room_default_is_applied_in_one_place():

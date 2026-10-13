@@ -9,8 +9,8 @@ confirmation (same fingerprint, expiry and one-use nonce rules). A read-only
 turn records a ``Clarification`` instead, answered through the existing
 state-question seam, so a question is never the start of a write.
 
-R2-C3: imports ``mode_permission.current_ha_scope``, ``room_context`` and
-``shared.config`` only.
+R2-C3: imports ``mode_permission.current_ha_scope``, ``room_context``,
+``access_target`` and ``shared.config`` only.
 
 A reply is read strictly (``match_reply``): the reply's words, less filler,
 must all belong to one candidate's name. A question or command cancels the
@@ -23,13 +23,16 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from orchestrator import room_context
+from orchestrator import access_target, room_context
 from orchestrator.mode_permission import current_ha_scope
 
 PENDING_KEY = "awaiting_room_choice"
 TTL = 60
 KIND_WHICH = "which"
 KIND_ROOM = "room"
+# "Which door?": the candidates are lock or cover entity ids, read by
+# ``access_target.match_reply``.
+KIND_ACCESS = "access"
 
 _now = time.time
 
@@ -38,7 +41,7 @@ _now = time.time
 class RoomChoice:
     """``intent`` is the JSON-safe intent to complete; ``candidates`` are the
     ``(key, label)`` rooms the question named (empty for "which room?");
-    ``kind`` is ``which`` or ``room``."""
+    ``kind`` is ``which``, ``room`` or ``access``."""
     intent: Mapping[str, Any]
     candidates: Tuple[Tuple[str, str], ...]
     phrase: str
@@ -66,20 +69,22 @@ def storable_intent(intent: Mapping[str, Any]) -> Dict[str, Any]:
     return kept
 
 
-def ask(intent: Mapping[str, Any], decision, *, record: bool = True, read: bool = False) -> str:
+def ask(
+    intent: Mapping[str, Any], decision, *, record: bool = True, read: bool = False, kind: Optional[str] = None,
+) -> str:
     """The question for an ``AskWhich`` or ``AskRoom``. On a write turn, and
     only when ``record`` (a turn with the user's own words to replay), the
     choice is recorded on the scope for the route to store; a read-only turn
     records a ``Clarification`` (as does any ``read`` command, so a question
     is never the start of a write). Nothing is recorded for a caller with no
-    scope."""
+    scope. ``kind`` overrides the kind of a "which one?" (``KIND_ACCESS``)."""
     text = room_context.ask_text(decision)
     scope = current_ha_scope()
     if scope is None:
         return text
     if isinstance(decision, room_context.AskWhich):
         candidates = tuple((c.key, c.label) for c in decision.candidates)
-        phrase, kind = decision.phrase, KIND_WHICH
+        phrase, kind = decision.phrase, kind or KIND_WHICH
     else:
         candidates, phrase, kind = (), "", KIND_ROOM
     if scope.read_only or read:
@@ -135,6 +140,14 @@ def read_reply(pending: Mapping[str, Any], reply: str, directory) -> room_contex
     subset of exactly one candidate; for "which room?" a single room the
     directory names, said on its own (a command or other words make it no
     answer)."""
+    if pending.get("kind") == KIND_ACCESS:
+        choice = access_target.match_reply(
+            reply, tuple(access_target.Ref(r.key, r.label) for r in candidate_refs(pending)),
+        )
+        as_room = lambda ref: room_context.RoomRef(ref.entity_id, ref.label)  # noqa: E731
+        return room_context.MatchResult(
+            choice.kind, as_room(choice.ref) if choice.ref else None, tuple(as_room(m) for m in choice.matches),
+        )
     if pending.get("kind") == KIND_WHICH:
         return room_context.match_reply(reply, candidate_refs(pending))
     words = room_context.tokens(reply)

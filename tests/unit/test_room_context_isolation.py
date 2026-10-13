@@ -51,7 +51,7 @@ def test_a_planted_import_is_caught():
 def test_room_choice_imports_only_what_its_contract_allows():
     names = imported_names((ROOT / "src/orchestrator/room_choice.py").read_text())
     internal = {n for n in names if n.startswith(("orchestrator", "shared"))}
-    allowed = ("orchestrator.room_context", "orchestrator.mode_permission")
+    allowed = ("orchestrator.room_context", "orchestrator.mode_permission", "orchestrator.access_target")
     assert all(n == "orchestrator" or n.startswith(allowed) for n in internal), internal
     assert "orchestrator.main" not in names
 

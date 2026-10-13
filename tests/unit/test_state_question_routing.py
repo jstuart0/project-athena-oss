@@ -724,7 +724,7 @@ def _drive_route_control(
 _ANSWER_TERMS = {
     "light": ("light",),
     "switch": ("switch",),
-    "lock": ("lock",),
+    "lock": ("lock", "door"),
     "cover": ("garage", "cover", "blind"),
     "climate": ("thermostat",),
     "media_player": ("tv", "media"),
