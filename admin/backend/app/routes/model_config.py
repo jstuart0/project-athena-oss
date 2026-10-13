@@ -129,7 +129,7 @@ class ModelConfigResponse(BaseModel):
 PRESET_CONFIGS = {
     "speed": {
         "name": "Speed Optimized",
-        "description": "Optimized for lowest latency",
+        "description": "Optimized for lowest latency. Its 2048 context is a floor: the router raises it for callers that need a whole long prompt, but a model that serves smart-home control should keep num_ctx 8192.",
         "temperature": 0.3,
         "ollama_options": {
             "num_ctx": 2048,

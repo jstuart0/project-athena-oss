@@ -194,7 +194,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
             "name": "ollama_qwen_small",
             "display_name": "Ollama Qwen Small",
             "description": "Balanced default for local Ollama deployments using tuned Qwen models.",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "last_validated": "2026-04-02",
             "preferred_models": [ollama_default, "qwen3:8b"],
             "preferred_families": ["qwen3"],
@@ -211,7 +211,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "max_tokens": 256,
                     "timeout_seconds": 45,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 2048, "num_batch": 256},
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256},
                 },
                 ollama_default: {
                     "backend_type": "ollama",
@@ -220,7 +220,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "timeout_seconds": 45,
                     "keep_alive_seconds": -1,
                     "ollama_options": {
-                        "num_ctx": 2048,
+                        "num_ctx": 8192,
                         "num_batch": 256,
                         "num_predict": 256,
                         "mirostat": 2,
@@ -234,7 +234,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "max_tokens": 384,
                     "timeout_seconds": 60,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 2048, "num_batch": 256, "num_predict": 256},
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256, "num_predict": 256},
                 },
             },
             "component_hints": {
@@ -246,7 +246,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
             "name": "mlx_qwen_hybrid",
             "display_name": "MLX Qwen Hybrid",
             "description": "Prefer MLX for low-latency local inference and fall back to Ollama for gaps.",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "last_validated": "2026-04-02",
             "preferred_models": [mlx_small, mlx_large, ollama_default, "qwen3:8b"],
             "preferred_families": ["qwen3"],
@@ -279,7 +279,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "max_tokens": 256,
                     "timeout_seconds": 45,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 2048, "num_batch": 256, "num_predict": 256},
+                    "ollama_options": {"num_ctx": 8192, "num_batch": 256, "num_predict": 256},
                 },
             },
             "component_hints": {
@@ -293,7 +293,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
             "name": "safe_fallback",
             "display_name": "Safe Fallback",
             "description": "Fallback profile when preferred tuned models are not available.",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "last_validated": "2026-04-02",
             "preferred_models": [ollama_default],
             "preferred_families": ["qwen3", "llama", "phi"],
@@ -310,7 +310,7 @@ def profile_registry() -> Dict[str, Dict[str, Any]]:
                     "max_tokens": 256,
                     "timeout_seconds": 45,
                     "keep_alive_seconds": -1,
-                    "ollama_options": {"num_ctx": 2048},
+                    "ollama_options": {"num_ctx": 8192},
                 },
             },
             "component_hints": {},
@@ -1405,6 +1405,9 @@ def apply_profile(db: Session, profile_name: str, mode: str, current_user: Optio
                 config = ModelConfiguration(model_name=decision.selected_model)
                 db.add(config)
                 db.flush()
+                # Several components select the same model: reuse the row just
+                # created (model_name is unique) instead of inserting it again.
+                model_config_map[decision.selected_model] = config
             for field_name, desired in config_spec.items():
                 apply_owned_field(config, field_name, desired, mode, ownership, "ModelConfiguration", decision.selected_model, profile_name, touched)
 
