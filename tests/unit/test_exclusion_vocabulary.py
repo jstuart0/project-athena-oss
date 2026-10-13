@@ -141,7 +141,7 @@ def test_the_guard_does_not_defer_a_word_that_contains_but(query):
 # Wordings outside the phrase list: they defer to the model, and the server
 # never answers them by writing the excluded room.
 OTHER_WORDINGS = [
-    "turn off all the lights without the galley", "turn off all the lights unless it is the galley",
+    "turn off all the lights without the galley", "turn off all the lights unless the galley",
     "turn off all the lights minus the galley", "turn off all the lights and skip the galley",
     "turn off all the lights, leave the galley on", "turn off all the lights and keep the galley on",
     "turn off all the lights exclude the galley", "turn off all the lights with the galley excluded",
@@ -263,20 +263,26 @@ def test_the_fast_paths_sit_behind_the_one_guard():
     tree = ast.parse(source)
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SmartHomeController")
     methods = {n.name: n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    callers = [m for m, node in methods.items()
-               if any(isinstance(c, ast.Attribute) and c.attr == "_fast_path_intent" for c in ast.walk(node))]
+    refs = lambda node, attr: [c for c in ast.walk(node) if isinstance(c, ast.Attribute) and c.attr == attr]  # noqa: E731
+    callers = [m for m, node in methods.items() if refs(node, "_fast_path_intent")]
     assert callers == ["extract_intent"], callers
-    calls = [n for n in ast.walk(methods["extract_intent"])
-             if isinstance(n, ast.Attribute) and n.attr == "_fast_path_intent"]
-    assert len(calls) == 1
-    guard = next(n for n in ast.walk(methods["extract_intent"])
-                 if isinstance(n, ast.If) and any(isinstance(c, ast.Attribute) and c.attr == "_defers_to_model"
-                                                  for c in ast.walk(n.test)))
-    assert any(isinstance(c, ast.Attribute) and c.attr == "_fast_path_intent" for b in guard.body for c in ast.walk(b))
-    # Every fast path lives in that one method: extract_intent has no `return {` of its own before the model call.
-    own_returns = [n for n in ast.walk(methods["extract_intent"]) if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
-    assert len(own_returns) <= 1, "a fast path answered outside _fast_path_intent, skipping the guard"
+    assert len(refs(methods["extract_intent"], "_fast_path_intent")) == 1
+    extract = methods["extract_intent"]
+    guard = next(n for n in ast.walk(extract) if isinstance(n, ast.If) and refs(n.test, "_defers_to_model"))
+    assert refs(guard, "_fast_path_intent") and guard.test is not None
+    returns = [n for n in ast.walk(extract) if isinstance(n, ast.Return)]
+    assert returns, "extract_intent returns something"
+    early = [n.lineno for n in returns if n.lineno < guard.lineno]
+    assert early == [], f"extract_intent answers before asking _defers_to_model: lines {early}"
     assert sum(1 for n in ast.walk(methods["_fast_path_intent"]) if isinstance(n, ast.Return)) >= 20
+
+
+def test_the_pin_would_catch_an_early_return():
+    planted = ast.parse("async def extract_intent(self, q):\n    if q:\n        return {}\n"
+                        "    if not self._defers_to_model(q):\n        return await self._fast_path_intent(q)\n").body[0]
+    guard = next(n for n in ast.walk(planted) if isinstance(n, ast.If) and any(
+        isinstance(c, ast.Attribute) and c.attr == "_defers_to_model" for c in ast.walk(n.test)))
+    assert [n.lineno for n in ast.walk(planted) if isinstance(n, ast.Return) and n.lineno < guard.lineno] == [3]
 
 
 def test_a_porch_exclusion_in_either_word_order_never_turns_the_porch_off(monkeypatch):
@@ -287,6 +293,168 @@ def test_a_porch_exclusion_in_either_word_order_never_turns_the_porch_off(monkey
             "action": "turn_off", "target_scope": "group", "parameters": {}})), directory=house)
         assert llm.calls == 1, query
         assert got["room"] == "whole_house" and got["excluded_rooms"] == ["porch"], (query, got)
+
+
+# ---------------------------------------------------------------------------
+# R1: a leading phrase with a whole-house cue is an exclusion
+# ---------------------------------------------------------------------------
+
+FRONT = [p for p in PHRASINGS]
+
+
+@pytest.mark.parametrize("phrasing", FRONT)
+@pytest.mark.parametrize("tail", ["turn off all the lights", "turn off every light", "turn everything off"])
+def test_a_leading_phrase_with_a_whole_house_cue_excludes_the_room(phrasing, tail):
+    query = f"{phrasing} the galley, {tail}"
+    assert rc.has_exclusion(query, HOUSE), query
+    mention = rc.find_room_mention(query, HOUSE)
+    decision = rc.decide_room(mention, query=query, speaker_room="galley", directory=HOUSE)
+    assert decision == rc.WholeHouse((GALLEY,)), (query, decision)
+    assert _controller()._defers_to_model(query) is False, "the room parser reads it, so no model is needed"
+
+
+@pytest.mark.parametrize("phrasing", FRONT)
+def test_a_leading_phrase_never_writes_the_galley(monkeypatch, phrasing):
+    query = f"{phrasing} the galley, turn off all the lights"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": "whole_house", "action": "turn_off", "target_scope": "group",
+              "parameters": {}}
+    asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert not set(rig.written) & GALLEY_LEAVES, (query, rig.written)
+    assert "light.galley_pair" not in rig.written and "light.galley_all" not in rig.written
+    assert "light.study_lamp" in rig.written, "the rest of the house is turned off"
+
+
+def test_without_a_cue_a_leading_phrase_is_still_an_opener():
+    assert rc.has_exclusion("besides the den, turn on the kitchen lights", OPENER_HOUSE) is False
+    assert rc.has_exclusion("aside from that, turn off all the lights in the kitchen", OPENER_HOUSE) is False
+
+
+# ---------------------------------------------------------------------------
+# R2: deferral words need a room, or what reads as one, after them
+# ---------------------------------------------------------------------------
+
+CASUAL = [
+    "turn off all the lights before we leave", "keep all the lights off",
+    "turn everything off, save power", "turn off everything outside",
+    "turn everything off and keep them off", "turn off all the lights, leave it off",
+]
+SPARING = [
+    "turn off all the lights, leave the porch on", "turn off all the lights and keep the hall lit",
+    "turn off all the lights, save the study", "turn off all the lights keep the porch on",
+]
+
+
+@pytest.mark.parametrize("query", CASUAL)
+def test_casual_use_of_a_deferral_word_stays_on_its_fast_path(query):
+    got, llm = _extract(query)
+    assert llm.calls == 0, (query, got)
+    assert got.get("room") == "whole_house" or got.get("action") in ("turn_off", "turn_on"), (query, got)
+    assert rc.decide_room(rc.find_room_mention(query, HOUSE), query=query, speaker_room="study",
+                          directory=HOUSE) != rc.AskRoom(), query
+
+
+@pytest.mark.parametrize("query", SPARING)
+def test_a_deferral_word_before_a_room_or_what_reads_as_one_reaches_the_model(query):
+    got, llm = _extract(query)
+    assert llm.calls == 1, (query, got)
+
+
+def test_a_deferral_word_that_is_a_rooms_own_name_is_a_room():
+    outside = rc.RoomDirectory.build(areas=[Area("area_outside", "Outside", (), "outside"), Area("area_den", "Den", (), "den")])
+    got, llm = _extract("turn off everything outside", directory=outside)
+    assert llm.calls == 0 and got.get("room") != "whole_house" or llm.calls == 0, got
+    assert rc.has_exclusion_deferral_word("turn off all the lights outside the den", outside) is False
+    assert rc.has_exclusion_deferral_word("turn off all the lights outside the galley", HOUSE) is True
+    assert rc.has_exclusion_deferral_word("turn off the outside lights", outside) is False
+
+
+# ---------------------------------------------------------------------------
+# R3: the model's exclusions are used only when they cover the utterance
+# ---------------------------------------------------------------------------
+
+def _model_whole_house(rig, excluded):
+    rig.controller.llm_router = _CountingLlm(json.dumps({
+        "device_type": "light", "room": "whole_house", "excluded_rooms": excluded,
+        "action": "turn_off", "target_scope": "group", "parameters": {}}))
+
+
+def _run_model_case(monkeypatch, query, excluded):
+    rig = Rig(monkeypatch, attic_state="on")
+    _model_whole_house(rig, excluded)
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query))
+    answer = asyncio.run(_execute(rig, intent, query, speaker="hall"))
+    return rig, answer
+
+
+def test_a_model_that_names_an_unknown_room_gets_an_ask_and_no_writes(monkeypatch):
+    rig, answer = _run_model_case(monkeypatch, "turn off all the lights, leave the galley on", ["sunroom"])
+    assert rig.written == [], rig.written
+
+
+def test_a_model_list_that_misses_a_named_room_gets_an_ask_and_no_writes(monkeypatch):
+    rig, answer = _run_model_case(monkeypatch, "turn off all the lights, leave the galley and the study on", ["galley"])
+    assert rig.written == [], rig.written
+
+
+def test_a_model_list_that_covers_every_named_room_turns_off_the_rest(monkeypatch):
+    rig, answer = _run_model_case(monkeypatch, "turn off all the lights, leave the galley and the study on",
+                                  ["galley", "study"])
+    assert "light.hall_lamp" in rig.written and "light.north_lamp" in rig.written, rig.written
+    assert not set(rig.written) & GALLEY_LEAVES and "light.study_lamp" not in rig.written
+
+
+def test_grounded_exclusion_rules_in_isolation():
+    q = "turn off all the lights, leave the galley and the study on"
+    assert rc.grounded_exclusion(q, ["galley", "study"], HOUSE) == (GALLEY, rc.RoomRef("study", "study"))
+    assert rc.grounded_exclusion(q, ["galley"], HOUSE) is None
+    assert rc.grounded_exclusion(q, ["galley", "sunroom"], HOUSE) is None
+    assert rc.grounded_exclusion("leave the galley on", ["galley", "sunroom"], HOUSE) is None
+    assert rc.grounded_exclusion("leave the galley on", ["galley"], HOUSE) == (GALLEY,)
+    assert rc.grounded_exclusion(q, "galley", HOUSE) is None
+    assert rc.grounded_exclusion(q, [], HOUSE) is None
+    assert rc.grounded_exclusion(q, [7], HOUSE) is None
+
+
+# ---------------------------------------------------------------------------
+# R4: "leave X on but turn off the rest"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("joiner", ["but", "and", "then"])
+@pytest.mark.parametrize("what", ["the galley", "the galley lights"])
+def test_leave_on_form_writes_every_room_but_the_one_kept(monkeypatch, joiner, what):
+    query = f"leave {what} on {joiner} turn off the rest"
+    rig = Rig(monkeypatch, attic_state="on")
+    rig.controller.llm_router = None
+    with mock.patch.object(shc, "get_admin_client", lambda: _Admin()):
+        intent = asyncio.run(rig.controller.extract_intent(query))
+    assert intent["room"] == "whole_house" and intent["excluded_rooms"] == ["galley"], (query, intent)
+    asyncio.run(_execute(rig, intent, query, speaker="galley"))
+    assert not set(rig.written) & GALLEY_LEAVES and "light.galley_all" not in rig.written, rig.written
+    assert "light.study_lamp" in rig.written and "light.hall_lamp" in rig.written
+
+
+def test_leave_on_form_is_read_from_the_words_alone(monkeypatch):
+    query = "leave the galley on but turn off the rest"
+    assert rc.decide_room(rc.find_room_mention(query, HOUSE), query=query, speaker_room="study",
+                          directory=HOUSE) == rc.WholeHouse((GALLEY,))
+
+
+def test_leave_on_form_with_other_exclusion_wording_is_not_trusted():
+    query = "leave the galley on but turn off the rest except the study"
+    assert rc.leave_on_exclusion(query, HOUSE) == ()
+    assert _controller()._defers_to_model(query) is True
+    assert rc.decide_room(rc.find_room_mention(query, HOUSE), query=query, speaker_room="study",
+                          directory=HOUSE) == rc.AskRoom()
+
+
+def test_leave_on_form_with_other_exclusion_wording_writes_nothing(monkeypatch):
+    query = "leave the galley on but turn off the rest except the study"
+    rig = Rig(monkeypatch, attic_state="on")
+    intent = {"device_type": "light", "room": None, "action": "turn_off", "target_scope": "group", "parameters": {}}
+    asyncio.run(_execute(rig, intent, query, speaker="hall"))
+    assert rig.written == [], rig.written
 
 
 def test_an_exclusion_with_no_whole_house_wording_never_defaults_to_the_speakers_room(monkeypatch):
@@ -488,10 +656,8 @@ ALLOWLIST = {
         "counts conjunctions to estimate how complex a request is",
     ("src/orchestrator/semantic_cache.py", "UNCACHEABLE_PATTERNS"):
         "a query with 'except' is never answered from the semantic cache; control answers are not cached at all",
-    ("src/orchestrator/smart_home_controller.py", "_LEAVE_ON_RE"):
-        "the 'leave X on but turn off the rest' form: the room is kept, not excluded, and it has its own reading",
-    ("src/orchestrator/smart_home_controller.py", "_fast_path_intent"):
-        "'everything but X' regex kept beside the vocabulary guard, plus the same inverted form",
+    ("src/orchestrator/smart_home_controller.py", "_EVERYTHING_BUT_RE"):
+        "'everything but X' regex kept beside the vocabulary guard; the room parser reads the exclusion itself",
 }
 
 _RE_CALLS = frozenset({"compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "split"})

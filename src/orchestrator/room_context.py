@@ -332,15 +332,20 @@ def _singular(token: str) -> Tuple[str, ...]:
     return tuple(forms)
 
 
-# What a phrase must follow, in the same utterance, to start an exclusion:
-# something it can take from (a quantifier, a whole-house word, a light noun)
-# or a room. At the front of a sentence ("besides the den, turn on the fan",
-# "no, not the bedroom, turn on the kitchen light") it is an opener, not an
-# exclusion, and the room it introduces is not a target either.
+# Whether a phrase starts an exclusion is decided here, from the words alone.
+# It does when it follows a scope (a quantifier, a whole-house word, a light
+# noun) or a room, or when it leads the utterance, names a room, and a
+# whole-house cue ("every light", "the whole house") appears anywhere:
+# "except the galley, turn off all the lights". Otherwise it is an opener
+# ("aside from that, ..." or "besides the den, turn on the kitchen fan"), and
+# the room it introduces is neither a target nor an exclusion.
 _SCOPE_WORDS = _UNIVERSAL_QUANTIFIERS | _LIGHT_NOUNS | frozenset({
-    "everything", "everywhere", "house", "whole", "entire", "rooms",
+    "everything", "everywhere", "house", "whole", "entire", "rooms", "rest", "others",
 })
-_OPENER_FILLER = frozenset({"the", "a", "an", "my", "our", "your"})
+_OBJECT_FILLER = frozenset({"the", "a", "an", "my", "our", "your", "for"})
+_STATE_WORDS = frozenset({"on", "off", "lit", "dark"})
+_TRAILING_DEFERRAL_WORDS = frozenset({"excluded", "excepted"})
+_PLAIN_WORDS = _OBJECT_FILLER | _SCOPE_WORDS | _NON_ROOM_TOKENS | frozenset({"it", "them", "that"})
 
 
 def _phrase_at(toks: Sequence[str], i: int) -> int:
@@ -351,30 +356,36 @@ def _phrase_at(toks: Sequence[str], i: int) -> int:
     return 0
 
 
+def _has_whole_house_cue(toks: Sequence[str]) -> bool:
+    text = " ".join(toks)
+    return bool(WHOLE_HOUSE_ROOM_RE.search(text) or WHOLE_HOUSE_LIGHT_RE.search(text))
+
+
 def _scan_exclusions(toks: Sequence[str], spans: Sequence[Tuple[int, int]]) -> Tuple[int, List[Tuple[int, int]]]:
     """(index where the exclusion clause starts, or ``len(toks)``; the token
     ranges of rooms an opener introduced)."""
     introduced: List[Tuple[int, int]] = []
+    cue = _has_whole_house_cue(toks)
     i = 0
     while i < len(toks):
         length = _phrase_at(toks, i)
         if not length:
             i += 1
             continue
-        if any(t in _SCOPE_WORDS for t in toks[:i]) or any(end <= i for _, end in spans):
-            return i, introduced
         end = i + length
-        for start, stop in spans:
-            if start >= end and all(t in _OPENER_FILLER for t in toks[end:start]):
-                introduced.append((start, stop))
+        objects = [(start, stop) for start, stop in spans
+                   if start >= end and all(t in _OBJECT_FILLER for t in toks[end:start])]
+        if any(t in _SCOPE_WORDS for t in toks[:i]) or any(e <= i for _, e in spans) or (cue and objects):
+            return i, introduced
+        introduced.extend(objects)
         i = end
     return len(toks), introduced
 
 
 def has_exclusion(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
-    """True when the utterance contains an exclusion: a phrase as whole tokens
-    ("button", "butler" and "about" do not contain "but") that follows a scope
-    or a room. Pass the directory so a room before the phrase counts."""
+    """True when the utterance contains an exclusion (see above): a phrase as
+    whole tokens ("button", "butler" and "about" do not contain "but").
+    Pass the directory so a room counts."""
     toks = tokens(query or "")
     spans = [(m.start, m.end) for m in _chosen_mentions(toks, directory)]
     return _scan_exclusions(toks, spans)[0] < len(toks)
@@ -382,19 +393,39 @@ def has_exclusion(query: Optional[str], directory: Optional[RoomDirectory] = Non
 
 def has_exclusion_wording(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
     """True when the utterance may carry an exclusion in any wording: an
-    exclusion phrase, a deferral word ("without", "exclude", "spare"...), or
-    "not <room>". The server cannot always tell which room is left out, so
-    callers treat this as 'do not act on the whole house unasked'."""
-    if has_exclusion(query, directory) or has_exclusion_deferral_word(query):
+    exclusion phrase, a deferral word that is followed by a room or by what
+    reads as one ("leave the porch on"), or "not <room>". The server cannot
+    always tell which room is left out, so callers treat this as 'do not act
+    on the whole house unasked'."""
+    if has_exclusion(query, directory) or has_exclusion_deferral_word(query, directory):
         return True
     toks = tokens(query or "")
     return any(m.start >= 1 and toks[m.start - 1] == "not" for m in find_room_mentions(query, directory))
 
 
-def has_exclusion_deferral_word(query: Optional[str]) -> bool:
-    """True when the utterance contains a word that may carry an exclusion
-    ("without", "unless", "minus", "skip", "leave", "keep", "exclude"...)."""
-    return any(t in EXCLUSION_DEFERRAL_WORDS for t in tokens(query or ""))
+def has_exclusion_deferral_word(query: Optional[str], directory: Optional[RoomDirectory] = None) -> bool:
+    """True when a deferral word ("without", "leave", "keep", "spare",
+    "exclude"...) is followed within three tokens by a room, or by a noun
+    phrase that ends in on, off, lit or dark and holds a word that is not a
+    scope or filler ("leave the porch on"). "Before we leave", "keep all the
+    lights off" and "save power" are not exclusions. A word that is itself a
+    room's name ("outside") is a room."""
+    toks = tokens(query or "")
+    spans = [(m.start, m.end) for m in _chosen_mentions(toks, directory)]
+    for i, tok in enumerate(toks):
+        if tok not in EXCLUSION_DEFERRAL_WORDS or any(start <= i < stop for start, stop in spans):
+            continue
+        if any(i < start <= i + 3 for start, _ in spans):
+            return True
+        if tok in _TRAILING_DEFERRAL_WORDS and any(i - 3 <= stop <= i for _, stop in spans):
+            return True  # "with the galley excluded"
+        window = toks[i + 1:i + 4]
+        for k, word in enumerate(window):
+            if word in _STATE_WORDS:
+                if any(w not in _PLAIN_WORDS for w in window[:k]):
+                    return True
+                break
+    return False
 
 
 def _chosen_mentions(toks: Sequence[str], directory: Optional[RoomDirectory]) -> List[RoomMention]:
@@ -670,16 +701,67 @@ def _excluded_rooms(query: str, directory: Optional[RoomDirectory]) -> Tuple[Roo
     return tuple(seen.values())
 
 
+# "leave the galley on but turn off the rest": the room named first is kept,
+# every other room is turned off.
+LEAVE_ON_RE = re.compile(
+    r"leave\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and|then)\s+turn\s+off",
+    re.IGNORECASE,
+)
+
+
+def leave_on_exclusion(query: Optional[str], directory: Optional[RoomDirectory] = None) -> Tuple[RoomRef, ...]:
+    """The rooms kept by the "leave X on but turn off the rest" form, or ().
+    The form counts only when no other exclusion wording remains once its
+    clause is removed. An ambiguous name keeps every room it could mean."""
+    text = query or ""
+    match = LEAVE_ON_RE.search(text)
+    if match is None or has_exclusion_wording(LEAVE_ON_RE.sub(" ", text), directory):
+        return ()
+    kept = find_room_mention(match.group(1), directory)
+    return tuple(kept.candidates) if kept.kind != "none" else ()
+
+
 def explicit_whole_house(query: Optional[str], directory: Optional[RoomDirectory] = None) -> Optional[WholeHouse]:
     """``WholeHouse`` when the wording asks for it: a room-quantifying cue
     ("the whole house") always; a light-quantifying cue ("all the lights")
-    unless a room is named outside an exclusion clause. None otherwise."""
+    unless a room is named outside an exclusion clause; the leave-on form.
+    None otherwise."""
     text = query or ""
+    kept = leave_on_exclusion(text, directory)
+    if kept:
+        return WholeHouse(kept)
     if WHOLE_HOUSE_ROOM_RE.search(text):
         return WholeHouse(_excluded_rooms(text, directory))
     if WHOLE_HOUSE_LIGHT_RE.search(text) and find_room_mention(text, directory).kind == "none":
         return WholeHouse(_excluded_rooms(text, directory))
     return None
+
+
+def grounded_exclusion(
+    query: Optional[str], model_excluded: object, directory: Optional[RoomDirectory],
+) -> Optional[Tuple[RoomRef, ...]]:
+    """The rooms a model's ``excluded_rooms`` leave out, or None when the list
+    is not safe to use: every name must be a room the directory knows, and
+    the list must cover every room the utterance names (an ambiguous name by
+    at least one of its rooms, and then by all of them). Anything less would
+    write a room the speaker meant to spare."""
+    directory = directory if directory is not None else _EMPTY
+    if not isinstance(model_excluded, list) or not model_excluded:
+        return None
+    refs: Dict[str, RoomRef] = {}
+    for name in model_excluded:
+        if not isinstance(name, str) or not name.strip():
+            return None
+        ref = directory.ref(room_key(name))
+        if ref is None:
+            return None
+        refs[ref.key] = ref
+    for mention in find_room_mentions(query, directory):
+        if not any(c.key in refs for c in mention.candidates):
+            return None
+        for candidate in mention.candidates:
+            refs.setdefault(candidate.key, candidate)
+    return tuple(refs.values())
 
 
 def decide_room(
@@ -709,6 +791,10 @@ def decide_room(
         # "all the lights without the galley", "...spare the galley": the
         # wording is an exclusion this parser does not read, so the room it
         # names is not a target and the house is not the answer.
+        return AskRoom()
+    if allow_whole_house and LEAVE_ON_RE.search(query or "") and not leave_on_exclusion(query, directory):
+        # The leave-on form with more exclusion wording in it: which rooms
+        # stay on is not something the words settle.
         return AskRoom()
     whole = explicit_whole_house(query, directory) if allow_whole_house else None
     if whole is not None:

@@ -610,7 +610,7 @@ class SmartHomeController:
         has_exclusion_keywords = room_context.has_exclusion(query_lower, self._directory())
         # Also check for "everything but X" or "all lights but X" patterns
         if not has_exclusion_keywords:
-            has_exclusion_keywords = bool(re.search(r'(everything|all\s+(the\s+)?lights?)\s+but\s+', query_lower))
+            has_exclusion_keywords = bool(self._EVERYTHING_BUT_RE.search(query_lower))
 
         whole_house_light_patterns = [
             ('all lights on', 'turn_on'),
@@ -952,21 +952,18 @@ class SmartHomeController:
 
             # SPECIAL CASE: "leave X on but turn off the rest" pattern
             # This is an inverted exclusion where the excluded room is mentioned FIRST
-            leave_on_pattern = self._LEAVE_ON_RE.search(query_lower)
-            if leave_on_pattern:
-                excluded = room_context.find_room_mention(leave_on_pattern.group(2).strip(), directory)
-                if excluded.kind != "none":
-                    kept = [c.key for c in excluded.candidates] if excluded.kind != "exact" else [excluded.candidates[0].key]
-                    logger.info(f"Leave-on exclusion: turning off all except {len(kept)} room(s)")
-                    return {
-                        "device_type": "light",
-                        "room": "whole_house",
-                        "excluded_rooms": kept,
-                        "action": "turn_off",
-                        "target_scope": "group",
-                        "parameters": {},
-                        "color_description": None
-                    }
+            kept_rooms = room_context.leave_on_exclusion(query_lower, directory)
+            if kept_rooms:
+                logger.info(f"Leave-on exclusion: turning off all except {len(kept_rooms)} room(s)")
+                return {
+                    "device_type": "light",
+                    "room": "whole_house",
+                    "excluded_rooms": [ref.key for ref in kept_rooms],
+                    "action": "turn_off",
+                    "target_scope": "group",
+                    "parameters": {},
+                    "color_description": None
+                }
 
             # Normal path: the wording and the rooms said decide (whole house,
             # several rooms joined by "and", one room, or none).
@@ -1810,18 +1807,13 @@ Return ONLY valid JSON."""
     def _explicit_whole_house(self, query: str):
         return room_context.explicit_whole_house(query, self._directory())
 
-    _LEAVE_ON_RE = re.compile(
-        r'leave\s+(the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and)\s+turn\s+off'
-    )
+    _EVERYTHING_BUT_RE = re.compile(r'(everything|all\s+(the\s+)?lights?)\s+but\s+')
 
     def _defers_to_model(self, query: str) -> bool:
         """True when no fast path may answer: the wording holds an exclusion
-        (a phrase after a scope or a room, a word like "without", "exclude" or
-        "spare", or "not <room>") and the room parser took no excluded room
-        out of it. The one guard for every fast path, asked before any runs.
-        The "leave X on but turn off the rest" form has its own reading."""
-        if self._LEAVE_ON_RE.search(query):
-            return False
+        (``room_context.has_exclusion_wording``) and the room parser took no
+        excluded room out of it. The one guard for every fast path, asked
+        before any runs."""
         if not room_context.has_exclusion_wording(query, self._directory()):
             return False
         return not self._room_fields(query, whole_house=True, multi=True).get("excluded_rooms")
@@ -2485,15 +2477,14 @@ Return ONLY valid JSON."""
 
     def _with_grounded_exclusions(self, decision, intent: Dict, query: Optional[str], directory, lights: bool):
         """An exclusion the parser cannot read ("leave the porch on") makes
-        ``decide_room`` ask. When the model's whole-house intent names the
-        excluded rooms, and each is a room the utterance itself names
-        (``_ground_intent_rooms``), those rooms are left out instead. Only
-        ever narrows the write."""
-        excluded = intent.get('excluded_rooms')
+        ``decide_room`` ask. The model's whole-house intent answers that ask
+        only when ``room_context.grounded_exclusion`` accepts its
+        ``excluded_rooms``: every name a known room, and every room the
+        utterance names covered. Anything less stays a question."""
         if not (lights and isinstance(decision, room_context.AskRoom) and intent.get('room') == 'whole_house'
-                and isinstance(excluded, list) and excluded and room_context.is_explicit_whole_house(query)):
+                and room_context.is_explicit_whole_house(query)):
             return decision
-        refs = tuple(room_context.RoomRef(room_key(r), self._spoken_room(r)) for r in excluded if isinstance(r, str) and r)
+        refs = room_context.grounded_exclusion(query, intent.get('excluded_rooms'), directory)
         return room_context.WholeHouse(refs) if refs else decision
 
     async def _resolve_ambiguous_room(
