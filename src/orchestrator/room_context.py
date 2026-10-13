@@ -104,6 +104,7 @@ SERVER_DECISION_KEYS: Tuple[str, ...] = (
     "decided_room", "decided_rooms", "decided_excluded", "room_label", "referent_followup",
     "decided_access", "decided_access_fp", "decided_access_aud", "decided_access_src", "decided_access_at",
     "unprocessable", "unprocessable_reason",
+    "decided_entity",
 )
 
 # A smart-home command longer than this many UTF-8 bytes is refused before any

@@ -782,3 +782,163 @@ class TestAStepTakesItsRoomAndDeviceFromItsOwnWords:
         assert names("light.galley_all", "Galley All", "turn on the hall light") is False
         assert names("light.x", "Light", "turn on the light") is False
         assert names("light.hall_lamp", None, "turn on the hall lamp") is True
+
+
+# ---------------------------------------------------------------------------
+# Reconcile r2: every step's device comes from the words, whatever its type,
+# and the executor writes only planner-grounded entities
+# ---------------------------------------------------------------------------
+
+EXTRA_DEVICES = {
+    "climate.thermostat": {"entity_id": "climate.thermostat", "state": "heat",
+                           "attributes": {"friendly_name": "Hallway Thermostat"}},
+    "media_player.tv": {"entity_id": "media_player.tv", "state": "off", "attributes": {"friendly_name": "Living Room TV"}},
+    "fan.ceiling": {"entity_id": "fan.ceiling", "state": "off", "attributes": {"friendly_name": "Study Fan"}},
+    "switch.coffee": {"entity_id": "switch.coffee", "state": "off", "attributes": {"friendly_name": "Coffee Maker"}},
+}
+
+
+def _devices(rig):
+    rig.manager._entities_cache = {**rig.manager._entities_cache, **EXTRA_DEVICES}
+    rig.manager._build_indexes()
+    return rig
+
+
+def _typed_step(device_type, action, entity_id=None, room=None, **params):
+    target = {"device_type": device_type}
+    if entity_id is not None:
+        target["entity_id"] = entity_id
+    if room is not None:
+        target["room"] = room
+    return {"action": action, "target": target, "parameters": params, "delay_after": 0, "at_time": None}
+
+
+class TestEveryStepsDeviceComesFromTheWords:
+    def _calls(self, rig):
+        return [(c.args[0], c.args[1], (c.args[2] or {}).get("entity_id")) for c in rig.raw.call_service.await_args_list]
+
+    def test_codexs_climate_step_carrying_a_light_writes_nothing(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "turn_on", "light.galley_all")]
+        text = rig.run(steps, "turn on the hall light")
+        assert text == shc.NO_DEVICE_TEXT
+        assert rig.raw.call_service.await_count == 0
+        assert "entity_id" not in steps[0]["target"]
+
+    def test_a_climate_step_with_a_room_and_a_dropped_entity_does_not_write_the_entity(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "turn_on", "light.galley_all", room="hall")]
+        assert rig.plan(steps, "turn on the hall light") is None
+        assert "entity_id" not in steps[0]["target"]
+        rig.run([_typed_step("climate", "turn_on", "light.galley_all", room="hall")], "turn on the hall light")
+        assert "light.galley_all" not in {c[2] for c in self._calls(rig)}
+
+    def test_a_plain_cover_step_whose_entity_is_not_named_and_has_no_room_is_refused(self, monkeypatch):
+        states = {"cover.den_blinds": cover_state("Den Blinds", "blind")}
+        rig = SequenceRig(monkeypatch, states)
+        steps = [step("open", {"device_type": "cover", "entity_id": "cover.den_blinds"})]
+        text = rig.run_plan(steps, "open the kitchen shades")
+        assert text == shc.NO_DEVICE_TEXT and rig.calls == []
+
+    def test_a_door_the_planner_resolved_is_marked_even_when_the_words_are_short(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("lock", {"device_type": "lock", "room": "front"})]
+        assert rig.run_plan(steps, "lock the front") is None
+        assert steps[0]["target"]["decided_entity"] == "lock.front_door"
+        assert ("lock", "lock", "lock.front_door") in rig.calls
+
+    @pytest.mark.parametrize("device_type,entity_id", [
+        ("light", "switch.coffee"), ("fan", "light.galley_all"), ("switch", "light.galley_all"),
+        ("media_player", "light.galley_all"), ("light", "climate.thermostat"),
+    ])
+    def test_a_mismatched_type_and_entity_domain_is_dropped(self, monkeypatch, device_type, entity_id):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step(device_type, "turn_on", entity_id)]
+        assert rig.plan(steps, "turn on the hall light") is None
+        assert "entity_id" not in steps[0]["target"] and "decided_entity" not in steps[0]["target"]
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_a_thermostat_named_by_its_friendly_name_is_kept_and_written(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", "climate.thermostat", temperature=70)]
+        assert rig.run(steps, "set the hallway thermostat to 70") is None
+        assert steps[0]["target"]["decided_entity"] == "climate.thermostat"
+        assert ("climate", "set_temperature", "climate.thermostat") in self._calls(rig)
+
+    @pytest.mark.parametrize("device_type,entity_id,query", [
+        ("media_player", "media_player.tv", "turn on the living room tv"),
+        ("fan", "fan.ceiling", "turn on the study fan"),
+        ("switch", "switch.coffee", "turn on the coffee maker"),
+    ])
+    def test_media_fan_and_switch_named_by_friendly_name_are_kept(self, monkeypatch, device_type, entity_id, query):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step(device_type, "turn_on", entity_id)]
+        assert rig.plan(steps, query) is None
+        assert steps[0]["target"]["entity_id"] == entity_id and steps[0]["target"]["decided_entity"] == entity_id
+
+    @pytest.mark.parametrize("device_type,entity_id", [
+        ("media_player", "media_player.tv"), ("fan", "fan.ceiling"), ("switch", "switch.coffee"),
+        ("climate", "climate.thermostat"),
+    ])
+    def test_the_same_entities_not_named_are_dropped(self, monkeypatch, device_type, entity_id):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step(device_type, "turn_on", entity_id, room="hall")]
+        rig.plan(steps, "turn on the hall light")
+        assert "entity_id" not in steps[0]["target"]
+
+    def test_a_model_forged_decided_entity_is_stripped(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "turn_on", "light.galley_all")]
+        steps[0]["target"]["decided_entity"] = "light.galley_all"
+        assert rig.run(steps, "turn on the hall light") == shc.NO_DEVICE_TEXT
+        assert rig.raw.call_service.await_count == 0
+        assert "decided_entity" in room_context.SERVER_DECISION_KEYS
+        parsed = {"steps": [{"action": "turn_on", "decided_entity": "x", "target": {"decided_entity": "x"}}]}
+        got = room_context.strip_server_keys(parsed)
+        assert "decided_entity" not in got["steps"][0] and "decided_entity" not in got["steps"][0]["target"]
+
+    def test_a_grounded_scene_is_marked(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("scene", "activate", "scene.movie_mode")]
+        assert rig.plan(steps, "movie mode") is None
+        assert steps[0]["target"]["decided_entity"] == "scene.movie_mode"
+
+    def test_a_planned_lock_step_still_runs(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("lock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.run_plan(steps, "lock the front door") is None
+        assert steps[0]["target"]["decided_entity"] == "lock.front_door"
+        assert ("lock", "lock", "lock.front_door") in rig.calls
+
+
+class TestTheExecutorWritesOnlyPlannerGroundedEntities:
+    @pytest.mark.parametrize("target", [
+        {"device_type": "light", "entity_id": "light.galley_all"},
+        {"device_type": "climate", "entity_id": "light.galley_all"},
+        {"device_type": "light", "entity_id": "light.galley_all", "decided_entity": "light.other"},
+        {"device_type": "light", "entity_id": "light.galley_all", "decided_entity": True},
+    ])
+    def test_an_unmarked_or_mismarked_entity_is_refused(self, monkeypatch, target):
+        from orchestrator.sequence_executor import UNGROUNDED_ENTITY_STEP_REFUSAL
+        rig = SequenceLightRig(monkeypatch)
+        executor = SequenceExecutor(rig.controller, rig.raw)
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await executor._execute_step(
+                    {"action": "turn_on", "target": target, "parameters": {}}, 1, 1)
+
+        assert asyncio.run(go()) == UNGROUNDED_ENTITY_STEP_REFUSAL
+        assert rig.raw.call_service.await_count == 0
+
+    def test_a_marked_entity_is_written(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        executor = SequenceExecutor(rig.controller, rig.raw)
+        target = {"device_type": "light", "entity_id": "light.hall_lamp", "decided_entity": "light.hall_lamp"}
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await executor._execute_step({"action": "turn_on", "target": target, "parameters": {}}, 1, 1)
+
+        asyncio.run(go())
+        assert rig.raw.call_service.await_count == 1

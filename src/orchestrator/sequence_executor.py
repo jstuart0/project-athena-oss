@@ -23,6 +23,7 @@ from shared.local_time import local_now, local_tz
 logger = logging.getLogger(__name__)
 
 _READ_ACTIONS = frozenset({"get_status", "status", "check", "read"})
+UNGROUNDED_ENTITY_STEP_REFUSAL = "I didn't run that step because I couldn't tell which device you meant."
 ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 
 # ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
@@ -360,6 +361,12 @@ class SequenceExecutor:
 
         if await self._opening_unplanned(target, action):
             return ONE_DOOR_STEP_REFUSAL
+
+        if entity_id and target.get('decided_entity') != entity_id:
+            # Only the planner names a device (decided_entity, which a model
+            # cannot set): a bare model entity id never reaches a write.
+            logger.warning("sequence_entity_refused", extra={"reason": "entity_not_grounded"})
+            return UNGROUNDED_ENTITY_STEP_REFUSAL
 
         if entity_id and action in _READ_ACTIONS:
             # A read is not a service: there is nothing to call.

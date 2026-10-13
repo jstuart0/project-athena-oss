@@ -199,6 +199,7 @@ _DECIDED_DOMAINS = {
     "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
 }
 _NO_SPEAKER_ROOM = ("unknown", "guest")
+NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -2808,6 +2809,7 @@ Return ONLY valid JSON."""
         target['device_type'] = domain
         if not opening:
             target['entity_id'] = entity_id
+            target['decided_entity'] = entity_id
             return
         target.pop('entity_id', None)
         target['decided_access'] = entity_id
@@ -2847,17 +2849,31 @@ Return ONLY valid JSON."""
         clauses = room_context.step_clauses(query, directory)
         for index, step in enumerate(steps):
             target = step.get('target') or {}
-            domain = _DECIDED_DOMAINS.get(target.get('device_type', 'light'))
-            if not domain:
-                continue
+            device_type = target.get('device_type', 'light')
+            domain = _DECIDED_DOMAINS.get(device_type)
             # The step's own words: its clause when the clauses line up with
             # the steps, else the whole utterance.
             clause = clauses[index] if len(clauses) == len(steps) else query
-            if target.get('entity_id') and await self._entity_named_in(
-                target['entity_id'], clause, query, directory,
-            ):
+            dropped = False
+            if target.get('entity_id') and target.get('decided_entity') != target['entity_id']:
+                # Every step, whatever its device type: a model's entity id
+                # stands only where the words call that entity by name (a
+                # scene or routine was grounded above, a door by the door
+                # planner). The executor writes no other.
+                entity_id = target['entity_id']
+                if (isinstance(entity_id, str) and entity_id.startswith(('scene.', 'script.'))) or (
+                    await self._entity_named_in(entity_id, clause, query, directory)
+                ):
+                    target['decided_entity'] = entity_id
+                else:
+                    target.pop('entity_id', None)
+                    dropped = True
+            if not domain:
+                if dropped and not target.get('room'):
+                    return NO_DEVICE_TEXT
                 continue
-            target.pop('entity_id', None)
+            if target.get('entity_id'):
+                continue
             intent = {k: v for k, v in target.items() if k in ('device_type', 'room', 'rooms')}
             if intent.get('room') != 'whole_house':
                 self._ground_step_room(intent, clause, query, directory)
