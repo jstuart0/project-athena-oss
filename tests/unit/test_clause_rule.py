@@ -69,6 +69,13 @@ NARRATION = [
     "turn off the lights, my son said",
     "dim them, the TV says",
     '"turn off the lights"',
+    # Names and bare plurals as the subject (M2), and a modal question about others (L4).
+    "Sarah wants the lights blue",
+    "Mike turns the lights off every night",
+    "kids keep the lights on all night",
+    "Mike puts Netflix on every night",
+    "can the kids turn off the lights",
+    "I like the lights blue",
 ]
 # A condition: not immediate. No controller write; the agent route is as at base.
 CONDITIONAL = ["if it gets dark, turn on the porch light"]
@@ -109,6 +116,12 @@ COMMANDS = [
     ("after dinner dim the lights", IMPERATIVE, "after dinner dim the lights"),
     ("it's dark, turn on the lights", IMPERATIVE, "turn on the lights"),
     ("make them a pretty blue", IMPERATIVE, "make them a pretty blue"),
+    # Copula lead-ins with a pronoun subject are no narrative lead (ian High).
+    ("we're home, turn on the lights", IMPERATIVE, "turn on the lights"),
+    ("we are leaving, lock the door", IMPERATIVE, "lock the door"),
+    ("you're right, turn it off", IMPERATIVE, "turn it off"),
+    ("I'm back, turn on the lights", IMPERATIVE, "turn on the lights"),
+    ("porch light off", IMPERATIVE, "porch light off"),
     ('I said "turn off the lights"', IMPERATIVE, "I said turn off the lights"),
     ("turn the lights on, I love it", IMPERATIVE, "turn the lights on"),
     ("can you turn off the lights", IMPERATIVE, "can you turn off the lights"),
@@ -126,8 +139,9 @@ def test_a_command_row_keeps_exactly_its_command_clauses(utterance, kind, comman
     assert (uk.kind, uk.command_text) == (kind, command_text)
     # Hostile writes are judged on the command's words: an on/off or colour
     # the command does not carry never gets a cue from the narration.
-    action = "set_color" if "blue" in uk.command_text else "turn_on"
-    assert write_cue_problem("light", action, uk.command_text, kind_hint=uk.kind) is None
+    device = uk.device_type or "light"
+    action = "set_color" if "blue" in uk.command_text else ("lock" if device == "lock" else "turn_on")
+    assert write_cue_problem(device, action, uk.command_text, kind_hint=uk.kind) is None
 
 
 # Requests said without a verb at the front: UNKNOWN, and the words still back a write.
@@ -135,6 +149,9 @@ UNKNOWN_REQUESTS = [
     ("lights please", "light", "turn_on"),
     ("blue lights in the den", "light", "set_color"),
     ("lights cool white please", "light", "set_color"),
+    ("then at 11 turn off all the lights", "light", "turn_off"),
+    ("I'd like the lights blue", "light", "set_color"),
+    ("I would like the lights blue", "light", "set_color"),
     # First-person requests (UNKNOWN + the T-S exemption).
     ("I want the lights blue", "light", "set_color"),
     ("I would like the kitchen lights on", "light", "turn_on"),
@@ -355,3 +372,103 @@ def test_the_harness_sees_a_write_when_the_gate_is_open():
             mock.patch("orchestrator.access_target.cue_text", side_effect=lambda q, names=(): q):
         state, _model, client = drive_control("those hall lights look great")
     assert writes(client), state.answer
+
+
+# --- the review round: window, carried cue, fragments, the agent ------------------------------
+
+
+def test_the_analysis_window_is_the_extractors_cap():
+    from orchestrator import room_context
+    from orchestrator.utterance_kind import MAX_CLASSIFIED_CHARS
+    assert MAX_CLASSIFIED_CHARS == room_context.SMART_HOME_MAX_QUERY_BYTES
+
+
+def test_nothing_past_the_old_window_drives_a_write():
+    chatter = " ".join(["the weather was grey and the street was quiet for a long while"] * 4) + "."
+    text = f"turn on the hall light. {chatter} they like it red, make the porch red"
+    assert 300 < len(text) < 1000
+    state, model, client = drive_control(text)
+    assert writes(client) == [("light", "turn_on", ("light.hall_lamp",))], (writes(client), state.answer)
+    assert all("red" not in q for q in model.queries)
+
+
+def test_a_carried_cue_does_not_back_narration():
+    state, client = drive_followup_rows("turn off the kitchen lights", "turn_off", "they turn them off at night")
+    assert writes(client) == [], (writes(client), state.answer)
+
+
+def test_a_carried_cue_still_backs_a_follow_up_command():
+    from ._clause_harness import drive_followup
+    state, client = drive_followup("turn off the kitchen lights", "turn_off", "do the same in the hall")
+    assert state.answer  # the follow-up path ran
+
+
+def drive_followup_rows(prev_query, prev_action, query):
+    from ._clause_harness import drive_followup
+    return drive_followup(prev_query, prev_action, query)
+
+
+def test_the_carried_cue_function_refuses_narration_and_joins_commands():
+    from orchestrator.nodes import route_control as rc
+    from orchestrator.state import OrchestratorState
+    state = OrchestratorState(query="")
+    state.mode = "owner"
+    state.permissions = {"mode": "owner"}
+    state.caller_fingerprint = "fp-1"
+    params = {"write_cue": {"fp": "fp-1", "aud": rc._audience_class(state), "device_type": "light",
+                            "action": "turn_off", "query": "turn off the kitchen lights"}}
+    intent = {"device_type": "light", "action": "turn_off"}
+    state.query = "they turn them off at night"
+    assert rc._carried_cue_query(params, intent, state) is None
+    state.query = "turn them off again"
+    assert rc._carried_cue_query(params, intent, state) == "turn off the kitchen lights. turn them off again"
+    state.query = "off again"
+    assert rc._carried_cue_query(params, intent, state) == "turn off the kitchen lights. off again"
+
+
+def test_a_fragment_after_a_comma_runs_no_routine():
+    state, model, client = drive_control("turn on the hall light, heading out")
+    assert writes(client) == [("light", "turn_on", ("light.hall_lamp",))], (writes(client), state.answer)
+
+
+def test_a_failing_analysis_fails_closed(monkeypatch):
+    from orchestrator import utterance_kind as uk
+    from orchestrator.utterance_kind import cue_text, has_narration, is_narration
+
+    def boom(*a, **k):
+        raise RuntimeError("planted")
+
+    monkeypatch.setattr(uk, "_analyze_cached", boom)
+    assert cue_text("turn on the lights") == ""
+    assert is_narration("turn on the lights") is True
+    assert has_narration("turn on the lights") is True
+    assert access_target.media_write_allowed(UNKNOWN, "play jazz") is False
+    assert write_cue_problem("light", "turn_on", "turn on the lights") == NO_CUE
+
+
+@pytest.mark.parametrize("utterance", [
+    "turn off the lights, I love it and the kids never sleep",
+    "the kids like it dark, turn off the lights at ten",
+], ids=str)
+def test_the_agents_create_tool_refuses_when_any_clause_is_narration(utterance):
+    create = ("create_automation", {"name": "Lights", "trigger": {"type": "time", "time": "22:00"},
+                                    "actions": [{"type": "service", "entity_id": "light.office_0",
+                                                 "service": "turn_off"}]})
+    h = _agent_calls_after(utterance, *create)
+    assert h.client.create_automation.await_count == 0 and h.admin_writes() == [], utterance
+
+
+@pytest.mark.parametrize("domain,service", [
+    ("input_boolean", "turn_on"), ("automation", "trigger"), ("alarm_control_panel", "alarm_disarm"),
+    ("scene", "turn_on"), ("script", "turn_on"),
+], ids=str)
+def test_the_agents_service_tool_judges_domains_outside_the_device_kinds(domain, service):
+    args = {"domain": domain, "service": service, "entity_id": f"{domain}.thing"}
+    h = _agent_calls_after("the kids use the thing all night", "ha_service", args)
+    assert h.client.call_service.await_count == 0, (domain, h.client.call_service.await_args_list)
+
+
+def test_a_command_still_reaches_a_domain_outside_the_device_kinds():
+    args = {"domain": "input_boolean", "service": "turn_on", "entity_id": "input_boolean.thing"}
+    h = _agent_calls_after("turn on the thing", "ha_service", args)
+    assert h.client.call_service.await_count == 1

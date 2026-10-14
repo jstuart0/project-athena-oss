@@ -27,7 +27,7 @@ from shared.output_channel import render_sink_text
 from orchestrator import access_target
 from orchestrator.model_safe_errors import make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
-from orchestrator.utterance_kind import UtteranceKind, classify_utterance, command_query, is_narration
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance, command_query, has_narration, is_narration
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
 # in sequence_executor.py.
@@ -42,38 +42,51 @@ _SERVICE_KINDS = {
     "light": "light", "switch": "switch", "fan": "fan", "media_player": "media_player", "climate": "climate",
     "cover": "cover", "lock": "lock", "script": "script",
 }
-_COMMAND_ONLY_KINDS = frozenset({"cover", "lock", "script"})
+_COMMAND_ONLY_KINDS = frozenset({"cover", "lock"})
 
 
-def _narration_refusal(context: Any) -> Optional[str]:
-    """The no-request answer when the words the agent was given are narration
-    ("they turn the lights off at night"): none of its write tools acts on
-    them. None when the words hold a request, a condition or an automation."""
+async def _assistant_names() -> tuple:
+    from orchestrator.helpers import configured_assistant_names  # lazy: helpers imports the nodes package
+    try:
+        return tuple(await configured_assistant_names())
+    except Exception:
+        return ()
+
+
+def _narration_refusal(context: Any, names: tuple = ()) -> Optional[str]:
+    """The no-request answer when any clause of the words the agent was given
+    is narration ("they turn the lights off at night"): none of its write
+    tools acts on them. None when the words hold only requests, conditions or
+    an automation."""
     query = context.get("query") if isinstance(context, dict) else None
-    if isinstance(query, str) and is_narration(query):
+    if isinstance(query, str) and (has_narration(query, names) or is_narration(query, names)):
         from orchestrator.smart_home_controller import NO_WRITE_CUE_TEXT  # lazy, like mode_permission (see above)
         return NO_WRITE_CUE_TEXT
     return None
 
 
-def _service_cue_refusal(domain: Any, service: Any, context: Any) -> Optional[str]:
+def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple = ()) -> Optional[str]:
     """An immediate service call needs a cue in the words, judged by the same
-    rule the controller applies to a spoken command."""
+    rule the controller applies to a spoken command. A domain with no device
+    kind of its own (an input boolean, an automation, an alarm panel) needs a
+    command."""
     query = context.get("query") if isinstance(context, dict) else None
-    kind = _SERVICE_KINDS.get(str(domain).lower())
-    if not isinstance(query, str) or kind is None:
+    if not isinstance(query, str):
         return None
+    domain_key = str(domain).lower()
+    kind = _SERVICE_KINDS.get(domain_key, domain_key)
     from orchestrator.smart_home_controller import (  # lazy, like mode_permission (see above)
         NO_DEVICE_TEXT, NO_WRITE_CUE_TEXT, scene_request_allowed,
     )
-    uk = classify_utterance(query)
+    uk = classify_utterance(query, assistant_names=names)
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return None  # a question's write is stopped by the read-only scope or the fan-out gate
-    if kind in _COMMAND_ONLY_KINDS and uk.kind != UtteranceKind.IMPERATIVE:
-        return None if kind == "script" and scene_request_allowed(uk) and uk.core_text else NO_WRITE_CUE_TEXT
+    if kind in ("scene", "script"):
+        return None if scene_request_allowed(uk) else NO_WRITE_CUE_TEXT
+    if kind in _COMMAND_ONLY_KINDS or kind not in _SERVICE_KINDS.values():
+        return None if uk.kind == UtteranceKind.IMPERATIVE else NO_WRITE_CUE_TEXT
     problem = access_target.write_cue_problem(
-        kind, service, command_query(uk, query), kind_hint=uk.kind,
-        whole_scene_phrase=scene_request_allowed(uk),
+        kind, service, command_query(uk, query), kind_hint=uk.kind, assistant_names=names,
     )
     if problem is None:
         return None
@@ -947,7 +960,8 @@ class AutomationAgent:
         refusal = write_fanout.question_refusal(domain, service, (entity_id,) if entity_id else ())
         if refusal:
             return refusal
-        refusal = _narration_refusal(context) or _service_cue_refusal(domain, service, context)
+        names = await _assistant_names()
+        refusal = _narration_refusal(context, names) or _service_cue_refusal(domain, service, context, names)
         if refusal:
             return refusal
 
@@ -978,7 +992,7 @@ class AutomationAgent:
         refusal = write_fanout.question_refusal("automation", "create", (args.get("name") or "automation",))
         if refusal:
             return refusal
-        refusal = _narration_refusal(context)
+        refusal = _narration_refusal(context, await _assistant_names())
         if refusal:
             return refusal
 
@@ -1457,7 +1471,7 @@ class AutomationAgent:
         )
         if refusal:
             return refusal
-        refusal = _narration_refusal(context)
+        refusal = _narration_refusal(context, await _assistant_names())
         if refusal:
             return refusal
 
@@ -1525,7 +1539,7 @@ class AutomationAgent:
         refusal = write_fanout.question_refusal("notify", "notify", (args.get("target", "tts"),))
         if refusal:
             return refusal
-        refusal = _narration_refusal(context)
+        refusal = _narration_refusal(context, await _assistant_names())
         if refusal:
             return refusal
 
@@ -1627,7 +1641,7 @@ class AutomationAgent:
             await self.ha_client.call_service("light", "turn_on", restore_data)
 
 
-def should_use_automation_agent(query: str) -> bool:
+def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     """
     Determine if a query should be handled by the automation agent.
 
@@ -1646,7 +1660,7 @@ def should_use_automation_agent(query: str) -> bool:
     query_lower = query.lower()
 
     # Words that only describe what someone does or says ask for nothing.
-    if is_narration(query):
+    if is_narration(query, assistant_names):
         return False
 
     # EXCLUSIONS FIRST - these should NEVER go to automation agent

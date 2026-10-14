@@ -59,7 +59,7 @@ STATE_QUESTION_KILL_SWITCH_FLAG = "state_question_routing_kill_switch"
 # Cost bound (the classifier runs on the event loop before any permission
 # check): only a prefix is classified, and every gap between two frame
 # words is a bounded, clause-local run -- no unbounded `.*` chains.
-MAX_CLASSIFIED_CHARS = 300
+MAX_CLASSIFIED_CHARS = 1000  # = room_context.SMART_HOME_MAX_QUERY_BYTES: the analysis sees all the extractor does
 _GAP = r"[^?.,]{0,80}?"
 
 _FILLER_WORDS = ("hey", "ok", "okay", "so", "um", "uh")
@@ -72,7 +72,6 @@ _CLAUSE_SPLIT_RE = re.compile(r"\?|\.|,| and | then ")
 
 _REQUEST_PREFIXES = (
     "is it possible to", "would it be possible to", "are you able to",
-    "is it ok to", "is it okay to", "would it be ok to", "would it be okay to",
     "do you think you could", "do you think you can", "would you be able to",
     "can i get you to", "could i get you to",
     "i'd like you to", "i would like you to",
@@ -404,6 +403,7 @@ _FINITE_VERBS = frozenset({
     "think", "thinks", "come", "comes", "go", "goes", "went", "makes", "like", "likes",
 })
 _DETERMINER_VERB_WINDOW = 6
+_MODAL_STARTERS = frozenset({"can", "could", "will", "would", "should"})
 _QUESTION_STARTERS = frozenset({
     "is", "are", "was", "were", "did", "do", "does", "has", "have", "can", "could", "will", "would", "should",
 })
@@ -424,7 +424,7 @@ _ENVIRONMENT_WORDS = frozenset({"dark", "bright", "dim", "cold", "hot", "warm", 
 _ENVIRONMENT_ADVERBS = frozenset({
     "too", "so", "really", "very", "kind", "of", "a", "bit", "little", "quite", "rather", "pretty",
 })
-_DESIRE_VERBS = frozenset({"want", "need", "like"})
+_DESIRE_VERBS = frozenset({"want", "need"})
 # "I want to watch Netflix": a request for media, though not a control verb.
 _MEDIA_REQUEST_VERBS = frozenset({"watch", "listen"})
 _REQUEST_OBJECT_WORDS = frozenset({"on", "off", "it", "them", "everything", "all", "some"})
@@ -658,7 +658,9 @@ def _request_form(ws: Sequence[str]) -> bool:
             return False
     elif rest and rest[0] == "would":
         rest = rest[1:]
-    if not rest or rest[0] not in _DESIRE_VERBS:
+    # "like" is a request only as "I'd like" / "I would like"; "I like the lights blue" is a taste.
+    would_like = "'d" in ws[0] or (len(ws) > 1 and ws[1] == "would")
+    if not rest or not (rest[0] in _DESIRE_VERBS or (rest[0] == "like" and would_like)):
         return False
     rest = rest[1:]
     if not rest:
@@ -685,6 +687,39 @@ def _negated_first_person(ws: Sequence[str]) -> bool:
     if base not in ("i", "we", "you") or len(ws) < 2:
         return False
     return ws[1] in _FIRST_PERSON_NEGATORS or (ws[1] == "do" and ws[2:3] == ["not"])
+
+
+def _copula_lead(ws: Sequence[str]) -> bool:
+    """The clause's verb is a copula: "we're home", "you are right", "I'm back"."""
+    first = ws[0]
+    if "'" in first and first.split("'", 1)[1] in ("s", "m", "re"):
+        return True
+    return len(ws) > 1 and ws[1] in _COPULAS
+
+
+_THIRD_PERSON_CONTROL_FORMS = frozenset({
+    "turns", "switches", "dims", "puts", "sets", "plays", "starts", "stops", "locks", "opens", "closes",
+    "leaves", "keeps", "makes", "wants", "needs", "likes", "watches", "pauses", "raises", "lowers",
+})
+_BARE_SUBJECT_WINDOW = 4
+
+
+def _bare_subject_narration(ws: Sequence[str]) -> bool:
+    """A name or a bare plural before a finite verb ("Sarah wants the lights
+    blue", "Mike turns the lights off", "kids keep the lights on"). A first word
+    that is a device, a colour, an on/off word, a filler, a time or a control
+    verb is not a subject."""
+    first = ws[0]
+    if (
+        first in _LEADING_FILLERS or first == "please" or first in _COLOUR_BRIGHTNESS_WORDS
+        or first in _TIME_WORDS or first[0].isdigit()
+        or first in ("on", "off") or _DEVICE_NOUN_RE.fullmatch(first) or _CONTROL_VERB_RE.match(first)
+    ):
+        return False
+    return any(
+        (w in _FINITE_VERBS and w not in _COPULAS) or w in _THIRD_PERSON_CONTROL_FORMS
+        for w in ws[1:1 + _BARE_SUBJECT_WINDOW]
+    )
 
 
 def _determiner_narration(ws: Sequence[str]) -> bool:
@@ -736,6 +771,8 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
     first = ws[0]
     if first in _SUBORDINATORS or (first in _TIME_SUBORDINATORS and not _unwrap_time_phrase(ws)[1]):
         return False, True, False
+    if first in _MODAL_STARTERS and len(ws) > 1 and ws[1] != "you":
+        return True, False, False  # "can the kids turn off the lights": a question about others
     if first in _QUESTION_STARTERS:
         return False, False, False  # a question: the state-question rules own it
     if _reports_speech(ws):
@@ -751,7 +788,8 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
     if base in _PRONOUN_SUBJECTS:
         if _environment_form(ws) or _request_form(ws) or _negated_first_person(ws):
             return False, False, False
-        return True, False, base in _NARRATIVE_SUBJECTS
+        # A copula lead-in ("we're home, turn on the lights") is no narrative lead (G4).
+        return True, False, base in _NARRATIVE_SUBJECTS and not _copula_lead(ws)
     if _determiner_narration(ws):
         # A copula lead-in ("the porch is lit, turn on the hall light") is no
         # narrative lead (G4); a finite verb of doing is.
@@ -768,6 +806,8 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
     if _evaluation_narration(ws):
         return True, False, False
     if _subject_before_strong_verb(ws):
+        return True, False, True
+    if _bare_subject_narration(ws):
         return True, False, True
     return False, False, False
 
@@ -894,45 +934,73 @@ def _analyze_cached(text: str, names: Tuple[str, ...]) -> ClauseAnalysis:
     return ClauseAnalysis(src, tuple(clauses), _command_span_text(src, clauses))
 
 
-def analyze_clauses(query: Optional[str], assistant_names: Iterable[str] = ()) -> ClauseAnalysis:
-    """The utterance's clauses and its command text (the imperative clauses,
-    joined in order). Pure; never raises (a failure analyses as no clauses)."""
+def _analyze_or_none(query: Optional[str], assistant_names: Iterable[str]) -> Optional[ClauseAnalysis]:
     try:
         if not query or not query.strip():
             return ClauseAnalysis("", (), None)
         names = tuple(sorted({str(n).strip().lower() for n in assistant_names if n and str(n).strip()}))
         return _analyze_cached(_bound(query), names)
     except Exception:
-        return ClauseAnalysis(query or "", (), None)
+        return None
+
+
+def analyze_clauses(query: Optional[str], assistant_names: Iterable[str] = ()) -> ClauseAnalysis:
+    """The utterance's clauses and its command text (the imperative clauses,
+    joined in order). Pure; never raises (a failure analyses as no clauses)."""
+    return _analyze_or_none(query, assistant_names) or ClauseAnalysis(query or "", (), None)
 
 
 def cue_text(query: Optional[str], assistant_names: Iterable[str] = ()) -> Optional[str]:
     """The words that may carry the cue for a write. When the utterance has a
     command, only the command's words; else the clauses that are not
-    narration or a condition, and the text itself when nothing is dropped."""
+    narration or a condition, and the text itself when nothing is dropped.
+    Fails closed: an analysis that fails gives no words."""
     if query is None:
         return None
-    try:
-        analysis = analyze_clauses(query, assistant_names)
-        if analysis.command_text is not None:
-            return analysis.command_text
-        if not analysis.clauses or all(c.cue_ok for c in analysis.clauses):
-            return query
-        kept = [analysis.text[c.start:c.end] for c in analysis.clauses if c.cue_ok and not c.empty]
-        return ", ".join(kept)
-    except Exception:
+    analysis = _analyze_or_none(query, assistant_names)
+    if analysis is None:
+        return ""
+    if analysis.command_text is not None:
+        return analysis.command_text
+    if not query.strip():
         return query
+    if not analysis.clauses:
+        return ""
+    if all(c.cue_ok for c in analysis.clauses):
+        return query
+    return ", ".join(analysis.text[c.start:c.end] for c in analysis.clauses if c.cue_ok and not c.empty)
+
+
+def _live(analysis: ClauseAnalysis) -> List[Clause]:
+    return [c for c in analysis.clauses if not c.empty and not c.negated]
 
 
 def is_narration(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
     """Whether every clause that is not negated or empty is narration or a
     bare condition: the words talk about someone or something and ask for
     nothing. A command that is not for now ("whenever someone comes in, turn
-    on the lights", "when it gets dark turn on the porch light") is a request
-    to the automation agent, so it is not narration."""
-    analysis = analyze_clauses(query, assistant_names)
-    live = [c for c in analysis.clauses if not c.empty and not c.negated]
+    on the lights") is a request to the automation agent, so it is not
+    narration. Fails closed: an analysis that fails is narration."""
+    analysis = _analyze_or_none(query, assistant_names)
+    if analysis is None:
+        return True
+    live = _live(analysis)
     return bool(live) and all(c.narration or (c.conditional and not c.deferred) for c in live)
+
+
+def has_narration(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
+    """Whether any clause that is not negated or empty is narration. Fails closed."""
+    analysis = _analyze_or_none(query, assistant_names)
+    return True if analysis is None else any(c.narration for c in _live(analysis))
+
+
+def imperative_text(query: Optional[str], assistant_names: Iterable[str] = ()) -> str:
+    """The imperative clauses alone, without the fragments that follow them
+    ("turn on the hall light, heading out" is "turn on the hall light")."""
+    analysis = analyze_clauses(query, assistant_names)
+    return ", ".join(
+        re.sub(r"[\"\u201c\u201d]", "", analysis.text[c.start:c.end]).strip() for c in analysis.clauses if c.imperative
+    )
 
 
 def command_query(uk: "UtteranceClassification", query: str) -> str:
@@ -940,7 +1008,7 @@ def command_query(uk: "UtteranceClassification", query: str) -> str:
     when the utterance has one, with the room an earlier clause named when the
     command names none; else the utterance itself."""
     cmd = uk.command_text
-    if not cmd or len(query.strip()) > MAX_CLASSIFIED_CHARS:
+    if not cmd or len(query.encode("utf-8")) > MAX_CLASSIFIED_CHARS:
         # Only a prefix is analysed: a longer utterance goes on whole, to
         # be refused by the size cap that guards the extractor.
         return query

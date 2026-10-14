@@ -617,8 +617,8 @@ to Ollama. Assign `smart_home_control` to an Ollama model to keep the guarantee.
 **An answer that isn't JSON.** On any backend, a complete answer that doesn't
 parse is no longer guessed at from keywords. A sequence or a motion-control
 command is refused. A single command acts only if Athena read it as a plain
-command with an explicit on or off in your words; otherwise it answers with a status read and writes
-nothing. Some phrasings that used to work through keyword guessing now get
+command with an explicit on or off in your words; otherwise it answers "Sorry, I couldn't work out that command."
+and writes nothing (a command is never answered with a status read). Some phrasings that used to work through keyword guessing now get
 "Sorry, I couldn't work out that command."
 
 **The tool-calling path** (`/api/chat` with tools) sends no `num_ctx`, so it

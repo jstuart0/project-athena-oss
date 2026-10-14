@@ -151,4 +151,5 @@ def test_a_question_keeps_the_question_rules_and_no_command_text():
         if uk.kind == UtteranceKind.STATE_QUESTION:
             assert uk.command_text is None
     assert classify_utterance("did the office light turn off at 6pm").kind == UtteranceKind.STATE_QUESTION
-    assert classify_utterance("is it ok to turn off the lights").kind == UtteranceKind.IMPERATIVE
+    # A question about permission is no longer a command.
+    assert classify_utterance("is it ok to turn off the lights").kind != UtteranceKind.IMPERATIVE

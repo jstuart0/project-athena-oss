@@ -20,7 +20,9 @@ from shared.config import get_config
 from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_count_too_low
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
-from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
+from .utterance_kind import (
+    UtteranceClassification, UtteranceKind, classify_utterance, imperative_text, is_indoor_temperature_question,
+)
 from shared.ha_registry import room_key, tokens as _words
 from shared.ha_registry import tokens as _name_tokens
 
@@ -992,8 +994,13 @@ class SmartHomeController:
 
         # FAST PATH: Scene and routine commands
         # These map to HA scenes or scripts
+        # In a command, the phrase must sit in a command clause: a fragment after
+        # a comma ("turn on the hall light, heading out") runs no routine.
+        scene_text = query_lower
+        if utterance is not None and utterance.kind == UtteranceKind.IMPERATIVE:
+            scene_text = imperative_text(query_lower).lower()
         for pattern, scene_entity in SCENE_PHRASES.items():
-            if pattern in query_lower and scene_request_allowed(utterance):
+            if pattern in scene_text and scene_request_allowed(utterance):
                 logger.info(f"Fast path scene: kind={scene_entity.split('.')[0]}")
                 return {
                     "device_type": "scene",
@@ -2507,6 +2514,12 @@ Return ONLY valid JSON."""
                 # The turn's own classification, from the scope the route opened
                 # (a confirmed replay is the answer to an earlier turn's request).
                 utterance = scope.utterance
+            if (
+                utterance is not None and utterance.kind == UtteranceKind.IMPERATIVE and original_query
+                and access_target.canonical_device_type(device_type) in ('scene', 'script')
+            ):
+                original_query = imperative_text(original_query) or original_query
+                words = original_query if cue_query is None else words
             kind_hint = utterance.kind if utterance is not None else None
             scene_phrase = scene_request_allowed(utterance) if utterance is not None else False
             problem = access_target.write_cue_problem(

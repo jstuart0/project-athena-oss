@@ -64,6 +64,7 @@ from orchestrator.utterance_kind import (
     UtteranceKind,
     classify_utterance,
     command_query,
+    has_narration,
 )
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 from orchestrator.context.detector import context_ref_view
@@ -558,8 +559,11 @@ def _carried_cue_query(
         return None
     if access_target.has_negator(state.query):
         return None  # "no, not that one": a negated turn does not borrow a cue
+    this_turn = classify_utterance(state.query)
+    if this_turn.kind != UtteranceKind.IMPERATIVE and has_narration(state.query):
+        return None  # narration borrows no cue ("they turn them off at night")
     if command is None:
-        command = command_query(classify_utterance(state.query), state.query)
+        command = command_query(this_turn, state.query)
     return f"{cue['query']}. {command}"
 
 
@@ -940,7 +944,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         # UNKNOWN when the kill switch is enabled (legacy behaviour).
         kill_switch_config = await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)
         state_question_kill_switch = kill_switch_config.get("enabled", False)
-        real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names())
+        assistant_names = await _configured_assistant_names()
+        real_uk = classify_utterance(state.query, assistant_names=assistant_names)
         extraction_query = state.query
         clarification = _clarification_reply(state, real_uk)
         if clarification is not None:
@@ -1159,7 +1164,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 automation_mode = await get_automation_system_mode()
 
                 # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
-                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
+                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query, assistant_names):
                     logger.info(f"Dynamic agent mode - routing to automation agent: query_len={len(state.query)}")
 
                     # Build context for automation agent

@@ -18,6 +18,7 @@ from orchestrator import mode_permission as mp
 from orchestrator.nodes import _runtime, route_music_node, route_tv_node
 from orchestrator.state import IntentCategory, OrchestratorState
 
+from . import test_state_question_routing as _sqr
 from .test_state_question_routing import _drive_route_control, _raw_ha_client_3_6
 
 _QUERY_RE = re.compile(r'\nQuery: "(.*?)"\nNumber of lights', re.S)
@@ -104,6 +105,41 @@ def drive_control(query: str, *, names=(), model: Optional[QueryReadingModel] = 
             query, llm_router=model, entity_manager=House(), room=room,
         )
     return state, llm, client
+
+
+def drive_followup(prev_query: str, prev_action: str, query: str, *, device_type="light"):
+    """route_control_node for ``query`` as a follow-up that may borrow the cue
+    stored with ``prev_query`` (same caller, audience, device and action).
+    Returns (state, client)."""
+    from orchestrator.nodes import route_control as rc
+
+    probe = OrchestratorState(query="")
+    probe.mode = "owner"
+    probe.permissions = {"mode": "owner"}
+    prev = {
+        "response": "Done.", "query": prev_query, "entities": {"room": "kitchen", "device_type": device_type},
+        "parameters": {
+            "device_type": device_type, "action": prev_action, "room": "kitchen",
+            "write_cue": {"fp": "fp-1", "aud": rc._audience_class(probe), "device_type": device_type,
+                          "action": prev_action, "query": prev_query},
+        },
+    }
+    real = OrchestratorState
+
+    def factory(**kwargs):
+        state = real(**kwargs)
+        state.caller_fingerprint = "fp-1"
+        return state
+
+    model = QueryReadingModel()
+    with mock.patch.object(_sqr, "OrchestratorState", side_effect=factory), \
+            mock.patch("orchestrator.nodes.route_control._configured_assistant_names",
+                       new_callable=AsyncMock, return_value=()):
+        state, _controller, _llm, client = _drive_route_control(
+            query, llm_router=model, entity_manager=House(), room="office",
+            prev_context=prev, context_ref_info={"has_context_ref": True},
+        )
+    return state, client
 
 
 def writes(client) -> list:
