@@ -436,6 +436,21 @@ ASSISTANT_NAME_CACHE_TTL_SECONDS = 300.0
 _assistant_names_cache: Dict[str, Any] = {"names": (), "expires_at": 0.0}
 
 
+# A per-audience row lookup that found nothing or failed is remembered briefly,
+# so an admin outage or an install with no name row pays the HTTP call (or the
+# 0.5 s bound) once per window, not on every control turn. A found name is not
+# remembered: it is cheap (the admin client reuses its list) and edits show at once.
+ASSISTANT_ROW_MISS_TTL_SECONDS = 10.0
+_ASSISTANT_ROW_MISS_MAX_ENTRIES = 64
+_now = time.monotonic
+_assistant_row_misses: Dict[tuple, float] = {}
+
+
+def _audience_key(audience: KnowledgeAudience) -> tuple:
+    return (audience.mode, audience.degraded, audience.public, audience.owner_caller,
+            audience.owner_proven, audience.guest_verified)
+
+
 async def configured_assistant_names(audience: Optional[KnowledgeAudience] = None) -> tuple:
     """The profile's assistant name (cached for the process) and, given an
     audience, the name in a base-knowledge row that audience can see (read
@@ -443,18 +458,25 @@ async def configured_assistant_names(audience: Optional[KnowledgeAudience] = Non
     names = await _profile_assistant_names()
     if audience is None:
         return names
+    key = _audience_key(audience)
+    now = _now()
+    if _assistant_row_misses.get(key, 0.0) > now:
+        return names
+    row_name = None
     try:
         entries = await asyncio.wait_for(
             load_visible_knowledge(get_admin_client(), audience=audience),
             timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS,
         )
+        row_name = assistant_name_from(entries)
     except Exception as e:
         logger.warning("assistant_row_name_lookup_failed", error_type=type(e).__name__)
+    if not row_name:
+        if len(_assistant_row_misses) >= _ASSISTANT_ROW_MISS_MAX_ENTRIES:
+            _assistant_row_misses.clear()
+        _assistant_row_misses[key] = now + ASSISTANT_ROW_MISS_TTL_SECONDS
         return names
-    row_name = assistant_name_from(entries)
-    if row_name and row_name not in names:
-        return (row_name, *names)
-    return names
+    return names if row_name in names else (row_name, *names)
 
 
 async def identity_reply_for(state: Any) -> Optional[str]:

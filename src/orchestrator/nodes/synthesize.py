@@ -215,6 +215,7 @@ Response:"""
                 user_mode = state.mode if state.mode else "guest"
                 knowledge_context = await get_knowledge_context_for_user(
                     admin_client, audience=state.knowledge_audience,
+                    without_identity_rows=addressee.kind is None and identity_answer.mentions_identity(state.query),
                 )
                 if knowledge_context:
                     system_context += knowledge_context

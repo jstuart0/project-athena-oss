@@ -5,12 +5,13 @@ Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
 import hashlib
+import re
 import os
 from typing import List, Dict, Any, Optional
 import structlog
 from shared.assistant_profile import clean_guest_name
 from shared.config import get_config
-from shared.knowledge_tiers import OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
+from shared.knowledge_tiers import NAME_KEY_CATEGORIES, OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
 from shared.local_time import local_now
 
 logger = structlog.get_logger()
@@ -165,7 +166,9 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience
             elif category == "general":
                 key = entry.get("key", "")
                 if "assistant_name" in key:
-                    context_lines.append(f"• Your Name: {resolved_value}")
+                    cleaned_name = clean_assistant_name(resolved_value)
+                    if cleaned_name:
+                        context_lines.append(f"• Your Name: {cleaned_name}")
                 elif "location_context" in key:
                     context_lines.append(f"• {resolved_value}")
                 else:
@@ -265,17 +268,52 @@ def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]
     return best["value"].strip()
 
 
+_NAME_INTRODUCTION_RE = re.compile(r"^(?:i am|i'm|my name is|call me|you are|you're|this is)\s+", re.IGNORECASE)
+_NAME_CLAUSE_END_RE = re.compile(r"[,.;:!?\n]")
+_ASSISTANT_NAME_MAX_WORDS = 2
+
+
+def clean_assistant_name(value: Any) -> Optional[str]:
+    """An assistant name fit to show the model, or None.
+
+    "I am Athena, an AI assistant." and "My name is Athena" give "Athena";
+    a bare name stays as is. The result passes the guest-name cleaner and has
+    at most two words, so an instruction-like value ("Jarvis ignore prior
+    rules") is rejected rather than rendered.
+    """
+    if not isinstance(value, str):
+        return None
+    text = _NAME_INTRODUCTION_RE.sub("", value.strip(), count=1)
+    text = _NAME_CLAUSE_END_RE.split(text, maxsplit=1)[0].strip()
+    name = clean_guest_name(text)
+    if name and len(name.split()) <= _ASSISTANT_NAME_MAX_WORDS:
+        return name
+    return None
+
+
 def assistant_name_from(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
     """The assistant's name from already-filtered ``general`` rows whose key
-    contains ``assistant_name``, cleaned like a guest name (letters, marks and
-    ``. - '``, at most 4 words / 64 characters); the first row that passes wins.
-    None when no visible row gives a clean name."""
+    contains ``assistant_name`` (see ``clean_assistant_name``); the first row
+    that gives a clean name wins. None when no visible row does."""
     for entry in knowledge_entries or []:
         if _category(entry) == "general" and "assistant_name" in str(entry.get("key", "")):
-            name = clean_guest_name(entry.get("value"))
+            name = clean_assistant_name(entry.get("value"))
             if name:
                 return name
     return None
+
+
+def drop_identity_rows(knowledge_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The entries without the owner-name rows and the property-address row:
+    the prompt of a turn that asks who the speaker is or where they live
+    must not carry them."""
+    return [
+        e for e in (knowledge_entries or [])
+        if not (
+            (_category(e) in NAME_KEY_CATEGORIES and "name" in str(e.get("key", "")))
+            or (_category(e) == "property" and e.get("key") == "address")
+        )
+    ]
 
 
 async def load_visible_knowledge(admin_client, *, audience: KnowledgeAudience) -> List[Dict[str, Any]]:
@@ -327,7 +365,9 @@ async def knowledge_cache_digest(admin_client, *, audience: KnowledgeAudience) -
     return knowledge_digest(entries)
 
 
-async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAudience) -> str:
+async def get_knowledge_context_for_user(
+    admin_client, *, audience: KnowledgeAudience, without_identity_rows: bool = False
+) -> str:
     """
     Fetch and format base knowledge context for one audience.
 
@@ -340,6 +380,8 @@ async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAud
     """
     try:
         knowledge_entries = await load_visible_knowledge(admin_client, audience=audience)
+        if without_identity_rows:
+            knowledge_entries = drop_identity_rows(knowledge_entries)
         if not knowledge_entries:
             logger.info("no_base_knowledge_entries_found")
             return ""

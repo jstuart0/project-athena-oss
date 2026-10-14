@@ -38,12 +38,15 @@ _NAME_FRAMES = (
     r"(?:tell me|say) who i am",
     r"who i am",
     r"(?:do|can) you (?:know|remember|recognize) (?:me|who i am|my name)",
+    r"is my name [\w.'-]+(?: [\w.'-]+)?",
     r"what (?:do|did|would) (?:you|people|they|everyone|everybody|folks|others) call me",
     r"what am i called",
 )
 _HOME_FRAMES = (
     r"where do i live",
     r"(?:tell me|say|do you know) where i live",
+    r"(?:do|can) you (?:know|remember) my (?:home |house |street )?address",
+    r"my (?:home |house |street )?address",
     rf"{_WHAT} my (?:home |house |street |mailing |current |full )?address(?: again)?",
     r"(?:tell me|say|give me|state) my (?:home |house |street )?address",
     r"(?:where is|where's|wheres) my (?:home|house|place|apartment)",
@@ -53,7 +56,7 @@ _NAME_RE = re.compile("|".join(f"(?:{f})" for f in _NAME_FRAMES))
 _HOME_RE = re.compile("|".join(f"(?:{f})" for f in _HOME_FRAMES))
 
 _LEAD_FILLER = (
-    "hey there", "hey", "hi", "hello", "okay", "ok", "so", "um", "uh", "well", "please", "just", "now",
+    "hey there", "hey", "hi", "hello", "okay", "ok", "so", "and", "um", "uh", "well", "please", "just", "now",
     "can you", "could you", "would you", "will you",
 )
 _TRAIL_FILLER = ("please", "right now", "now", "thanks", "thank you", "for me")
@@ -63,13 +66,32 @@ _TRAIL_FILLER_RE = re.compile(r" (?:%s)$" % "|".join(re.escape(w) for w in _TRAI
 # A cheap pre-check so callers resolve the configured assistant names (a
 # bounded lookup) only for a question that may be an identity question.
 _MAY_BE_IDENTITY_RE = re.compile(
-    r"\bmy (?:\w+ )?(?:name|address)\b|\baddress (?:of|for) my\b|\bwho (?:am )?i\b|\bwhere (?:do )?i live\b|\bcall me\b|\bknow me\b"
-    r"|\bwhere(?:'s| is) my\b|\bam i called\b|\bwho i am\b"
+    r"\bmy (?:\w+ )?(?:name|address)\b|\baddress (?:of|for) my\b|\bwho (?:am )?i\b|\bwhere (?:do )?i live\b|\bcall me\b"
+    r"|\b(?:know|recognize|remember) me\b|\bwhere(?:'s| is) my\b|\bam i called\b|\bwho i am\b|\bis my name\b"
 )
 
 _FOLD_RE = re.compile(r"[\W_]+")
 _SELF_REFERENCE_RE = re.compile(r"\b(?:my|me|i|i'm|myself)\b")
 _IDENTITY_WORD_RE = re.compile(r"\b(?:name|called|call|calls|who|address|live|lives|living)\b")
+# Asking for a name or where one lives, in a question of any length. Unlike
+# the backstop's word list it has no bare "who": "who won the game I watched"
+# is not about the speaker.
+_SENSITIVE_RE = re.compile(
+    r"\b(?:names?|address|lives?|living|called|call me|who am i|who i am|(?:know|recognize|remember) me)\b"
+)
+_NAME_ASKING_RE = re.compile(r"\b(?:names?|called|call me|who am i|who i am|(?:know|recognize|remember) me)\b")
+_STREET_ABBREVIATIONS = {
+    "st": "street", "ave": "avenue", "rd": "road", "dr": "drive", "blvd": "boulevard", "ln": "lane", "ct": "court",
+}
+# First names that are also ordinary words: matched on their own only in the
+# phrasing of a name statement ("your name is Will"), never anywhere in an answer.
+_COMMON_WORD_NAMES = frozenset({
+    "will", "mark", "may", "grace", "bill", "rich", "hope", "joy", "art", "pat", "ray", "rose", "dawn", "faith",
+    "june", "april", "august", "jack", "jean", "lane", "drew", "chase", "summer", "sky", "page", "grant", "dean",
+    "frank", "guy", "max", "miles", "bay", "cliff", "hunter", "rock", "star", "sue", "tom", "wade", "ward", "bob",
+    "case", "gene", "ginger", "heather", "holly", "ivy", "lily", "mary", "pearl", "penny", "ruby", "sandy", "violet",
+})
+_NAME_STATEMENT_RE = r"(?:name is|you are|you re|call you|called|your name s|i m)"
 
 
 def _normalize(query: Optional[str]) -> str:
@@ -98,9 +120,9 @@ def identity_question(query: Optional[str], assistant_names: Iterable[str] = ())
     q = _normalize(query)
     if not q or len(q.split()) > MAX_WORDS:
         return None
-    q = _strip_names(q, assistant_names)
-    for _ in range(3):
-        stripped = _LEAD_FILLER_RE.sub("", q, count=1)
+    for _ in range(4):
+        stripped = _strip_names(q, assistant_names)
+        stripped = _LEAD_FILLER_RE.sub("", stripped, count=1)
         stripped = _TRAIL_FILLER_RE.sub("", stripped, count=1)
         if stripped == q:
             break
@@ -122,29 +144,57 @@ def reply_for(
     return _REPLIES[kind] if kind else None
 
 
+def mentions_identity(query: Optional[str]) -> bool:
+    """A first-person reference together with a name or address word, in a
+    question of any length ("hey so could you tell me what is my name",
+    "what's my name and where do I live"). Broader than `identity_question`:
+    it decides what the prompt must leave out, not what is answered."""
+    q = _normalize(query)
+    return bool(_SELF_REFERENCE_RE.search(q) and _SENSITIVE_RE.search(q))
+
+
 def _fold(text: Optional[str]) -> str:
     return _FOLD_RE.sub(" ", str(text or "").casefold()).strip()
+
+
+def _fold_address(text: Optional[str]) -> str:
+    return " ".join(_STREET_ABBREVIATIONS.get(t, t) for t in _fold(text).split())
 
 
 def _contains(folded_answer: str, folded_needle: str) -> bool:
     return bool(folded_needle) and f" {folded_needle} " in f" {folded_answer} "
 
 
-def _name_in(folded_answer: str, owner_name: Optional[str]) -> bool:
+def _name_in(folded_answer: str, owner_name: Optional[str], *, asking_name: bool) -> bool:
+    """The full name always counts. A single name token (3+ letters) counts only
+    when the question asks for a name, and a token that is also an ordinary
+    word only in the phrasing of a name statement."""
     folded = _fold(owner_name)
     if not folded:
         return False
-    first = folded.split()[0]
-    return _contains(folded_answer, folded) or (len(first) >= 2 and _contains(folded_answer, first))
+    if _contains(folded_answer, folded):
+        return True
+    if not asking_name:
+        return False
+    for token in folded.split():
+        if len(token) < 3:
+            continue
+        if token in _COMMON_WORD_NAMES:
+            if re.search(rf"\b{_NAME_STATEMENT_RE} {re.escape(token)}\b", folded_answer):
+                return True
+        elif _contains(folded_answer, token):
+            return True
+    return False
 
 
 def _address_in(folded_answer: str, home_address: Optional[str]) -> bool:
-    folded = _fold(home_address)
+    folded = _fold_address(home_address)
     if not folded:
         return False
-    street = _fold(str(home_address).split(",")[0])
+    answer = _fold_address(folded_answer)
+    street = _fold_address(str(home_address).split(",")[0])
     street_is_specific = len(street.split()) >= 2 and any(ch.isdigit() for ch in street)
-    return _contains(folded_answer, folded) or (street_is_specific and _contains(folded_answer, street))
+    return _contains(answer, folded) or (street_is_specific and _contains(answer, street))
 
 
 def backstop(
@@ -163,7 +213,7 @@ def backstop(
     if not (_SELF_REFERENCE_RE.search(q) and _IDENTITY_WORD_RE.search(q)):
         return None
     folded_answer = _fold(answer)
-    if _name_in(folded_answer, owner_name):
+    if _name_in(folded_answer, owner_name, asking_name=bool(_NAME_ASKING_RE.search(q))):
         return NAME_REPLY
     if _address_in(folded_answer, home_address):
         return HOME_REPLY

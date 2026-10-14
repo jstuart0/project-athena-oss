@@ -94,7 +94,11 @@ def _reset():
 @pytest.mark.parametrize("route", fp.ROUTES)
 @pytest.mark.parametrize(
     "query,reply",
-    [("What is my name?", ia.NAME_REPLY), ("where do I live", ia.HOME_REPLY), ("Jarvis, say my name.", ia.NAME_REPLY)],
+    [
+        ("What is my name?", ia.NAME_REPLY), ("where do I live", ia.HOME_REPLY), ("Jarvis, say my name.", ia.NAME_REPLY),
+        ("do you know my address", ia.HOME_REPLY), ("and my address?", ia.HOME_REPLY),
+        ("please jarvis what's my name", ia.NAME_REPLY), ("is my name Sam?", ia.NAME_REPLY),
+    ],
 )
 def test_unknown_speaker_gets_the_fixed_reply(monkeypatch, route, query, reply):
     rig = Rig(monkeypatch)
