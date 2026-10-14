@@ -324,6 +324,55 @@ SCENE_PHRASES = {
 }
 
 
+_BRIGHTNESS_WORD_VALUES = {
+    "zero": 0, "one": 1, "five": 5, "ten": 10, "fifteen": 15, "twenty": 20, "twenty five": 25, "thirty": 30,
+    "thirty five": 35, "forty": 40, "forty five": 45, "fifty": 50, "fifty five": 55, "sixty": 60,
+    "sixty five": 65, "seventy": 70, "seventy five": 75, "eighty": 80, "eighty five": 85, "ninety": 90,
+    "ninety five": 95, "hundred": 100, "one hundred": 100, "full": 100, "max": 100, "half": 50,
+    "quarter": 25, "three quarters": 75,
+}
+_BRIGHTNESS_WORDS_ALT = "|".join(sorted((re.escape(w) for w in _BRIGHTNESS_WORD_VALUES), key=len, reverse=True))
+_BRIGHTNESS_PERCENT_RE = re.compile(r"\b(\d{1,3})\s*(?:%|percent\b)")
+_BRIGHTNESS_CONTEXT_RE = re.compile(r"\b(?:lights?|lamps?|dim\w*|bright\w*)\b")
+_BRIGHTNESS_TO_NUMBER_RE = re.compile(
+    r"\b(?:up to|down to|to)\s+(\d{1,3})\b(?!\s*(?::|degrees?|am\b|pm\b|minutes?|seconds?|hours?|o'clock|min\b))"
+)
+_BRIGHTNESS_TO_WORD_RE = re.compile(
+    rf"\b(?:up to|down to|to|at)\s+({_BRIGHTNESS_WORDS_ALT})\b|\b({_BRIGHTNESS_WORDS_ALT})\s+percent\b"
+)
+
+
+def parse_brightness(query: Optional[str]) -> Optional[int]:
+    """The brightness percent (0-100) a light command names: "N%" or "N
+    percent", "to/up to/down to N" beside a light or dimming word, or a
+    number word after to/at ("lights to fifty percent", "dim to half").
+    None when the words give no percent. Pure."""
+    if not query:
+        return None
+    text = query.lower().replace("-", " ")
+    match = _BRIGHTNESS_PERCENT_RE.search(text)
+    if match is None and _BRIGHTNESS_CONTEXT_RE.search(text):
+        match = _BRIGHTNESS_TO_NUMBER_RE.search(text)
+    if match is not None:
+        value = int(match.group(1))
+        return value if 0 <= value <= 100 else None
+    if _BRIGHTNESS_CONTEXT_RE.search(text):
+        word = _BRIGHTNESS_TO_WORD_RE.search(text)
+        if word is not None:
+            return _BRIGHTNESS_WORD_VALUES[word.group(1) or word.group(2)]
+    return None
+
+
+class _FixedPercent:
+    """A regex-match stand-in for a percent already parsed."""
+
+    def __init__(self, value: int):
+        self._value = value
+
+    def group(self, _n: int) -> str:
+        return str(self._value)
+
+
 # "do", "have" and "check" open a question only when it ends in one
 # ("have you opened the garage?"); "do close the garage" is a command.
 _QUESTION_OPENERS = frozenset({"is", "are", "was", "were", "did", "does", "whats", "what"})
@@ -405,6 +454,38 @@ def opening_verb_ok(query: Optional[str], domain: str) -> bool:
         return False
     nouns = ("lock", "locks") if domain == "lock" else ()
     return _door_verb(query.lower(), *verbs, noun_after=nouns) == "first"
+
+
+def media_write_refusal(
+    kind: UtteranceKind, query: Optional[str], assistant_names: Sequence[str] = (),
+) -> Optional[str]:
+    """The answer for a music or TV write that no request backs ("the kids
+    play music all day" is narration), else None. The one seam both media
+    nodes ask before dispatching a write; reads are never refused here."""
+    if access_target.media_write_allowed(kind, query, assistant_names):
+        return None
+    return NO_WRITE_CUE_TEXT
+
+
+_LETS_PREFIXES = ("let's ", "lets ", "let us ")
+
+
+def scene_request_allowed(utterance: Optional[UtteranceClassification]) -> bool:
+    """Whether the utterance may run a scene or routine: it is a command, or
+    it is one of the routine's own phrases as the whole utterance ("goodnight",
+    "I'm home", "let's watch a movie"). A phrase inside a longer sentence that
+    is no command ("I said good night to the kids") runs nothing. With no
+    classification there is nothing to judge."""
+    if utterance is None or utterance.kind in (UtteranceKind.IMPERATIVE, UtteranceKind.STATE_QUESTION):
+        # A question is stopped by the read-only scope, or confirmed by the
+        # fan-out gate when routing is reverted; this judges only the rest.
+        return True
+    core = utterance.core_text or ""
+    for prefix in _LETS_PREFIXES:
+        if core.startswith(prefix):
+            core = core[len(prefix):]
+            break
+    return core in SCENE_PHRASES
 
 
 def scene_grounded(entity_id: str, query: Optional[str], friendly_name: Optional[str] = None) -> bool:
@@ -700,7 +781,8 @@ class SmartHomeController:
         self.llm_router = llm_router
     
     async def _fast_path_intent(self, query: str, query_lower: str, device_room: Optional[str],
-                                is_turn_on: bool, is_turn_off: bool, has_color: bool) -> Optional[Dict]:
+                                is_turn_on: bool, is_turn_off: bool, has_color: bool,
+                                utterance: Optional[UtteranceClassification] = None) -> Optional[Dict]:
         """The deterministic answers for the commands the wording settles. None
         when no fast path applies. The one entry guard is ``_defers_to_model``,
         asked by ``extract_intent`` before this runs: a fast path never has to
@@ -911,7 +993,7 @@ class SmartHomeController:
         # FAST PATH: Scene and routine commands
         # These map to HA scenes or scripts
         for pattern, scene_entity in SCENE_PHRASES.items():
-            if pattern in query_lower:
+            if pattern in query_lower and scene_request_allowed(utterance):
                 logger.info(f"Fast path scene: kind={scene_entity.split('.')[0]}")
                 return {
                     "device_type": "scene",
@@ -1394,7 +1476,10 @@ class SmartHomeController:
         # - "set brightness to 75"
         # - "set lights to 100" (no % needed if "lights" present)
         # - "lights 50 percent" / "lights to 50%"
-        dim_percent_match = re.search(r'(?:dim|brightness).*?(?:to\s+)?(\d+)\s*(?:%|percent)?', query_lower)
+        parsed_percent = parse_brightness(query_lower)
+        dim_percent_match = _FixedPercent(parsed_percent) if parsed_percent is not None else None
+        if not dim_percent_match:
+            dim_percent_match = re.search(r'(?:dim|brightness).*?(?:to\s+)?(\d+)\s*(?:%|percent)?', query_lower)
         if not dim_percent_match:
             # Try "set X to Y%" pattern (requires % or percent)
             dim_percent_match = re.search(r'set\s+.*?(?:to\s+)?(\d+)\s*(?:%|percent)', query_lower)
@@ -1435,7 +1520,7 @@ class SmartHomeController:
         # Patterns that mean "make it dimmer"
         dimmer_patterns = access_target.DIMMER_PATTERNS
         # Also detect "dim the X" without a specific percentage (relative dimming)
-        if 'dim the' in query_lower or 'dim ' in query_lower:
+        if ('dim the' in query_lower or 'dim ' in query_lower) and not isinstance(brightness_match, int):
             # Check if there's no explicit percentage/number
             import re
             has_percent = bool(re.search(r'\d+\s*(%|percent)', query_lower))
@@ -1684,7 +1769,8 @@ class SmartHomeController:
                                                      'cut the lights', 'cut all the lights', 'lights out'])  # Round 12
 
         # Round 16: "lit" is slang for turn on/bright - "get the kitchen lit", "lemme get it lit"
-        if 'lit' in query_lower and not is_turn_off:
+        # (a whole word: "split" is not)
+        if re.search(r"\blit\b", query_lower) and not is_turn_off:
             is_turn_on = True
         has_color = any(c in query_lower for c in [
             'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple', 'pink',
@@ -1694,7 +1780,7 @@ class SmartHomeController:
 
         if not self._defers_to_model(query_lower):
             fast_intent = await self._fast_path_intent(
-                query, query_lower, device_room, is_turn_on, is_turn_off, has_color)
+                query, query_lower, device_room, is_turn_on, is_turn_off, has_color, utterance)
             if fast_intent is not None:
                 return fast_intent
 
@@ -1861,6 +1947,13 @@ Return ONLY the JSON, no other text."""
 
             intent = _model_object(text)
             self._ground_intent_rooms(intent, query)
+            # A command is never answered as a read: the model returning
+            # get_status for it is a misread, so nothing is done.
+            if (
+                whole_prompt_guaranteed and utterance.kind == UtteranceKind.IMPERATIVE
+                and intent.get("action") == "get_status"
+            ):
+                return self._imperative_unresolved(utterance)
             # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
             # function with a write action, even if the LLM (or a hostile
             # one) returned one -- this is the coercion path referent
@@ -1898,7 +1991,7 @@ Return ONLY the JSON, no other text."""
                 elif utterance.target_state == "off":
                     fallback_action = "turn_off"
                 else:
-                    fallback_action = "get_status"
+                    return self._imperative_unresolved(utterance)
             else:
                 fallback_action = "get_status"
                 state_question_routed_total.labels(
@@ -1917,6 +2010,17 @@ Return ONLY the JSON, no other text."""
                 "parameters": {}
             }
     
+    @staticmethod
+    def _imperative_unresolved(utterance: UtteranceClassification) -> Dict:
+        """A command the model could not turn into a device and an action: the
+        fixed "couldn't work out that command" answer, never a status read."""
+        from .metrics import state_question_routed_total
+
+        state_question_routed_total.labels(
+            device_type=utterance.device_type or "unknown", path="imperative_unresolved"
+        ).inc()
+        return room_context.unprocessable_intent("imperative_unresolved")
+
     def generate_random_colors(self, count: int) -> List[Tuple[int, int]]:
         """Generate N different random colors in HS format"""
         colors = []
@@ -2272,7 +2376,7 @@ Return ONLY valid JSON."""
 
     async def execute_intent(
         self, intent: Dict, ha_client, original_query: str = None, device_room: str = None,
-        cue_query: str = None,
+        cue_query: str = None, utterance: Optional[UtteranceClassification] = None,
     ) -> str:
         """Execute the extracted intent
 
@@ -2283,6 +2387,9 @@ Return ONLY valid JSON."""
             device_room: The room the user is speaking from (fallback if room not in intent)
             cue_query: The words that carry the write cue, when they differ from
                 ``original_query`` (a follow-up that continues an earlier command)
+            utterance: the classifier's verdict on the whole utterance. A scene
+                or routine runs only for a command or its own phrase as the
+                whole utterance; with none the scene is not judged here.
 
         ATHENA-69: wraps ha_client with the permission-enforcing guard (D1),
         opens a system-mode scope when none is already open (D3 -- the
@@ -2396,12 +2503,23 @@ Return ONLY valid JSON."""
             # the same caller, audience and device; the room and the fan-out
             # gate still read ``original_query``.
             words = cue_query if cue_query is not None else original_query
-            problem = access_target.write_cue_problem(device_type, action, words, parameters)
+            if utterance is None and not scope.confirmed_entity_ids:
+                # The turn's own classification, from the scope the route opened
+                # (a confirmed replay is the answer to an earlier turn's request).
+                utterance = scope.utterance
+            kind_hint = utterance.kind if utterance is not None else None
+            scene_phrase = scene_request_allowed(utterance) if utterance is not None else False
+            problem = access_target.write_cue_problem(
+                device_type, action, words, parameters, kind_hint=kind_hint, whole_scene_phrase=scene_phrase,
+            )
             if problem is not None and words is not None:
                 # The words may call one of the house's devices of this kind by
                 # its own name ("start the coffee maker").
                 if await self._words_name_a_device(device_type, words):
-                    problem = access_target.write_cue_problem(device_type, action, words, parameters, named_entity=True)
+                    problem = access_target.write_cue_problem(
+                        device_type, action, words, parameters, named_entity=True,
+                        kind_hint=kind_hint, whole_scene_phrase=scene_phrase,
+                    )
             if problem is not None:
                 import logging
                 logging.getLogger(__name__).info("write_without_cue_refused reason=%s", problem)
@@ -2975,16 +3093,21 @@ Return ONLY valid JSON."""
         for index, step in enumerate(steps):
             target = step.get('target') or {}
             entity_id = target.get('entity_id')
+            step_words = clauses[index] if aligned else query
+            step_utterance = classify_utterance(step_words)
             if target.get('device_type') == 'scene' or (
                 isinstance(entity_id, str) and entity_id.startswith(('scene.', 'script.'))
             ):
+                # A routine runs for a command or its own phrase, not for a mention.
+                if not scene_request_allowed(step_utterance):
+                    return NO_WRITE_CUE_TEXT
                 continue
             parameters = step.get('parameters') if isinstance(step.get('parameters'), dict) else None
             # A step carrying a door's id is judged by the door rules.
             kind = access_target.entity_domain(entity_id)
             if access_target.lacks_write_cue(
                 kind if kind in ('lock', 'cover') else target.get('device_type', 'light'), step.get('action'),
-                clauses[index] if aligned else query, parameters,
+                step_words, parameters, kind_hint=step_utterance.kind,
             ):
                 return NO_WRITE_CUE_TEXT
         door_text = await self._plan_sequence_doors(steps, query)

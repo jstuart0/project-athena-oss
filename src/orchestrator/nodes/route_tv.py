@@ -32,6 +32,7 @@ from orchestrator.utterance_kind import (
     STATE_QUESTION_KILL_SWITCH_FLAG,
     UtteranceKind,
     classify_utterance,
+    command_query,
 )
 
 logger = structlog.get_logger(__name__)
@@ -46,6 +47,14 @@ def _tv_command_hint(intent, room) -> "str | None":
     if intent.action == "launch" and intent.app_name:
         return f"To open {intent.app_name}, say: open {intent.app_name} on {where}."
     return None
+
+
+def _write_refusal(uk, query, names) -> "str | None":
+    # Called at dispatch time: smart_home_controller imports the sequence executor and
+    # is not loaded by the nodes package.
+    from orchestrator.smart_home_controller import media_write_refusal
+
+    return media_write_refusal(uk.kind, query, names)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +112,8 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
         # ATHENA-128: a state question ("is the TV on") runs under a
         # read-only scope -- defence in depth for a parse that would turn
         # it into a power/launch write. The kill switch reverts it.
-        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
+        names = await configured_assistant_names()
+        uk = classify_utterance(state.query, assistant_names=names)
         kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
@@ -132,7 +142,9 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
 
             # Parse the TV intent from the query
             guest_mode = state.mode == "guest"
-            intent = await tv_handler.parse_tv_intent(state.query, room=state.room, mode=state.mode)
+            intent = await tv_handler.parse_tv_intent(
+                command_query(uk, state.query), room=state.room, mode=state.mode
+            )
 
             logger.info(
                 "tv_intent_parsed",
@@ -143,6 +155,18 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
             )
 
             result = None
+
+            # Every action but a status read changes the TV: a request must
+            # back it ("they put Netflix on every night" is narration).
+            writes = bool(
+                intent.action in ("launch", "power", "navigate", "playback") or intent.youtube_video_id
+            )
+            refusal = _write_refusal(uk, state.query, names) if writes and uk.kind != UtteranceKind.STATE_QUESTION else None
+            if refusal:
+                state.answer = refusal
+                state.error = "no_write_cue"
+                state.node_timings["route_tv"] = time.time() - start
+                return state
 
             if uk.kind == UtteranceKind.STATE_QUESTION:
                 # A question ("is the TV on", "did you turn off the TV") is

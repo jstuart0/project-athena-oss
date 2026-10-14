@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from orchestrator import room_context
+from orchestrator.utterance_kind import (  # noqa: F401  (statement_clause is re-exported for the cue callers)
+    UtteranceKind,
+    analyze_clauses,
+    cue_text,
+    statement_clause,
+)
 from shared.ha_registry import tokens
 
 # How an entity came to be the one named (``Named.named_by``).
@@ -586,7 +592,10 @@ def canonical_device_type(device_type: Any) -> Any:
 
 # Kinds a cue is not asked of: doors (own rules), scenes (grounded), and the
 # kinds whose handlers only read.
-_CUE_EXEMPT_TYPES = frozenset({"lock", "scene", "script", "oven", "fridge", "freezer", "appliance", "sensor"})
+_CUE_EXEMPT_TYPES = frozenset({"lock", "oven", "fridge", "freezer", "appliance", "sensor"})
+# A scene or script runs a routine: it needs a command to run it (or the
+# routine's own phrase as the whole utterance), not a mention of it.
+_ROUTINE_TYPES = frozenset({"scene", "script"})
 # A clause that starts with one of these is a command about a device.
 _CONTROL_CUE_VERBS = frozenset({
     "turn", "switch", "dim", "brighten", "start", "stop", "play", "pause", "resume", "kill", "cut", "raise",
@@ -717,6 +726,8 @@ NO_CUE = "no_cue"
 
 def write_cue_problem(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
+    kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
+    assistant_names: Iterable[str] = (),
 ) -> Optional[str]:
     """None when a device-changing command is backed by the words; else
     ``NO_CUE`` (nothing in the words asks for a change) or ``WRONG_DEVICE``
@@ -729,10 +740,17 @@ def write_cue_problem(
     the words name this kind of device or none at all; a cue after a negator
     does not count. ``named_entity`` says the words call one of the house's
     devices of this kind by its name; it lets a control verb act on that
-    named thing ("start the coffee maker") and is no cue on its own. A read is never a problem, a lock or
-    scene is judged elsewhere, a cover's opening by the door rules, and a
-    command with no words (a sequence step, checked per clause) is not
-    judged."""
+    named thing ("start the coffee maker") and is no cue on its own.
+
+    Only the words that are a request count: when the utterance holds a
+    command clause, the command's words alone; else every clause that is not
+    narration ("they turn the lights off at night") or a condition ("if it
+    gets dark"). ``kind_hint`` is the classifier's verdict on the utterance:
+    a scene or script runs for an IMPERATIVE utterance, or for its own phrase
+    as the whole utterance (``whole_scene_phrase``); with no hint it is not
+    judged. A read is never a problem, a lock is judged elsewhere, a cover's
+    opening by the door rules, and a command with no words (a sequence step,
+    checked per clause) is not judged."""
     if query is None:
         return None
     act = action.strip().lower() if isinstance(action, str) else ""
@@ -740,6 +758,10 @@ def write_cue_problem(
         return None
     canonical = canonical_device_type(device_type)
     dtype = canonical.strip().lower() if isinstance(canonical, str) else None
+    if dtype in _ROUTINE_TYPES:
+        if kind_hint is None or kind_hint is UtteranceKind.IMPERATIVE or whole_scene_phrase:
+            return None
+        return NO_CUE
     if dtype in _CUE_EXEMPT_TYPES:
         return None
     kind = _CUE_KINDS.get(dtype or "")
@@ -747,6 +769,9 @@ def write_cue_problem(
         return NO_CUE
     if kind == "cover" and is_opening_action("cover", act):
         return None
+    query = cue_text(query, assistant_names)
+    if not query or not query.strip():
+        return NO_CUE  # everything said was narration or a condition
     if kind == "motion":
         lower = query.lower()
         return None if any(p in lower for p in MOTION_CONTROL_PATTERNS) else NO_CUE
@@ -788,9 +813,28 @@ def write_cue_problem(
 
 def lacks_write_cue(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
+    kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
+    assistant_names: Iterable[str] = (),
 ) -> bool:
     """``write_cue_problem`` as a yes/no."""
-    return write_cue_problem(device_type, action, query, parameters, named_entity=named_entity) is not None
+    return write_cue_problem(
+        device_type, action, query, parameters, named_entity=named_entity, kind_hint=kind_hint,
+        whole_scene_phrase=whole_scene_phrase, assistant_names=assistant_names,
+    ) is not None
+
+
+def media_write_allowed(
+    kind: UtteranceKind, query: Optional[str], assistant_names: Iterable[str] = (),
+) -> bool:
+    """Whether the words may start a music or TV write: an IMPERATIVE
+    utterance, or an UNKNOWN one with a clause that is a request (not
+    narration, a condition or a negation). A question never writes."""
+    if kind is UtteranceKind.IMPERATIVE:
+        return True
+    if kind is UtteranceKind.STATE_QUESTION:
+        return False
+    clauses = analyze_clauses(query, assistant_names).clauses
+    return any(c.cue_ok and not c.empty and not c.negated for c in clauses)
 
 
 def names_device(text: Optional[str]) -> bool:
