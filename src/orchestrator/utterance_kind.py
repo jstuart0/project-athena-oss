@@ -208,7 +208,7 @@ _ROOM_FRAME_RES = (
     re.compile(
         rf"\b(?:{'|'.join(_ROOM_DETERMINERS)})\s+((?:[a-z]+\s+){{0,2}}?){_HEAD_NOUN}", re.I
     ),
-    re.compile(rf"\bin the ([a-z]+(?:\s[a-z]+)?)(?:\s+{_DEVICE_NOUN}\b|$)", re.I),
+    re.compile(rf"\bin the ([a-z]+(?:\s[a-z]+)?)(?:\s+{_DEVICE_NOUN}\b|\s+(?:{_CONTROL_VERBS})\b|$)", re.I),
 )
 _ROOM_STOPWORDS = frozenset(_ROOM_DETERMINERS) | {
     "what", "which", "whose", "how", "many", "much", "is", "are", "was", "were",
@@ -551,6 +551,34 @@ def _unwrap_time_phrase(content: List[str]) -> Tuple[List[str], bool]:
             if len(content) > k and _CONTROL_VERB_RE.match(content[k]):
                 return content[k:], True
     return content, False
+
+
+_TIME_UNIT_WORDS = frozenset({
+    "second", "seconds", "minute", "minutes", "hour", "hours", "noon", "midnight", "sunset", "sunrise",
+    "tonight", "morning", "evening", "night", "afternoon", "dusk", "dawn", "tomorrow",
+})
+_NUMBER_WORDS = frozenset({
+    "a", "an", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+    "twelve", "fifteen", "twenty", "thirty", "forty", "fifty", "sixty", "half",
+})
+
+
+def _schedule_led(content: Sequence[str]) -> bool:
+    """A command led by a time: "in 5 minutes lock the door", "at 11 turn off
+    the lights", "in ten minutes turn off the fan". The lead phrase must hold a
+    digit, a number word with a time unit, or a time of day: "in the kitchen",
+    "at the bar" and "by the way" name a place or are filler, not a time."""
+    if not content or content[0] not in _SCHEDULE_LEADS:
+        return False
+    core, unwrapped = _unwrap_time_phrase(list(content))
+    if not unwrapped:
+        return False
+    lead = content[1:len(content) - len(core)]
+    if any(w[0].isdigit() for w in lead):
+        return True
+    if any(w in _TIME_UNIT_WORDS for w in lead) and any(w in _NUMBER_WORDS or w in _TIME_UNIT_WORDS for w in lead):
+        return True
+    return False
 
 
 def _starts_negated(content: Sequence[str]) -> bool:
@@ -1111,9 +1139,7 @@ def _analyze_sentence(
         scheduled = False
         if shape:
             narration = reported or quoted or narrative
-            scheduled = (
-                not narration and content[0] in _SCHEDULE_LEADS and _unwrap_time_phrase(list(content))[1]
-            )
+            scheduled = not narration and _schedule_led(content)
             conditional = cond or scheduled
             imperative = not (narration or conditional)
             deferred = conditional and not narration

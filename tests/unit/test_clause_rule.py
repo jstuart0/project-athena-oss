@@ -745,3 +745,36 @@ def test_the_room_first_tail_is_closed_and_a_condition_anywhere_blocks_it():
     assert rf("kitchen lights turn off and set it to 50".split())
     assert not rf("kitchen lights turn off and set it to 50 after ten".split())
     assert not rf("kitchen lights turn off and set it to 50 if dark".split())
+
+
+# A place or a filler after in/at/by is no time (review: "in the kitchen turn on the lights").
+PLACE_LED = [
+    ("in the kitchen turn on the lights", "kitchen"), ("at the bar turn on the lights", None),
+    ("by the way turn off the lights", None),
+]
+TIME_LED = ["in 5 minutes lock the door", "at 11 turn off the lights", "in ten minutes turn off the fan"]
+
+
+@pytest.mark.parametrize("utterance,room", PLACE_LED, ids=[p[0] for p in PLACE_LED])
+def test_a_place_or_filler_lead_is_a_command_not_a_schedule(utterance, room):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.deferred, uk.room) == (IMPERATIVE, False, room), utterance
+    assert uk.command_text == utterance
+
+
+@pytest.mark.parametrize("utterance", TIME_LED, ids=str)
+def test_a_time_lead_stays_deferred(utterance):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.command_text, uk.deferred) == (UNKNOWN, None, True), utterance
+    state, _model, client = drive_control(utterance)
+    assert writes(client) == [], (utterance, writes(client))
+
+
+@pytest.mark.parametrize("utterance,entity", [
+    ("in the kitchen turn on the lights", "light.kitchen_lamp"),
+    ("at the bar turn on the hall lights", "light.hall_lamp"),
+    ("by the way turn off the porch light", "light.porch_lamp"),
+], ids=str)
+def test_a_place_or_filler_lead_writes(utterance, entity):
+    state, _model, client = drive_control(utterance)
+    assert {e for w in writes(client) for e in w[2]} == {entity}, (utterance, writes(client), state.answer)
