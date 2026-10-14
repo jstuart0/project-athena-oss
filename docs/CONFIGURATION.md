@@ -1854,6 +1854,54 @@ note under "Guest floor and allowlist baselines") and out of what you expose to
 Athena. "Lock all the doors except the back door" locks all
 of them (the safe direction).
 
+#### A command changes a device only when the words ask for it
+
+A room you mention, the room you're speaking from, or a guess by the model never
+makes a write on its own. Before a light, fan, switch, media player, thermostat,
+bed warmer or motion command changes anything, Athena checks that your own words
+ask for it. The check runs once, in `execute_intent`, after the device type is
+normalised ("thermostat" is `climate`, "television" is `media_player`; a type
+Athena doesn't know is refused).
+
+| Cue in your words | Example |
+|---|---|
+| A device word for that kind | "the kitchen lights", "the fan", "the thermostat", "the TV" |
+| An on, off, kill, dim, brighten or dark word | "...off", "kill the...", "too dark" |
+| Whole-house wording (lights) | "everything", "all the lights" |
+| A control verb that starts a clause and acts on a device you named, or on "it" or "them" | "turn it up", "start the coffee maker" |
+| A media verb | "pause", "skip", "volume up", "watch" |
+| A temperature said as a setting (50 to 90 in Fahrenheit, 10 to 32 in Celsius), for climate | "make it 72", "set it to 21 degrees" |
+| A colour, brightness or team word, or a percent, for a colour or brightness change | "warm white", "50%", a team name |
+| One of the built-in phrases | "I can't see", "too bright", "fade the lights" |
+
+Rules around the table:
+
+- **The words must name this kind of device, or none.** If they name a different
+  kind ("make the TV brighter" for a light), the command is refused with
+  "I couldn't tell which device you meant, so I didn't change anything."
+  This check runs before any other cue.
+- **Nothing to go on.** With no cue, the answer is "I'm not sure what you'd like
+  me to change. Tell me what to turn on, off, up or down." A control verb with no
+  named device ("activate the study") is such a case.
+- **Negation is local.** A negator cancels the command that follows it, up to the
+  next control verb ("don't turn on the lights" is cancelled; "I can't sleep, turn
+  off the lights" is not). "Don't forget", "why don't you", "won't you" and "can't
+  sleep" or "can't see" aren't negations.
+- **Follow-ups reuse the earlier words.** "And the bedroom too" counts the
+  earlier turn's words as its cue only for the same caller, the same audience, the
+  same device type and the same action, and never when the new turn contains a
+  negation. The room and the large-write limits still read only the new words.
+- **Refusals are never remembered.** The two answers above, and the other fixed
+  "nothing was changed" answers, store no context, so "turn them on" afterwards has
+  nothing to continue.
+- **Motion commands** need a motion phrase ("disable motion", "leave the lights
+  on" in its motion sense) in the words.
+- **What it doesn't judge.** Reads and status questions, locks, scenes and
+  scripts (their own rules, above), a cover's opening, and the appliance kinds that
+  only report. A sequence step is judged per clause by the device its own words
+  name; a clause that names none ("then raise it") takes the nearest earlier
+  clause's device.
+
 #### Which room Athena assumes
 
 Athena decides where a command acts once, from the words and the speaker.
