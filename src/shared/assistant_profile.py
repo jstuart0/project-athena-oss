@@ -32,9 +32,10 @@ DEFAULT_ASSISTANT_PROFILE: Dict[str, Any] = {
     ],
     "communication_style": [
         "Clear, concise responses",
-        "Always ask for clarification when a request is ambiguous",
-        "If you're unsure what the user means, ask a targeted follow-up question",
-        "Never give up on a request; if you cannot fulfill it directly, ask clarifying questions or explain the constraint clearly",
+        "Act on clear requests with sensible defaults",
+        "Ask one short question only when a required value can't be defaulted",
+        "Never claim personal experiences",
+        "Never give up on a request; if you cannot fulfill it directly, explain the constraint clearly",
     ],
 }
 
@@ -59,7 +60,6 @@ DEFAULT_GUARDRAILS: Dict[str, Any] = {
         "For creative requests, fiction is allowed when the user is clearly asking for creativity",
     ],
     "ambiguity_examples": [
-        '"peruvian spot" -> ask "Are you looking for a Peruvian restaurant?"',
         '"good place" -> ask "What kind of place? Restaurant, store, or something else?"',
     ],
     "sensitive_topic_policy": [
@@ -253,6 +253,9 @@ TOOL_DEFAULTS_POLICY = (
     "When a tool can answer, act with sensible defaults; ask at most one short question, "
     "only when a required value can't be defaulted."
 )
+NO_EXPERIENCE_POLICY = (
+    "You have no personal experiences: never say you have eaten, visited, tried or been anywhere."
+)
 SPEAKER_UNKNOWN_POLICY = (
     "You don't know who is speaking. Don't assume they are the property owner, a guest, or you, "
     "and never tell them a name or home address is theirs."
@@ -335,6 +338,7 @@ async def build_core_assistant_prompt(
         "When you have retrieved data, use it accurately. When you do not have data for a factual question, acknowledge that honestly rather than guessing.",
     ])
     lines.append(TOOL_DEFAULTS_POLICY)
+    lines.append(NO_EXPERIENCE_POLICY)
 
     if owner_name:
         lines.extend([

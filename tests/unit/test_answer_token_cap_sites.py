@@ -550,6 +550,9 @@ def test_fallback_synthesis_long_form_cap(tool_rig, interface_type, intent, quer
         state.retrieved_data = {"results": [{"title": "T", "snippet": "S"}]}
 
     tool_rig.setattr(h.main, "_fallback_to_web_search", fake_search)
+    # The fallback is reached when the turn can't be given its own tool call (the tool
+    # isn't offered to this caller); with the tool offered the call is forced instead.
+    tool_rig.setattr(h.main, "forced_tool_calls", lambda *args, **kwargs: [])
     rec = Recorder()
     rec._scripted = [{"content": "", "stop_reason": "stop"}]
     h._runtime.set_llm_router(rec)

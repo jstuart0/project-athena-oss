@@ -114,7 +114,14 @@ from orchestrator.ingress_auth import require_service_caller, service_authentica
 from orchestrator.rate_limiter import get_rate_limiter_registry
 
 # Semantic query caching for latency optimization
-from orchestrator.semantic_cache import get_cached_response, cache_response, extract_semantic_intent
+from orchestrator.semantic_cache import (
+    cache_response,
+    cacheable_turn,
+    cached_entry_usable,
+    extract_semantic_intent,
+    get_cached_response,
+    is_bare_reply,
+)
 
 # Sentence buffering for LLM streaming pipeline
 from orchestrator.sentence_buffer import SentenceBuffer, stream_with_sentence_buffering
@@ -162,7 +169,21 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
-from orchestrator import turn_capture
+from orchestrator import answer_route, turn_capture
+from orchestrator.answer_route import Route
+from orchestrator.grounding import (
+    DECLINE_TEXT,
+    forced_tool_calls,
+    grounded,
+    local_business_cue,
+    no_data_prompt,
+    prior_tool_context,
+    request_text,
+    resolve_search_location,
+    sports_status_rule,
+    tool_owned_without_data,
+    ungrounded_answer,
+)
 from orchestrator.turn_capture import captures_turn, current_capture
 from shared import conversation_capture as contract_capture
 from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
@@ -4614,6 +4635,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
     from orchestrator.rag_tools import get_rag_tools
 
     start = time.time()
+    state.tool_call_attempted = True
     rag = _runtime.get_rag_client()
     psearch = _runtime.get_parallel_search_engine()
     llm = _runtime.get_llm_router()
@@ -4911,38 +4933,14 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 search_location = home_address  # Default search location to home
                 logger.info("home_address_resolved", address_set=bool(home_address))
 
-            # Check for location from request entities (browser geolocation)
-            # This is set when location is passed in the QueryRequest
-            if state.entities and state.entities.get("location"):
-                entity_location = state.entities["location"]
-                # Override SEARCH location but keep home_address unchanged
-                search_location = entity_location
-                logger.info("search_location_from_entities", location_source="request_entities")
-
-            # Check for location override from context (user is somewhere else temporarily)
-            # IMPORTANT: This changes the SEARCH location, not the HOME address
-            # User saying "use my location" means "search near where I am now"
-            # not "my home is now at this new location"
-            elif state.context and state.context.get("location_override"):
-                loc = state.context["location_override"]
-                location_override = None
-
-                if loc.get("use_device_location"):
-                    # User requested device/GPS location - check if we have lat/long
-                    if loc.get("latitude") and loc.get("longitude"):
-                        location_override = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                    else:
-                        # No GPS data available - this will need to be handled by frontend
-                        logger.info("Device location requested but no GPS coordinates available")
-                elif loc.get("address"):
-                    location_override = loc["address"]
-                elif loc.get("latitude") and loc.get("longitude"):
-                    location_override = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-
-                if location_override:
-                    # Override SEARCH location, but keep home_address unchanged
-                    logger.info("search_location_overridden", location_source="location_override")
-                    search_location = location_override
+            # Where searches are near: a location_override (device GPS or a place the
+            # user gave) wins; the entities' location only when the user's own
+            # words name a place (a classifier "outdoor seating" is not one); else
+            # home. This changes the SEARCH location, never the HOME address.
+            search_location, location_source = resolve_search_location(
+                state, search_location or DEFAULT_LOCATION
+            )
+            logger.info("search_location_resolved", location_source=location_source)
         except Exception as e:
             logger.warning(f"Failed to fetch base knowledge context in tool_call: {e}")
             # Continue without base knowledge - not critical
@@ -5023,6 +5021,7 @@ You are an intelligent AI assistant with access to tools for real-time informati
 
 WHEN TO USE TOOLS (mandatory):
 - Weather, sports scores, flights, news, stocks, restaurants, recipes, events, airports, streaming content
+- Recommendations of restaurants, cafes, bars, shops or any other local place (search_restaurants)
 - Any request for current/real-time information
 - ALWAYS use the tool even if you're unsure about parameters - the tool will handle it
 
@@ -5032,7 +5031,7 @@ WHEN TO RESPOND DIRECTLY (no tools needed):
 - Factual knowledge you already know: math, conversions, history, science, geography, definitions
   Examples: "how many feet in a mile", "who was the third president", "what's the capital of France"
 - General explanations, how things work, concepts, tutorials
-- Preferences and recommendations: food, movies, music, hobbies, lifestyle choices
+- Opinions on food, movies, music and hobbies that are not a request to find a place or content (you have no personal experiences, so don't claim any)
 - STAY NEUTRAL on: political opinions, religious views, controversial social topics - be balanced and avoid taking sides
 
 SPORTS QUERIES: When asked about ANY game, score, team, standings, playoffs, or sports result:
@@ -5046,8 +5045,7 @@ SPORTS QUERIES: When asked about ANY game, score, team, standings, playoffs, or 
 
 CRITICAL: NEVER output raw JSON in your response text. Do not write tool calls as text like {{"name": "...", "parameters": {{...}}}}.
 - Use the proper function calling mechanism, not text
-- If the request is unclear or ambiguous, ASK FOR CLARIFICATION - don't give up
-- Example: "peruvian spot" -> ask "Are you looking for a Peruvian restaurant?"
+- If the request is unclear, pick sensible defaults and call the tool; ask one short question only when a required value can't be defaulted
 - For factual questions where no specific tool applies, use search_web
 - Your response must always be natural language, never JSON
 
@@ -5388,6 +5386,22 @@ If the user is asking to repeat, search again, or modify the previous request, u
                 logger.warning(f"Could not extract destination from query: query_len={len(state.query)}")
 
         if not tool_calls:
+            # A data turn the model answered without its tool still gets the call:
+            # built from the request, and only from a tool this turn was offered.
+            forced_calls = forced_tool_calls(
+                state, offered={t["function"]["name"] for t in tools}, search_location=search_location,
+            )
+            if forced_calls:
+                tool_calls = forced_calls
+                state.tool_calls_emitted = [
+                    {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in forced_calls
+                ]
+                logger.info(
+                    "forced_tool_call", tool=forced_calls[0]["function"]["name"],
+                    intent=state.intent.value if state.intent else None,
+                )
+
+        if not tool_calls:
             # LLM didn't want to call any tools, use its direct response
             content = llm_response.get("content", "")
             if content:
@@ -5402,6 +5416,12 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     state.answer = identity_reply
                     state.identity_answer = True
                     logger.info("identity_backstop_replaced", node="tool_call")
+                elif ungrounded_answer(
+                    state.answer, state.intent, request_text(state), grounded(state) or prior_tool_context(state)
+                ):
+                    state.answer = DECLINE_TEXT
+                    state.is_fallback = True
+                    logger.info("ungrounded_answer_declined", node="tool_call", route="direct")
                 state.data_source = f"LLM ({llm_model}) - no tools needed"
                 state.model_used = llm_model
                 # Capture token metrics from direct LLM response
@@ -5421,19 +5441,21 @@ If the user is asking to repeat, search again, or modify the previous request, u
                 else:
                     state.was_truncated = False
 
-                # Store conversation context for direct answers (enables follow-up questions)
-                try:
-                    await store_conversation_context(
-                        session_id=state.session_id,
-                        intent=state.intent.value if state.intent else "general_info",
-                        query=state.query,
-                        entities=state.entities or {},
-                        parameters={"direct_answer": True, "model": llm_model},
-                        response=state.answer or "",  # Store full response for conversation continuity
-                        ttl=300  # 5 minute TTL
-                    )
-                except Exception as ctx_err:
-                    logger.warning(f"Failed to store direct answer context: {ctx_err}")
+                # Store conversation context for direct answers (enables follow-up
+                # questions); a decline is not an exchange to follow up on.
+                if not state.is_fallback:
+                    try:
+                        await store_conversation_context(
+                            session_id=state.session_id,
+                            intent=state.intent.value if state.intent else "general_info",
+                            query=state.query,
+                            entities=state.entities or {},
+                            parameters={"direct_answer": True, "model": llm_model},
+                            response=state.answer or "",  # Store full response for conversation continuity
+                            ttl=300  # 5 minute TTL
+                        )
+                    except Exception as ctx_err:
+                        logger.warning(f"Failed to store direct answer context: {ctx_err}")
             elif not web_search_allowed(state):
                 state.error = "Unable to process request - no tools selected"
             else:
@@ -5546,34 +5568,9 @@ Provide a helpful answer:"""
         tool_calls_limited = tool_calls[:max_parallel]
 
         # Execute tools with timeout
-        # Pass user's location for local search enrichment
-        # Priority: 1) explicit location in query, 2) location override from context, 3) default
-        user_location = state.entities.get("location") if state.entities else None
-        if not user_location:
-            # Check for location override in context (user said "use my location" or specified a place)
-            if state.context and state.context.get("location_override"):
-                loc = state.context["location_override"]
-                if loc.get("use_device_location"):
-                    # User wants device/GPS location
-                    if loc.get("latitude") and loc.get("longitude"):
-                        user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                        logger.info("user_location_resolved", location_source="device_gps")
-                    else:
-                        # No GPS available yet - use address if provided, else keep checking
-                        user_location = loc.get("address")
-                        if not user_location:
-                            # Device location requested but not available
-                            # This shouldn't block - use default for now
-                            logger.info("Device location requested but no coordinates available, using default")
-                            user_location = DEFAULT_LOCATION
-                elif loc.get("address"):
-                    user_location = loc["address"]
-                    logger.info("user_location_resolved", location_source="location_override_address")
-                elif loc.get("latitude") and loc.get("longitude"):
-                    user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                    logger.info("user_location_resolved", location_source="location_override_coordinates")
-            if not user_location:
-                user_location = DEFAULT_LOCATION
+        # Pass the resolved search location (location override, a place the user
+        # named, else home) for local search enrichment
+        user_location = search_location or DEFAULT_LOCATION
 
         try:
             tool_exec_start = time.time()
@@ -5668,7 +5665,7 @@ Provide a helpful answer:"""
 
                     # Location-sensitive tools need location in query (search providers ignore location param)
                     location_sensitive_tools = ["search_restaurants", "search_events", "get_weather", "search_flights"]
-                    user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
+                    user_location = search_location or DEFAULT_LOCATION
 
                     if function_name in location_sensitive_tools:
                         enhanced_query = f"{search_query} {context} {user_location}"
@@ -5788,7 +5785,7 @@ Provide a helpful answer:"""
 
                     # Location-sensitive tools need location in query (search providers ignore location param)
                     location_sensitive_tools = ["search_restaurants", "search_events", "get_weather", "search_flights"]
-                    user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
+                    user_location = search_location or DEFAULT_LOCATION
 
                     if function_name in location_sensitive_tools:
                         # Include location in query for local results
@@ -6024,6 +6021,15 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         state.model_used = synthesis_model
         state.citations.extend([f"Tool: {tc.get('function', {}).get('name')}" for tc in tool_calls])
 
+        # Every tool failed and the model still named a venue with hours or a
+        # price: that is invented, so the answer is the decline.
+        if ungrounded_answer(
+            state.answer, state.intent, request_text(state), grounded(state) or prior_tool_context(state)
+        ):
+            state.answer = DECLINE_TEXT
+            state.is_fallback = True
+            logger.info("ungrounded_answer_declined", node="tool_call", route="synthesis")
+
         logger.info(f"Tool calling completed with {len(tool_calls)} tool(s)")
 
         # SMS Integration: Detect textable content in tool_call response
@@ -6045,7 +6051,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
 
         # Store conversation context for follow-up queries
         # This enables "what about tomorrow?" for weather, "make them brighter" for control, etc.
-        if state.session_id and state.answer:
+        if state.session_id and state.answer and not state.is_fallback:
             try:
                 # Determine intent for context (use classified intent or derive from tool calls)
                 context_intent = state.intent.value if state.intent else "general_info"
@@ -6125,131 +6131,54 @@ def post_graph_intent_refusal(intent: Any, error: Optional[str], permissions: Op
 # installed in the unit-test environment). It uses only module globals
 # (logger, should_use_tool_calling, is_conversational_reference,
 # IntentCategory) — no closure-scoped dependencies on create_orchestrator_graph.
-async def route_after_classify(state: OrchestratorState) -> str:
-    # The fixed identity reply is the answer: nothing else runs.
-    if state.identity_answer and state.answer:
-        return "finalize"
+async def decide_answer_route(state: OrchestratorState, *, surface: str) -> Route:
+    """The route of a classified turn, for the graph and the streaming runner.
 
-    # One intent gate before any routing: a disallowed intent never
-    # reaches a routing, retrieval or tool node.
-    if intent_gate_refusal(state.intent, state.permissions):
-        return "intent_refused"
-
-    # DEBUG: Log routing function call
-    logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
-
-    # PRIORITY 0: Check for media queries (OWNER MODE ONLY) - must come before control check
-    # because "pending requests" can be misclassified as control intent
-    query_lower = state.query.lower()
-    guest_mode = state.mode == "guest"
-    media_keywords = ["request movie", "request show", "request the movie", "request the show",
-                     "add movie", "add the movie", "add show", "add the show", "add to plex", "add to jellyfin",
-                     "download movie", "download show", "download the movie", "download the show",
-                     "want to watch", "my requests", "media requests", "pending requests", "my pending",
-                     "is available on plex", "is available on jellyfin", "in the library", "on plex", "on jellyfin",
-                     "overseerr", "request status", "movie request", "show request", "tv request"]
-    is_media_query = any(kw in query_lower for kw in media_keywords) and not guest_mode
-    if is_media_query:
-        logger.info("Media query detected - routing to tool_call for request_media")
-        return "tool_call"
-
-    # PRIORITY: Handle CONTROL intent FIRST - route to HA control path
-    if state.intent == IntentCategory.CONTROL:
-        logger.info("Routing to route_control node (Home Assistant)")
-        return "route_control"
-
-    # Handle notification preferences (opt-out/opt-in for proactive notifications)
-    if state.intent == IntentCategory.NOTIFICATION_PREF:
-        logger.info("Routing to notification_pref node")
-        return "notification_pref"
-
-    # SMS Integration: Handle TEXT_ME_THAT intent - send SMS with previous response
-    if state.intent == IntentCategory.TEXT_ME_THAT:
-        logger.info("Routing to send_sms node (SMS Integration)")
-        return "send_sms"
-
-    # Music playback and control - route to music handler
-    if state.intent in [IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL]:
-        logger.info(f"Routing to route_music node ({state.intent.value})")
-        return "route_music"
-
-    # Apple TV control - route to TV handler
-    if state.intent == IntentCategory.TV_CONTROL:
-        logger.info("Routing to route_tv node (TV Control)")
-        return "route_tv"
+    The one place the async facts (the ambient-fragment gate, the tool-calling
+    trigger) are gathered; answer_route owns every rule. A disallowed intent is
+    refused before this is asked."""
+    handled = answer_route.handler_route(state)
+    if handled is not None:
+        return handled
 
     # A spoken low-information fragment skips tool selection: finalize answers it.
-    if await ambient_fragment_applies(state):
-        ambient_fragment_gated_total.labels(route="graph").inc()
-        logger.info("ambient_fragment_gated", route="graph", query_len=len(state.query))
-        return "finalize"
+    ambient = await ambient_fragment_applies(state)
+    if ambient:
+        ambient_fragment_gated_total.labels(route=surface).inc()
+        logger.info("ambient_fragment_gated", route=surface, query_len=len(state.query))
+        return answer_route.decide(state, tool_trigger=False, ambient=True)
 
     # Phase 5: Check if tool calling should be triggered after classification
-    tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
-    logger.info(f"should_use_tool_calling returned: {tool_calling_result}")
+    tool_trigger = await should_use_tool_calling(state, trigger_context="classify")
+    logger.info(f"should_use_tool_calling returned: {tool_trigger}")
+    return answer_route.decide(state, tool_trigger=tool_trigger, ambient=False)
 
-    if tool_calling_result:
-        logger.info("Routing to tool_call node")
+
+# ATHENA-88 / F16, D13: hoisted to module level (unchanged logic) so it's
+# independently testable without a compiled LangGraph (langgraph isn't
+# installed in the unit-test environment). It uses only module globals.
+async def route_after_classify(state: OrchestratorState) -> str:
+    # One intent gate before any routing: a disallowed intent never
+    # reaches a routing, retrieval or tool node. The fixed identity reply is
+    # the answer and nothing else runs, so it is checked first.
+    if not (state.identity_answer and state.answer) and intent_gate_refusal(state.intent, state.permissions):
+        return "intent_refused"
+
+    logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
+    route = await decide_answer_route(state, surface="graph")
+    logger.info("answer_route_decided", surface="graph", route=route.value)
+    return "finalize" if route is Route.AMBIENT else route.value
+
+
+async def route_after_validate(state: OrchestratorState) -> str:
+    """Where a validated answer goes. The tool node already ran for this intent:
+    its validated answer is final, so the validation-failure trigger can't send
+    the turn back to it."""
+    if state.tool_call_attempted:
+        return "finalize"
+    if await should_use_tool_calling(state, trigger_context="validate"):
         return "tool_call"
-
-    if state.intent == IntentCategory.GENERAL_INFO:
-        logger.info("Routing GENERAL_INFO to synthesize (no tool call)")
-        return "synthesize"
-
-    # OPTIMIZATION: Route Phase 2 services directly to tool_call
-    # These services use tool calling, not the retrieve path
-    phase2_intents = {
-        IntentCategory.DINING, IntentCategory.RECIPES, IntentCategory.EVENTS,
-        IntentCategory.STREAMING, IntentCategory.NEWS, IntentCategory.STOCKS,
-        IntentCategory.FLIGHTS, IntentCategory.DIRECTIONS
-    }
-
-    if state.intent in phase2_intents:
-        # If the query references conversation context rather than being a fresh
-        # lookup, route to synthesize so the LLM can answer from history.
-        # This prevents dead-end responses when the query is referential
-        # (e.g., "what city was that restaurant in?" or "tell me more about the wings
-        # I mentioned") — the answer is in conversation history, not in a RAG service.
-        has_context = bool(state.conversation_history or state.history_summary)
-        if has_context:
-            is_referential = is_conversational_reference(state.query, has_context)
-            ref_info = state.context_ref_info or {}
-            if is_referential or ref_info.get("has_context_ref", False):
-                logger.info(
-                    f"Phase 2 intent {state.intent.value} has context reference - routing to synthesize",
-                    original_intent=state.intent.value
-                )
-                state.intent = IntentCategory.GENERAL_INFO
-                return "synthesize"
-        logger.info(f"Routing {state.intent.value} to tool_call node (Phase 2 service)")
-        return "tool_call"
-
-    if state.intent == IntentCategory.UNKNOWN:
-        # Check if this is a continuation response (e.g., "no", "yes", "sure")
-        # with conversation history - if so, route to synthesize so LLM can use context
-        ref_info = state.context_ref_info or {}
-        has_continuation = ref_info.get("is_continuation", False)
-        has_history = len(state.conversation_history) > 0
-
-        if has_continuation and has_history:
-            logger.info(
-                f"Continuation detected with {len(state.conversation_history)} history messages - "
-                f"routing to synthesize for context-aware response"
-            )
-            return "synthesize"
-        else:
-            logger.info("Routing to finalize node (no context available)")
-            return "finalize"  # Skip to finalize for unknown intents without context
-    elif state.intent == IntentCategory.GENERAL_INFO:
-        # Route GENERAL_INFO to tool_call - let LLM decide if tools are needed
-        # The LLM can answer directly for: greetings, basic facts, math, creative requests
-        # Or use tools for: current info, real-time data, lookups
-        logger.info("Routing GENERAL_INFO to tool_call (LLM decides if tools needed)")
-        return "tool_call"
-    else:
-        # Other intents (weather, sports, etc.) go through retrieve path
-        logger.info("Routing to route_info node")
-        return "route_info"
+    return "finalize"
 
 
 def create_orchestrator_graph() -> StateGraph:
@@ -6333,12 +6262,7 @@ def create_orchestrator_graph() -> StateGraph:
 
     graph.add_edge("synthesize", "validate")
 
-    # Phase 5: Conditional routing after validate (check for validation failure)
-    async def route_after_validate(state: OrchestratorState) -> str:
-        if await should_use_tool_calling(state, trigger_context="validate"):
-            return "tool_call"
-        return "finalize"
-
+    # Phase 5: Conditional routing after validate (module-level route_after_validate)
     graph.add_conditional_edges(
         "validate",
         route_after_validate,
@@ -6348,9 +6272,9 @@ def create_orchestrator_graph() -> StateGraph:
         }
     )
 
-    # Tool calling path (Phase 4)
-    # Note: Conditional routing to tool_call will be added in Phase 5
-    graph.add_edge("tool_call", "finalize")
+    # Tool calling path: its answer is validated like any other
+    # (route_after_validate ends the turn once the tool node has run).
+    graph.add_edge("tool_call", "validate")
 
     # Multi-intent routing after finalize
     def route_after_finalize(state: OrchestratorState) -> str:
@@ -6979,7 +6903,9 @@ async def process_query(
                 cache_knowledge_digest = await knowledge_cache_digest(
                     get_admin_client(), audience=authz.knowledge_audience
                 )
-            if cache_blocked or cache_knowledge_digest is None:
+            # A bare "yes" or "go on" means the last exchange, which the key
+            # doesn't hold: it never reads the cache.
+            if cache_blocked or cache_knowledge_digest is None or is_bare_reply(request.query):
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -6991,6 +6917,17 @@ async def process_query(
                     knowledge_digest=cache_knowledge_digest,
                     interface_type=request.interface_type,
                 )
+
+            # Deny by default on the intent the entry was stored under: an
+            # unmapped intent, a tool-owned answer stored without tool data and a
+            # local-business answer are never replayed.
+            if cached_response and not cached_entry_usable(cached_response, request.query):
+                logger.info(
+                    "semantic_cache_read_skipped",
+                    cached_intent=cached_response.get("intent"),
+                    reason="intent_not_cacheable",
+                )
+                cached_response = None
 
             # Skip cache if strong intent doesn't match cached intent
             if cached_response and detected_strong_intent:
@@ -7460,6 +7397,14 @@ async def process_query(
         # Only cache responses that actually succeeded — not fallbacks or errors
         # skip_semantic_cache=True (benchmark flag) also suppresses the write so repeated turns
         # don't poison the cache for concurrent real traffic.
+        turn_grounded = grounded(final_state)
+        followup_turn = bool(final_state.get("resolved_request")) or (
+            (final_state.get("continuation_decision") or {}).get("decision") == "continued"
+        )
+        turn_ungrounded = ungrounded_answer(
+            response.answer, final_state.get("intent"), request.query,
+            turn_grounded or prior_tool_context(final_state),
+        )
         should_cache = (
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
@@ -7479,6 +7424,17 @@ async def process_query(
             # A control answer reports (or asks about) a change in this house:
             # replaying it from a cache would answer without acting.
             and response.intent != IntentCategory.CONTROL.value
+            # A follow-up's answer depends on the exchange before it, which the
+            # key doesn't hold.
+            and not followup_turn
+            and cacheable_turn(
+                response.intent,
+                grounded=turn_grounded,
+                is_fallback=final_state.get("is_fallback", False),
+                identity_answer=final_state.get("identity_answer", False),
+                local_business_cue=local_business_cue(request.query),
+                ungrounded=turn_ungrounded,
+            )
         )
         if should_cache:
             try:
@@ -7494,6 +7450,7 @@ async def process_query(
                         guest_id=_cache_guest_id(guest_info),
                         knowledge_digest=cache_knowledge_digest,
                         interface_type=request.interface_type,
+                        grounded=turn_grounded,
                     )
                 )
             except Exception as cache_err:
@@ -8269,6 +8226,7 @@ _FALLBACK_RESPONSE_MARKERS = (
     "i'm having trouble updating your notification preferences",
     "i'm sorry, i couldn't send the text",
     "i'm having trouble sending the text",
+    "i couldn't look that up right now",
 )
 
 
@@ -8316,7 +8274,7 @@ CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
    - Any specific factual details not in the context
 4. If asked for recommendations but context is empty, say "I couldn't find current information for that request"
 5. Be concise and only state facts that appear in the Context Data
-6. If context contains errors or no results, acknowledge that honestly
+6. If context contains errors or no results, acknowledge that honestly{sports_status_rule(state)}
 
 Response:"""
     elif is_continuation and state.conversation_history:
@@ -8351,7 +8309,7 @@ Response:"""
     else:
         # No RAG data retrieved — use conversation context and general knowledge
         has_conversation_context = bool(state.conversation_history or state.history_summary)
-        if has_conversation_context:
+        if has_conversation_context and not tool_owned_without_data(state):
             synthesis_prompt = f"""Question: {state.query}
 
 Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
@@ -8367,18 +8325,7 @@ INSTRUCTIONS:
 
 Response:"""
         else:
-            synthesis_prompt = f"""Question: {state.query}
-
-CRITICAL: You do NOT have access to current or specific information to answer this question.
-
-You must respond with:
-1. Acknowledge you don't have current/specific information
-2. Suggest where the user can find this information
-3. NEVER make up specific facts, dates, names, numbers, or events
-
-Respond honestly about your limitations.
-
-Response:"""
+            synthesis_prompt = no_data_prompt(state.query)
 
     addressee = await resolve_addressee(state, get_admin_client())
     visible_knowledge = (
@@ -8454,6 +8401,16 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
     return full_prompt, synthesis_model, synthesis_system_prompt
 
 
+async def _tool_call_and_validate(state: OrchestratorState) -> OrchestratorState:
+    """The streaming runner's tool node: the same validation the graph applies
+    to a tool answer (a failed one is the decline text), only for an answer the
+    stream will send precomputed."""
+    state = await tool_call_node(state)
+    if state.answer:
+        state = await validate_node(state)
+    return state
+
+
 async def run_orchestrator_for_streaming(state: OrchestratorState) -> OrchestratorState:
     """
     Run orchestrator through RAG collection, stopping before LLM synthesis.
@@ -8462,10 +8419,12 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     - classify_node (intent classification)
     - route_info_node (if needed)
     - retrieve_node (RAG data collection)
+    - tool_call_node and validate_node (when the answer route says so)
 
     But NOT:
     - synthesize_node (that will be streamed)
-    - validate_node (not needed for streaming)
+
+    The route comes from the same answer_route.decide the graph uses.
 
     Returns:
         OrchestratorState with retrieved_data populated
@@ -8480,55 +8439,30 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     if intent_gate_refusal(state.intent, state.permissions):
         return await intent_refused_node(state)
 
-    # Handle special intents that don't need RAG
-    if state.intent == IntentCategory.CONTROL:
+    route = await decide_answer_route(state, surface="stream")
+    logger.info("answer_route_decided", surface="stream", route=route.value)
+
+    if route is Route.CONTROL:
         # Control commands - handled by HA, not LLM
-        state = await route_control_node(state)
-        return state
-
-    if state.intent in [IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL]:
-        # Music commands - handled by music handler
-        state = await route_music_node(state)
-        return state
-
-    if state.intent == IntentCategory.TV_CONTROL:
-        # TV commands - handled by TV handler
-        state = await route_tv_node(state)
-        return state
-
-    if state.intent == IntentCategory.TEXT_ME_THAT:
-        # SMS - handled by SMS node
-        state = await send_sms_node(state)
-        return state
-
-    if state.intent == IntentCategory.NOTIFICATION_PREF:
+        return await route_control_node(state)
+    if route is Route.MUSIC:
+        return await route_music_node(state)
+    if route is Route.TV:
+        return await route_tv_node(state)
+    if route is Route.SMS:
+        return await send_sms_node(state)
+    if route is Route.NOTIFICATION_PREF:
         # Notification preferences - the node gates and writes itself
-        state = await notification_pref_node(state)
-        return state
-
-    # A spoken low-information fragment skips tool selection.
-    if await ambient_fragment_applies(state):
-        ambient_fragment_gated_total.labels(route="stream").inc()
-        logger.info("ambient_fragment_gated", route="stream", query_len=len(state.query))
+        return await notification_pref_node(state)
+    if route is Route.AMBIENT:
         state.answer = AMBIENT_REPLY
         return state
-
-    # Check for tool calling (Phase 2 services)
-    tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
-
-    phase2_intents = {
-        IntentCategory.DINING, IntentCategory.RECIPES, IntentCategory.EVENTS,
-        IntentCategory.STREAMING, IntentCategory.NEWS, IntentCategory.STOCKS,
-        IntentCategory.FLIGHTS, IntentCategory.DIRECTIONS
-    }
-
-    if tool_calling_result or state.intent in phase2_intents:
+    if route is Route.TOOL_CALL:
         # Run tool calling to get data
-        state = await tool_call_node(state)
-        return state
-
-    if state.intent in (IntentCategory.UNKNOWN, IntentCategory.GENERAL_INFO):
-        # Unknown or general info — skip retrieval; synthesize from base knowledge
+        return await _tool_call_and_validate(state)
+    if route in (Route.SYNTHESIZE, Route.FINALIZE):
+        # General info, unknown or a preset answer: nothing to retrieve; the
+        # stream synthesizes from base knowledge or sends the preset answer.
         return state
 
     # For info intents, run the info routing and retrieval
@@ -8537,7 +8471,7 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
 
     # Check if tool calling needed after retrieve
     if await should_use_tool_calling(state, trigger_context="retrieve"):
-        state = await tool_call_node(state)
+        state = await _tool_call_and_validate(state)
 
     return state
 

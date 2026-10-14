@@ -205,10 +205,13 @@ def test_specific_facts_with_supporting_data_passes():
 # ---------------------------------------------------------------------------
 
 def test_specific_facts_base_knowledge_populated_passes():
+    # The house's own rows vouch for a house question; a data intent (weather,
+    # dining, ...) is vouched for only by tool data (test_tool_call_grounding.py).
     state = _make_state(
         answer="It will be $25.00 for that service.",
         retrieved_data={},
         base_knowledge_populated=True,
+        intent=IntentCategory.UNKNOWN,
     )
     router = _make_llm_router()
     _runtime.set_llm_router(router)
@@ -465,7 +468,7 @@ def test_training_knowledge_fallback_does_not_increment_hallucination_counter():
     state = _make_state_with_history(
         query="What's the weather in Baltimore?",
         answer="Call 555-123-4567 for a weather update.",
-        intent=IntentCategory.WEATHER,
+        intent=IntentCategory.UNKNOWN,  # a data intent (weather) no longer takes this bypass
         retrieved_data={},
         base_knowledge_populated=False,
     )

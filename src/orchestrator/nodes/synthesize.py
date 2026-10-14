@@ -9,6 +9,7 @@ import time
 
 import structlog
 
+from orchestrator.grounding import no_data_prompt, sports_status_rule, tool_owned_without_data
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
@@ -122,7 +123,7 @@ CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
    - Any specific factual details not in the context
 4. If asked for recommendations but context is empty, say "I couldn't find current information for that request"
 5. Be concise and only state facts that appear in the Context Data
-6. If context contains errors or no results, acknowledge that honestly
+6. If context contains errors or no results, acknowledge that honestly{sports_status_rule(state)}
 
 Response:"""
         elif is_continuation and state.conversation_history:
@@ -163,7 +164,7 @@ Response:"""
             # use conversation history to answer, while still being honest about lacking
             # external data.
             has_conversation_context = bool(state.conversation_history or state.history_summary)
-            if has_conversation_context:
+            if has_conversation_context and not tool_owned_without_data(state):
                 synthesis_prompt = f"""Question: {state.query}
 
 Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
@@ -179,18 +180,7 @@ INSTRUCTIONS:
 
 Response:"""
             else:
-                synthesis_prompt = f"""Question: {state.query}
-
-CRITICAL: You do NOT have access to current or specific information to answer this question.
-
-You must respond with:
-1. Acknowledge you don't have current/specific information
-2. Suggest where the user can find this information
-3. NEVER make up specific facts, dates, names, numbers, or events
-
-Respond honestly about your limitations.
-
-Response:"""
+                synthesis_prompt = no_data_prompt(state.query)
 
         addressee = await resolve_addressee(state, get_admin_client())
         visible_knowledge = (

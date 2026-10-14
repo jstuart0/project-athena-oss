@@ -11,6 +11,7 @@ import structlog
 
 from orchestrator.nodes._runtime import get_cache_client
 from shared.fast_path_vocab import AMBIENT_REPLY
+from orchestrator.grounding import DECLINE_TEXT
 from orchestrator.state import OrchestratorState
 from orchestrator.helpers import (
     maybe_post_synthesis_fallback,
@@ -71,6 +72,11 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
             state.data_source = None
             state.validation_passed = True
             state.validation_reason = None
+            # Per-intent flags: the next part must not inherit a preset answer,
+            # a finished tool turn or an identity reply from this one.
+            state.skip_synthesis = False
+            state.tool_call_attempted = False
+            state.identity_answer = False
             logger.info(f"Preparing next intent ({state.current_intent_index + 1}/{len(state.intent_parts)}): query_len={len(state.query)}")
             finalize_duration = time.time() - start
             state.node_timings["finalize"] = finalize_duration
@@ -106,7 +112,10 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
         except Exception as fallback_err:
             logger.warning(f"post_synthesis_fallback_error: {fallback_err}")
 
-    if not state.validation_passed:
+    if not state.validation_passed and state.is_fallback and state.answer == DECLINE_TEXT:
+        # validate_node already replaced the failed answer with the decline sentence.
+        logger.warning(f"Validation failed, decline text stands: {state.validation_reason}")
+    elif not state.validation_passed:
         # Provide fallback response based on validation failure reason
         logger.warning(f"Validation failed, providing fallback response: {state.validation_reason}")
 

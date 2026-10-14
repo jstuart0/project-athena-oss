@@ -40,9 +40,10 @@ DEFAULT_ASSISTANT_PROFILE_CONFIG: Dict[str, Any] = {
     ],
     "communication_style": [
         "Clear, concise responses",
-        "Always ask for clarification when a request is ambiguous",
-        "If you're unsure what the user means, ask a targeted follow-up question",
-        "Never give up on a request; if you cannot fulfill it directly, ask clarifying questions or explain the constraint clearly",
+        "Act on clear requests with sensible defaults",
+        "Ask one short question only when a required value can't be defaulted",
+        "Never claim personal experiences",
+        "Never give up on a request; if you cannot fulfill it directly, explain the constraint clearly",
     ],
     "guardrails": {
         "accuracy": [
@@ -52,7 +53,6 @@ DEFAULT_ASSISTANT_PROFILE_CONFIG: Dict[str, Any] = {
             "For creative requests, fiction is allowed when the user is clearly asking for creativity",
         ],
         "ambiguity_examples": [
-            "\"peruvian spot\" -> ask \"Are you looking for a Peruvian restaurant?\"",
             "\"good place\" -> ask \"What kind of place? Restaurant, store, or something else?\"",
         ],
         "sensitive_topic_policy": [

@@ -9,6 +9,14 @@ import logging
 import time
 
 from orchestrator.nodes._runtime import get_llm_router
+from orchestrator.grounding import (
+    DECLINE_TEXT,
+    TOOL_OWNED,
+    evidence_summary,
+    experience_claim,
+    grounded,
+    prior_tool_context,
+)
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
     answer_is_too_short,
@@ -41,6 +49,14 @@ class _LLMRouterProxy:
 llm_router = _LLMRouterProxy()
 
 
+def _decline_if_tool_turn(state: OrchestratorState) -> None:
+    """A failed validation on a turn the tool node answered ends in the decline
+    sentence: there is no further route to try."""
+    if state.tool_call_attempted:
+        state.answer = DECLINE_TEXT
+        state.is_fallback = True
+
+
 async def validate_node(state: OrchestratorState) -> OrchestratorState:
     """
     Multi-layer anti-hallucination validation.
@@ -56,12 +72,19 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     min_response_chars = validation_guardrails["min_response_chars"]
     max_response_chars = validation_guardrails["max_response_chars"]
 
+    # A tool-node turn with nothing to validate keeps the route it had before
+    # validation was wired in: finalize speaks its own fallback.
+    if state.tool_call_attempted and not (state.answer or "").strip():
+        state.node_timings["validate"] = time.time() - start
+        return state
+
     # Layer 1: Basic validation
     basic_start = time.time()
     # A deterministic answer ("Okay.") is the answer however short; an LLM
     # answer is too short only by the rule in answer_is_too_short.
     deterministic = bool(state.skip_synthesis and (state.answer or "").strip())
-    if not state.answer or (not deterministic and answer_is_too_short(state.answer, min_response_chars)):
+    exempt_from_short = deterministic or state.tool_call_attempted
+    if not state.answer or (not exempt_from_short and answer_is_too_short(state.answer, min_response_chars)):
         state.validation_passed = False
         state.validation_reason = "Response too short"
         logger.warning(f"Validation failed: {state.validation_reason}")
@@ -74,7 +97,10 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
             state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
         return state
 
-    if len(state.answer) > max_response_chars:
+    # Spoken answers are capped by answer_max_tokens already, so the length rule
+    # only ever rejected a text answer; a tool-node answer (a recipe, an
+    # itinerary) is long on purpose.
+    if len(state.answer) > max_response_chars and not state.tool_call_attempted:
         state.validation_passed = False
         state.validation_reason = "Response too long"
         logger.warning(f"Validation failed: {state.validation_reason}")
@@ -88,6 +114,13 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         return state
 
     validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
+
+    if state.answer == DECLINE_TEXT:
+        state.validation_passed = True
+        state.validation_reason = None
+        state.node_timings["validate"] = time.time() - start
+        validation_counter.labels(passed="true", reason="decline_text").inc()
+        return state
 
     # Layer 2: Pattern detection for hallucinations
     # Look for specific patterns that indicate fabricated information
@@ -108,6 +141,19 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
     has_specific_facts = bool(date_patterns or time_patterns or money_patterns or phone_patterns)
     validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
+
+    # A first-person experience ("I've eaten there") is never true of the
+    # assistant, whatever data the turn holds; a story told in the first person
+    # is the one exception (experience_claim reads the request).
+    if experience_claim(state.answer, state.query):
+        state.validation_passed = False
+        state.validation_reason = "Hallucination detected: first-person experience claim"
+        state.validation_details = ["first-person experience"]
+        hallucination_counter.labels(layer="pattern_detection", type="experience_claim").inc()
+        validation_counter.labels(passed="false", reason="experience_claim").inc()
+        _decline_if_tool_turn(state)
+        state.node_timings["validate"] = time.time() - start
+        return state
 
     query_lower = state.query.lower()
     is_low_risk_chitchat = state.intent == IntentCategory.GENERAL_INFO and any(
@@ -176,6 +222,7 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         and not state.retrieved_data
         and not state.base_knowledge_populated
         and state.intent != IntentCategory.WEBSEARCH
+        and state.intent not in TOOL_OWNED
     )
     if is_training_knowledge_fallback:
         state.validation_passed = True
@@ -191,7 +238,13 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     # Base knowledge injected into the system prompt is authoritative — it counts as
     # supporting data. The LLM fact-checker has no visibility into the system prompt, so
     # without this flag it would wrongly flag dates from base knowledge as hallucinations.
-    has_supporting_data = bool(state.retrieved_data) or state.base_knowledge_populated
+    # A data intent's own base-knowledge rows don't vouch for it (the house's
+    # facts say nothing about a restaurant), and an error object isn't data.
+    has_supporting_data = (
+        grounded(state)
+        or prior_tool_context(state)
+        or (state.base_knowledge_populated and state.intent not in TOOL_OWNED)
+    )
 
     if has_specific_facts and not has_supporting_data and not is_builtin_time_or_date_query:
         logger.warning(f"Response contains specific facts but no supporting data retrieved")
@@ -209,13 +262,14 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
         # Layer 4: LLM-based fact checking
         llm_fact_check_start = time.time()
+        evidence = evidence_summary(state)
         try:
             fact_check_prompt = f"""You are a fact-checking assistant. Analyze this response for hallucinations.
 
 Original Query: {state.query}
 
-Retrieved Data Available: {'Yes' if state.retrieved_data else 'No'}
-{f"Retrieved Data: {json.dumps(state.retrieved_data, indent=2)}" if state.retrieved_data else "No data was retrieved from external sources."}
+Retrieved Data Available: {'Yes' if evidence else 'No'}
+{f"Retrieved Data: {evidence}" if evidence else "No data was retrieved from external sources."}
 
 Generated Response:
 {state.answer}
@@ -311,6 +365,9 @@ Respond ONLY with valid JSON:
         else:
             validation_counter.labels(passed="true", reason="no_specific_facts").inc()
         logger.info("Response passed validation (no specific facts or has supporting data)")
+
+    if not state.validation_passed:
+        _decline_if_tool_turn(state)
 
     validate_duration = time.time() - start
     state.node_timings["validate"] = validate_duration
