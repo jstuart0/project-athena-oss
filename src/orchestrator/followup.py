@@ -26,13 +26,20 @@ from typing import Any, Mapping, Optional, Union
 from shared.fast_path_vocab import (
     AFFIRMATION_WORDS,
     BARE_AFFIRMATION_RE,
+    GRATITUDE_WORDS,
     BARE_NEGATION_RE,
     POLITE_SUFFIX_WORDS,
     normalize_reply,
 )
 
 from orchestrator import access_target
-from orchestrator.fast_path import _ends_with_question, ends_with_promise, last_assistant_text, last_sentence
+from orchestrator.fast_path import (
+    _ends_with_question,
+    ends_with_promise,
+    is_generic_closing,
+    last_assistant_text,
+    last_sentence,
+)
 from orchestrator.session_keys import id_class
 from orchestrator.state import IntentCategory
 from orchestrator.utterance_kind import UtteranceClassification, UtteranceKind
@@ -158,7 +165,11 @@ def _asked(last_exchange: Optional[Mapping[str, Any]], session_class: str, now: 
     if at is None or clock - at > STALE_AFTER_SECONDS:
         return None
     lowered = assistant.lower().replace("’", "'")
-    if any(phrase in lowered for phrase in _NON_TASK_REPLIES):
+    if any(phrase in lowered for phrase in _NON_TASK_REPLIES) or is_generic_closing(assistant):
+        return None
+    # A device offer tacked on an answer ("want me to turn on the lights?") is
+    # for control to take: it is not the information task.
+    if access_target.names_device(last_sentence(assistant)):
         return None
     if _ends_with_question(assistant):
         return user, assistant, "question"
@@ -207,7 +218,12 @@ def _pending_owns_reply(prev_context: Optional[Mapping[str, Any]]) -> bool:
     return any(isinstance(k, str) and k.startswith(_AWAITING_PREFIX) and v for k, v in parameters.items())
 
 
-def _is_affirmation(reply: str) -> bool:
+_GRATITUDE_TOKENS = frozenset(word for phrase in GRATITUDE_WORDS for word in phrase.split())
+
+
+def _is_affirmation(reply: str, task_kind: str = "question") -> bool:
+    if task_kind == "promise" and _GRATITUDE_TOKENS & set(reply.split()):
+        return False  # "ok thanks" after an offer closes the topic; it doesn't accept
     if BARE_AFFIRMATION_RE.match(reply):
         return True
     words = reply.split()
@@ -247,6 +263,20 @@ def slot_candidate(
     return asked is not None and asked[2] == "question" and _slot_shaped(query, uk)
 
 
+_INSTRUCTION_LIKE = re.compile(
+    r"\b(?:ignore|disregard|forget|override)\b.{0,40}\b(?:instructions?|rules|prompt|guidelines)\b"
+    r"|\bsystem prompt\b|\byou (?:must|are now|should now)\b|\bnew instructions\b",
+    re.IGNORECASE,
+)
+
+
+def _quote(offer: str) -> str:
+    """The assistant's own earlier sentence as quoted data: one line, no quote
+    marks, and nothing that reads as an instruction to the model."""
+    text = " ".join(offer.replace('"', "'").split())
+    return "an earlier offer" if _INSTRUCTION_LIKE.search(text) else text
+
+
 def _clean(text: str) -> str:
     return text.strip().rstrip(".!?, ")
 
@@ -269,9 +299,9 @@ def resolve(
         return None
     if BARE_NEGATION_RE.match(reply):
         return Decline()
-    if _is_affirmation(reply):
+    if _is_affirmation(reply, task.kind):
         return Affirm(
-            f"{_clean(task.request)}. You asked: {task.offer} The user answered: {reply}."
+            f'{_clean(task.request)}. You asked: "{_quote(task.offer)}" The user answered: {reply}.'
         )
     if task.kind == "question" and _slot_shaped(query, uk):
         return Slot(f"{_clean(task.request)}, {_clean(query)}")

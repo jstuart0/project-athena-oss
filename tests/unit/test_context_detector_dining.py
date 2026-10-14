@@ -169,3 +169,9 @@ def test_the_continuation_list_carries_the_shared_confirmation_vocabulary():
     from shared.fast_path_vocab import AFFIRMATION_WORDS, NEGATION_WORDS
 
     assert set(AFFIRMATION_WORDS + NEGATION_WORDS) <= set(CONTEXT_REF_PATTERNS["continuations"])
+
+
+def test_a_command_that_starts_with_a_yes_word_is_not_a_continuation():
+    assert detect_context_reference("Okay, turn off the lights")["is_continuation"] is False
+    assert detect_context_reference("yes, turn on the porch light")["is_continuation"] is False
+    assert detect_context_reference("Okay, thanks")["is_continuation"] is True  # positive control

@@ -332,7 +332,7 @@ class TestContextStorage:
 
     @pytest.mark.parametrize("answer", [
         "I'm sorry, that artist wasn't found.",
-        "The music service didn't start that in the office. Want me to try again?",
+        "The music service didn't start that in the office. Say 'play jazz' to try again.",
     ])
     def test_a_failed_play_is_stored_with_its_outcome(self, answer):
         mh = _make_music_handler()

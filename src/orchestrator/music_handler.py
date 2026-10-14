@@ -1113,6 +1113,7 @@ class MusicHandler:
 
         # Handle genre -> artist conversion for radio mode (random selection)
         genre = media_id if media_type == "genre" else None
+        requested = media_id
         tried_seeds: List[str] = []
         if genre:
             artist = get_genre_artist(genre)
@@ -1151,7 +1152,12 @@ class MusicHandler:
 
         # Release the account on failure
         self.account_pool.release_room(target_room)
-        return f"The music service didn't start that in the {target_room.replace('_', ' ')}. Want me to try again?"
+        # No question: a bare "yes" has no reader for a failed play, so the line
+        # says what to say instead.
+        return (
+            f"The music service didn't start that in the {target_room.replace('_', ' ')}. "
+            f"Say 'play {requested}' to try again."
+        )
 
     async def _play_once(
         self,

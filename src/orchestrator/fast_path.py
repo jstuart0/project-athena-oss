@@ -83,16 +83,19 @@ def _ends_with_question(text: Optional[str]) -> bool:
 
 
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
-_PROMISE_VERBS = r"(?:look|find|check|search|pull|get|show|give|tell|help|try|do|send|text|add|set)"
+_PROMISE_VERBS = r"(?:look|find|check|search|pull|get|show|give|tell|help|try|do|send|text|add|set|turn|play|open|book|call)"
+# An offer names an action: "I can also check ...", "want me to look ...". A bare
+# closing ("let me know if you need anything", "if you'd like") names none.
 _PROMISE_RE = re.compile(
-    r"\b(?:if you(?:'d| would)? (?:like|want|prefer|wish)"
-    r"|would you like"
-    r"|do you want"
-    r"|want me to"
-    r"|shall i"
-    r"|let me know if"
+    rf"\b(?:(?:want|would you like|do you want) me to {_PROMISE_VERBS}"
+    rf"|shall i {_PROMISE_VERBS}"
     rf"|i (?:can|could) (?:also |even )?{_PROMISE_VERBS}"
     rf"|i(?:'ll| will) (?:also |gladly |be happy to )?{_PROMISE_VERBS})\b"
+)
+# "Anything else?" and its kin close a conversation; they are not an open question.
+_GENERIC_CLOSING_RE = re.compile(
+    r"^(?:(?:is there )?anything else|what else|how else can i help|(?:can|may) i help (?:you )?with anything else"
+    r"|do you need anything else|is that all|will that be all)\b"
 )
 
 
@@ -100,6 +103,17 @@ def last_sentence(text: Optional[str]) -> str:
     """The text's final sentence, whitespace-trimmed."""
     parts = [p for p in _SENTENCE_BREAK.split((text or "").strip()) if p.strip()]
     return parts[-1].strip() if parts else ""
+
+
+def is_generic_closing(text: Optional[str]) -> bool:
+    sentence = last_sentence(text).lower().replace("\u2019", "'").rstrip(" ?.!")
+    return bool(sentence) and bool(_GENERIC_CLOSING_RE.match(sentence))
+
+
+def ends_with_open_offer(text: Optional[str]) -> bool:
+    """The text ends by asking or offering something concrete: a question or a
+    promise, and not a generic closing."""
+    return not is_generic_closing(text) and (_ends_with_question(text) or ends_with_promise(text))
 
 
 def ends_with_promise(text: Optional[str]) -> bool:
@@ -161,7 +175,7 @@ async def fast_path_open_question(session_id: Optional[str], last_assistant: Opt
                 reason = _context_reason(parameters)
                 if reason:
                     return reason
-        if _ends_with_question(last_assistant) or ends_with_promise(last_assistant):
+        if ends_with_open_offer(last_assistant):
             return REASON_OPEN_QUESTION
         return None
     except Exception:

@@ -167,6 +167,36 @@ def test_a_yes_does_not_resume_a_stale_or_foreign_exchange(monkeypatch, stored, 
     assert state.resolved_request is None
 
 
+MUSIC_TURNS = [
+    ("pause", "music_play"), ("next", "music_play"), ("louder", "music_play"), ("turn it up", "music_play"),
+    ("play the Beatles", "music_control"), ("play some jazz", "music_control"),
+]
+
+
+@pytest.mark.parametrize("query,stored_intent", MUSIC_TURNS, ids=[q for q, _ in MUSIC_TURNS])
+def test_a_music_request_of_the_other_kind_is_classified_fresh(monkeypatch, stored, query, stored_intent):
+    _run(_seed(stored, user="play jazz", assistant="Playing jazz in the kitchen.", intent=stored_intent,
+               parameters={"media_id": "jazz"}))
+    state = _classify(monkeypatch, query, stored)
+    assert state.continuation_decision["decision"] == "declined", state.continuation_decision
+    assert state.continuation_decision["reason"] in ("fresh_intent", "strong_intent")
+
+
+def test_a_reply_that_names_no_transport_word_still_continues_the_music_turn(monkeypatch, stored):
+    _run(_seed(stored, user="play jazz", assistant="Playing jazz in the kitchen.", intent="music_play",
+               parameters={"media_id": "jazz"}))
+    state = _classify(monkeypatch, "in the den", stored)
+    assert state.continuation_decision["decision"] == "continued" and state.intent == I.MUSIC_PLAY
+
+
+def test_the_music_fast_path_words_are_one_list():
+    from orchestrator.context import detector
+
+    assert len(detector.MUSIC_CONTROL_FAST_PATTERNS) >= 30 and "louder" in detector.MUSIC_CONTROL_FAST_PATTERNS
+    assert "MUSIC_CONTROL_FAST_PATTERNS" in (SRC / "main.py").read_text()
+    assert "music_control_fast_patterns = [" not in (SRC / "main.py").read_text()
+
+
 def test_a_yes_after_a_music_turn_does_not_resume_it(monkeypatch, stored):
     _run(_seed(stored, user="play some jazz", assistant="Playing jazz in the kitchen. Want it louder?", intent="music_play",
                parameters={"media_id": "jazz"}))
@@ -652,14 +682,15 @@ def test_a_genre_that_fails_twice_says_so_and_offers_to_try_again(monkeypatch):
     handler, attempts = _music_handler(monkeypatch, failures=5)
     answer = _run(handler.handle_play("genre", "jazz", room="kitchen"))
     assert len(attempts) == 2
-    assert answer == "The music service didn't start that in the kitchen. Want me to try again?"
+    assert answer == "The music service didn't start that in the kitchen. Say 'play jazz' to try again."
+    assert not answer.endswith("?")
     handler.account_pool.release_room.assert_called_once_with("kitchen")
 
 
 def test_an_artist_that_fails_is_not_retried(monkeypatch):
     handler, attempts = _music_handler(monkeypatch, failures=5)
     answer = _run(handler.handle_play("artist", "Someone", room="kitchen"))
-    assert attempts == ["Someone"] and answer.startswith("The music service didn't start that")
+    assert attempts == ["Someone"] and answer.startswith("The music service didn't start that") and "Say 'play Someone'" in answer
 
 
 def test_a_denied_write_is_never_retried(monkeypatch):
@@ -679,7 +710,7 @@ def test_a_denied_write_is_never_retried(monkeypatch):
 def test_a_genre_with_one_seed_has_nothing_to_retry_with(monkeypatch):
     handler, attempts = _music_handler(monkeypatch, failures=5, seeds=("Only One",))
     answer = _run(handler.handle_play("genre", "jazz", room="kitchen"))
-    assert attempts == ["Only One"] and "Want me to try again?" in answer
+    assert attempts == ["Only One"] and "Say 'play jazz' to try again." in answer
 
 
 def test_get_genre_artist_excludes_what_was_tried():

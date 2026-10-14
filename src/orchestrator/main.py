@@ -135,6 +135,7 @@ from shared.admin_url import get_admin_url, path_segment
 from shared.service_key import note_admin_refusal, service_key_headers
 
 # Modular context imports
+from orchestrator.context.detector import MUSIC_CONTROL_FAST_PATTERNS, MUSIC_SINGLE_WORDS
 from orchestrator.context import (
     detect_context_reference,
     detect_strong_intent,
@@ -2622,7 +2623,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     state.query, return_confidence=True
                 )
                 should_continue, decision_reason = decide_context_continuation(
-                    ref_info, prev_context.intent, fresh_intent, fresh_confidence
+                    ref_info, prev_context.intent, fresh_intent, fresh_confidence, state.query
                 )
 
                 if not should_continue:
@@ -2913,28 +2914,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Music control commands (pause, skip, volume, shuffle, repeat)
     # These should bypass LLM to avoid misclassification as CONTROL
-    music_control_fast_patterns = [
-        'pause', 'resume', 'stop music', 'stop the music',
-        'next song', 'next track', 'skip', 'skip this', 'skip song',
-        'previous song', 'previous track', 'go back',
-        'play the next one', 'next one', 'play the next',  # Round 11
-        'go back one song', 'back one song', 'one song back', 'play the last one',  # Round 11
-        'louder', 'quieter', 'volume up', 'volume down', 'turn it up', 'turn it down',
-        'shuffle', 'repeat', 'mute music', 'unmute',
-        # Additional volume patterns
-        'crank up', 'crank it up', 'pump up', 'pump it up', 'blast it',
-        'quiet down', 'turn down', 'softer', 'too loud', 'not so loud',
-        'turn up the music', 'cant hear it', "can't hear it", 'cant hear',
-        "can't hear", 'i cant hear', "i can't hear", 'volume way up',
-        'turn the volume way up', 'turn it way up',
-        # Now playing patterns
-        'song called', 'song name', 'whats that song', 'whats the song',
-        'what is that song', 'whats this song', 'what is this song'
-    ]
     # Single-word exact matches for music control
-    single_word_music = ['next', 'stop', 'previous', 'play']
-    is_music_fast_path = any(p in query_lower for p in music_control_fast_patterns)
-    is_single_word_music = query_lower.strip() in single_word_music
+    is_music_fast_path = any(p in query_lower for p in MUSIC_CONTROL_FAST_PATTERNS)
+    is_single_word_music = query_lower.strip() in MUSIC_SINGLE_WORDS
     if is_music_fast_path or is_single_word_music:
         logger.info(f"Fast path: music control detected in query_len={len(state.query)} - classifying as MUSIC_CONTROL")
         state.intent = IntentCategory.MUSIC_CONTROL

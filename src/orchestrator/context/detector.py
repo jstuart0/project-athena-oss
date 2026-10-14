@@ -8,6 +8,7 @@ This enables follow-up queries like "do that again", "turn them off", "what abou
 import re
 from typing import Any, Dict, List, Set
 
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from shared.fast_path_vocab import (
     AFFIRMATION_WORDS,
     GRATITUDE_WORDS,
@@ -445,7 +446,9 @@ def detect_context_reference(query: str) -> Dict[str, Any]:
         # Check if the entire query matches a continuation pattern
         # or if it starts with one (e.g., "no thanks", "yes please")
         reply = normalize_reply(query_lower)  # "Yes." and "yes" are the same reply
-        for cont in CONTEXT_REF_PATTERNS["continuations"]:
+        # "Okay, turn off the lights" is a command that starts with a yes-word.
+        is_command = classify_utterance(query).kind == UtteranceKind.IMPERATIVE
+        for cont in ([] if is_command else CONTEXT_REF_PATTERNS["continuations"]):
             if reply == cont or reply.startswith(cont + " "):
                 result["has_context_ref"] = True
                 result["ref_types"].append("continuation")
@@ -750,6 +753,36 @@ def _compute_anaphora_types(query_lower: str) -> Set[str]:
 # Intents that share a family for the "different topic" check in
 # decide_context_continuation. Every intent not listed here is its own
 # family (a set of one).
+# The utterances the music-control fast path takes (classify_node), and the
+# single words that mean a transport control. Owned here so the continuation
+# rule and the fast path read one list.
+MUSIC_CONTROL_FAST_PATTERNS = [
+        'pause', 'resume', 'stop music', 'stop the music',
+        'next song', 'next track', 'skip', 'skip this', 'skip song',
+        'previous song', 'previous track', 'go back',
+        'play the next one', 'next one', 'play the next',  # Round 11
+        'go back one song', 'back one song', 'one song back', 'play the last one',  # Round 11
+        'louder', 'quieter', 'volume up', 'volume down', 'turn it up', 'turn it down',
+        'shuffle', 'repeat', 'mute music', 'unmute',
+        # Additional volume patterns
+        'crank up', 'crank it up', 'pump up', 'pump it up', 'blast it',
+        'quiet down', 'turn down', 'softer', 'too loud', 'not so loud',
+        'turn up the music', 'cant hear it', "can't hear it", 'cant hear',
+        "can't hear", 'i cant hear', "i can't hear", 'volume way up',
+        'turn the volume way up', 'turn it way up',
+        # Now playing patterns
+        'song called', 'song name', 'whats that song', 'whats the song',
+        'what is that song', 'whats this song', 'what is this song'
+]
+MUSIC_SINGLE_WORDS = ('next', 'stop', 'previous', 'play')
+MUSIC_INTENTS = frozenset({"music_play", "music_control"})
+
+
+def matches_music_control_fast_path(query: str) -> bool:
+    lowered = (query or "").lower()
+    return lowered.strip() in MUSIC_SINGLE_WORDS or any(p in lowered for p in MUSIC_CONTROL_FAST_PATTERNS)
+
+
 _INTENT_FAMILIES = {
     "music_play": frozenset({"music_play", "music_control"}),
     "music_control": frozenset({"music_play", "music_control"}),
@@ -766,6 +799,7 @@ def decide_context_continuation(
     prev_intent: str,
     fresh_intent: str,
     fresh_confidence: float,
+    query: str = "",
 ) -> "tuple[bool, str]":
     """
     Decide whether a short/referential turn should continue the previous
@@ -782,6 +816,15 @@ def decide_context_continuation(
       5. Otherwise, classify fresh.
     """
     anaphora_types = set(ref_info.get("anaphora_types", []))
+
+    # "pause" after "play jazz" and "play the Beatles" after "pause" change
+    # music intent: the two share a family, but a transport control is not a
+    # play request, so the fresh intent (or the fast-path words) decides.
+    if prev_intent in MUSIC_INTENTS and (
+        (fresh_intent in MUSIC_INTENTS and fresh_intent != prev_intent and fresh_confidence >= 0.85)
+        or (prev_intent == "music_play" and matches_music_control_fast_path(query))
+    ):
+        return False, "fresh_intent"
 
     if anaphora_types & {"yes_no", "repeat", "incomplete_command"}:
         return True, "ellipsis"
