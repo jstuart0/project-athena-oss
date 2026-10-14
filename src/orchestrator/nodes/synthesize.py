@@ -25,7 +25,7 @@ from orchestrator.helpers import (
 )
 from orchestrator.utils.constants import DEFAULT_CITY
 from shared.admin_config import get_admin_client
-from shared.assistant_profile import build_core_assistant_prompt
+from shared.assistant_profile import build_core_assistant_prompt, resolve_assistant_name
 from shared.base_knowledge_utils import (
     assistant_name_from,
     extract_property_address,
@@ -199,11 +199,12 @@ Response:"""
             else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
         )
 
+        assistant_name = await resolve_assistant_name(assistant_name_from(visible_knowledge))
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=state.interface_type != "chat",
             interface_type=state.interface_type,
             long_form=is_long_form_turn(state.intent, state.query),
-            assistant_name=assistant_name_from(visible_knowledge),
+            assistant_name=assistant_name,
             **addressee.prompt_kwargs(),
         ) + "\n"
 
@@ -216,6 +217,7 @@ Response:"""
                 knowledge_context = await get_knowledge_context_for_user(
                     admin_client, audience=state.knowledge_audience,
                     without_identity_rows=addressee.kind is None and identity_answer.mentions_identity(state.query),
+                    assistant_name=assistant_name,
                 )
                 if knowledge_context:
                     system_context += knowledge_context

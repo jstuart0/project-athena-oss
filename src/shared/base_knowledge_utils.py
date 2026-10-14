@@ -76,7 +76,9 @@ def _category(entry: Dict[str, Any]) -> str:
     return str(entry.get("category") or "general").strip().lower()
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience: KnowledgeAudience) -> str:
+def build_knowledge_context(
+    knowledge_entries: List[Dict[str, Any]], *, audience: KnowledgeAudience, assistant_name: Optional[str] = None
+) -> str:
     """
     Build formatted context string from base knowledge entries.
 
@@ -166,9 +168,9 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience
             elif category == "general":
                 key = entry.get("key", "")
                 if "assistant_name" in key:
-                    cleaned_name = clean_assistant_name(resolved_value)
-                    if cleaned_name:
-                        context_lines.append(f"• Your Name: {cleaned_name}")
+                    # The prompt states one name: the resolved one, from the caller.
+                    if assistant_name:
+                        context_lines.append(f"• Your Name: {assistant_name}")
                 elif "location_context" in key:
                     context_lines.append(f"• {resolved_value}")
                 else:
@@ -271,6 +273,10 @@ def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]
 _NAME_INTRODUCTION_RE = re.compile(r"^(?:i am|i'm|my name is|call me|you are|you're|this is)\s+", re.IGNORECASE)
 _NAME_CLAUSE_END_RE = re.compile(r"[,.;:!?\n]")
 _ASSISTANT_NAME_MAX_WORDS = 2
+# The value admin-backend seeds into a fresh install's assistant_name row
+# (admin/backend/app/database.py, pinned by test_identity_answer). Nobody chose it,
+# so it never names the assistant.
+SEEDED_ASSISTANT_NAME_VALUE = "I am Athena, an AI assistant."
 
 
 def clean_assistant_name(value: Any) -> Optional[str]:
@@ -294,9 +300,12 @@ def clean_assistant_name(value: Any) -> Optional[str]:
 def assistant_name_from(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
     """The assistant's name from already-filtered ``general`` rows whose key
     contains ``assistant_name`` (see ``clean_assistant_name``); the first row
-    that gives a clean name wins. None when no visible row does."""
+    that gives a clean name wins. A row still holding the shipped seed text is
+    ignored. None when no visible row qualifies."""
     for entry in knowledge_entries or []:
         if _category(entry) == "general" and "assistant_name" in str(entry.get("key", "")):
+            if str(entry.get("value") or "").strip() == SEEDED_ASSISTANT_NAME_VALUE:
+                continue
             name = clean_assistant_name(entry.get("value"))
             if name:
                 return name
@@ -366,7 +375,8 @@ async def knowledge_cache_digest(admin_client, *, audience: KnowledgeAudience) -
 
 
 async def get_knowledge_context_for_user(
-    admin_client, *, audience: KnowledgeAudience, without_identity_rows: bool = False
+    admin_client, *, audience: KnowledgeAudience, without_identity_rows: bool = False,
+    assistant_name: Optional[str] = None,
 ) -> str:
     """
     Fetch and format base knowledge context for one audience.
@@ -386,7 +396,7 @@ async def get_knowledge_context_for_user(
             logger.info("no_base_knowledge_entries_found")
             return ""
 
-        context = build_knowledge_context(knowledge_entries, audience=audience)
+        context = build_knowledge_context(knowledge_entries, audience=audience, assistant_name=assistant_name)
 
         logger.info(
             "knowledge_context_generated",

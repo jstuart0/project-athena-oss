@@ -53,7 +53,7 @@ from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
-from shared.assistant_profile import build_core_assistant_prompt
+from shared.assistant_profile import build_core_assistant_prompt, resolve_assistant_name
 from shared.base_knowledge_utils import (
     assistant_name_from, build_knowledge_context, drop_identity_rows, extract_home_address, extract_owner_name,
     extract_property_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge,
@@ -4924,11 +4924,12 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
         )
 
+        assistant_name = await resolve_assistant_name(assistant_name_from(visible_knowledge))
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
             interface_type="voice" if channel_for_interface_type(getattr(state, "interface_type", None)) is OutputChannel.SPEECH else None,
             long_form=is_long_form_turn(state.intent, state.query),
-            assistant_name=assistant_name_from(visible_knowledge),
+            assistant_name=assistant_name,
             **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
@@ -4949,7 +4950,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     else visible_knowledge
                 )
                 knowledge_context = (
-                    build_knowledge_context(prompt_knowledge, audience=state.knowledge_audience)
+                    build_knowledge_context(prompt_knowledge, audience=state.knowledge_audience, assistant_name=assistant_name)
                     if prompt_knowledge else ""
                 )
                 if knowledge_context:
@@ -8434,11 +8435,12 @@ Response:"""
         else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
     )
 
+    assistant_name = await resolve_assistant_name(assistant_name_from(visible_knowledge))
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
         interface_type=state.interface_type,
         long_form=is_long_form_turn(state.intent, state.query),
-        assistant_name=assistant_name_from(visible_knowledge),
+        assistant_name=assistant_name,
         **addressee.prompt_kwargs(),
     ) + "\n"
 
@@ -8449,6 +8451,7 @@ Response:"""
             knowledge_context = await get_knowledge_context_for_user(
                 admin_client, audience=state.knowledge_audience,
                 without_identity_rows=addressee.kind is None and identity_answer.mentions_identity(state.query),
+                assistant_name=assistant_name,
             )
             if knowledge_context:
                 system_context += knowledge_context

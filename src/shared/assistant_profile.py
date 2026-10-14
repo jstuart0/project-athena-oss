@@ -231,6 +231,22 @@ def clean_guest_name(value: Optional[str]) -> Optional[str]:
     return name
 
 
+def choose_assistant_name(profile_name: str, row_name: Optional[str]) -> str:
+    """Which name the assistant has: a saved admin profile name (one that
+    differs from the code default) beats an operator-edited knowledge row
+    (``row_name``, already None for the untouched seed), which beats the
+    default. A profile saved with the default spelling can't be told from no
+    profile, so an edited row then applies."""
+    if profile_name != DEFAULT_ASSISTANT_PROFILE["assistant_name"]:
+        return profile_name
+    return row_name or profile_name
+
+
+async def resolve_assistant_name(row_name: Optional[str]) -> str:
+    """The one name a prompt states, for a visible knowledge row's name or None."""
+    return choose_assistant_name((await get_assistant_profile())["assistant_name"], row_name)
+
+
 # Fixed text, not part of the admin-editable profile: a saved profile can't
 # drop either line.
 TOOL_DEFAULTS_POLICY = (
@@ -255,8 +271,8 @@ async def build_core_assistant_prompt(
     """Build the canonical assistant persona/system prompt.
 
     `assistant_name` is a visible base-knowledge name row, already cleaned
-    (`base_knowledge_utils.assistant_name_from`); it wins over the profile's
-    name so the persona line and the "Your Name" row agree.
+    (`base_knowledge_utils.assistant_name_from`); see `choose_assistant_name`
+    for which name wins.
 
     `long_form` marks a recipe, directions, itinerary or step-by-step turn: its
     spoken answer is allowed to run past the short-answer sentence limit.
@@ -271,7 +287,7 @@ async def build_core_assistant_prompt(
     guardrails = await get_guardrails()
 
     lines = [
-        f'You are {assistant_name or profile["assistant_name"]}, {profile["identity"]}.',
+        f'You are {choose_assistant_name(profile["assistant_name"], assistant_name)}, {profile["identity"]}.',
         "",
         "Personality:",
     ]

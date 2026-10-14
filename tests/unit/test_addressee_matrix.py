@@ -366,3 +366,38 @@ def test_a_named_caller_keeps_the_rows_on_an_identity_turn(rig):
     row = next(r for r in ROWS if r.n == 10)
     for builder, text in _prompts(row, "do you know my address").items():
         assert "42 Example" in text, builder
+
+
+SEED_ROW = {**ASSISTANT_ROW, "value": "I am Athena, an AI assistant."}
+
+
+def _text_names(text: str) -> set:
+    """Every assistant name the prompt states: the persona line and the Your Name line."""
+    text = text.replace("\\n", "\n")  # the tool-call capture is a repr
+    return _persona_names(text) | set(re.findall(r"Your Name: ([^\n]+)", text))
+
+
+@pytest.mark.parametrize("row_number", [1, 8, 10])
+@pytest.mark.parametrize(
+    "profile_name,row_value,expected",
+    [
+        ("Jarvis", SEED_ROW["value"], "Jarvis"),          # (a) no saved profile + untouched seed
+        ("Jarvis", "My name is Friday", "Friday"),         # (b) no saved profile + edited row
+        ("Nova", "My name is Friday", "Nova"),             # (c) saved profile + edited row
+        ("Nova", SEED_ROW["value"], "Nova"),
+        ("Jarvis", "I am Friday, a helper", "Friday"),
+    ],
+)
+def test_one_assistant_name_per_prompt_by_precedence(rig, monkeypatch, row_number, profile_name, row_value, expected):
+    rig.get_base_knowledge = mock.AsyncMock(
+        return_value=[dict(r) for r in KNOWLEDGE_ROWS] + [{**ASSISTANT_ROW, "value": row_value}]
+    )
+    monkeypatch.setattr(
+        assistant_profile, "get_assistant_profile",
+        mock.AsyncMock(return_value={**assistant_profile.DEFAULT_ASSISTANT_PROFILE, "assistant_name": profile_name}),
+    )
+    row = next(r for r in ROWS if r.n == row_number)
+    for builder, text in _prompts(row).items():
+        where = f"{builder} {profile_name!r} {row_value!r}"
+        assert _text_names(text) == {expected}, where
+        assert "Athena" not in text.replace("Project Athena", "") or expected == "Athena", where
