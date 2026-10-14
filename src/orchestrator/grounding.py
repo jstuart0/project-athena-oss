@@ -100,8 +100,9 @@ def prior_tool_context(state: Any) -> bool:
     if previous.get("intent") != getattr(intent, "value", intent):
         return False
     parameters = previous.get("parameters") or {}
-    held_data = bool(parameters.get("tool_calls") or parameters.get("grounded"))
-    return held_data and not parameters.get("direct_answer")
+    # Only a turn that held data counts: a failed or declined search saved
+    # ``grounded`` False, and a context saved before the marker existed isn't trusted.
+    return parameters.get("grounded") is True and not parameters.get("direct_answer")
 
 
 def evidence_summary(state: Any, limit: int = EVIDENCE_LIMIT) -> str:
@@ -170,12 +171,25 @@ _KNOWLEDGE_QUESTION = re.compile(
 )
 
 
+# A question about now, today or a price is about the world's current state, not a concept.
+_CURRENT_WORDS = re.compile(
+    r"\b(?:today|now|tonight|tomorrow|yesterday|last night|this (?:week|weekend|morning|afternoon|evening|month|season|year)|"
+    r"latest|current(?:ly)?|right now|recent(?:ly)?|score|scores|price of)\b",
+    re.IGNORECASE,
+)
+
+
 def knowledge_question(query: Optional[str]) -> bool:
     """A definition, how-it-works or why question: its answer may carry worked
     examples (a company and a price) that no tool could supply. A request to find
     a business is never one."""
     text = (query or "").strip()
-    return bool(text) and bool(_KNOWLEDGE_QUESTION.search(text)) and not local_business_cue(text)
+    return (
+        bool(text)
+        and bool(_KNOWLEDGE_QUESTION.search(text))
+        and not _CURRENT_WORDS.search(text)
+        and not local_business_cue(text)
+    )
 
 
 # --- location -------------------------------------------------------------------
@@ -319,7 +333,7 @@ def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: st
 # --- ungrounded answers -----------------------------------------------------------
 
 _EXPERIENCE_CLAIM = re.compile(
-    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|here|to)|eaten|tried|visited|dined|stayed at|gone to)\b"
+    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|here|to)|eaten|tried (?:(?:the|a|an|their|some|that|this) [\w'-]+(?: [\w'-]+){0,3}|it) (?:there|here)|visited|dined|stayed at|gone to)\b"
     r"|\bI\s+(?:personally\s+)?(?:ate|went|dined|visited|stayed|got)\s+(?:to |at )?(?:there|here)\b"
     r"|\bI\s+(?:personally\s+)?(?:ate at|went to|dined at|visited|stayed at)\b"
     r"|\bI(?:'ve| have)? had (?:a|an|the|some)\b[^.?!]{0,40}\b(?:there|here)\b"

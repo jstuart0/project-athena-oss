@@ -186,6 +186,7 @@ from orchestrator.grounding import (
 )
 from orchestrator.turn_capture import captures_turn, current_capture
 from shared import conversation_capture as contract_capture
+from orchestrator.nodes.synthesize import save_synthesis_context
 from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
@@ -6076,7 +6077,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
                     intent=context_intent,
                     query=state.query,
                     entities=context_entities,
-                    parameters={"tool_calls": tool_names},
+                    parameters={"tool_calls": tool_names, "grounded": grounded(state)},
                     response=state.answer or "",  # Store full response for conversation continuity
                     ttl=300  # 5 minute TTL
                 )
@@ -7803,6 +7804,12 @@ async def process_query_stream(
                     # Speech is normalized as a whole, so it is sent once, at the end.
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(full_answer, request.interface_type)})}\n\n"
 
+                if full_answer and stream_completed:
+                    try:
+                        await save_synthesis_context(state, full_answer)
+                    except Exception as ctx_err:  # a follow-up aid, never the answer
+                        logger.warning("stream_context_save_failed", error_class=type(ctx_err).__name__)
+
             llm_time = time.time() - llm_start_time
 
             # Session persistence — partial-stream policy:
@@ -8877,6 +8884,11 @@ async def chat_completions(
                     logger.info(f"Session {session.session_id} updated with {len(session.messages) + 2} messages (streaming)")
                     capture.observe(state)
                     capture.answered(full_response)
+                    if full_response:
+                        try:
+                            await save_synthesis_context(state, full_response)
+                        except Exception as ctx_err:  # a follow-up aid, never the answer
+                            logger.warning("stream_context_save_failed", error_class=type(ctx_err).__name__)
 
                     # Record streaming synthesis LLM call for metrics
                     from shared.metrics import LLM_CALL_DURATION, LLM_TOKENS_GENERATED

@@ -241,7 +241,11 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
     # A definition, how-it-works or why question: its worked example (a company
     # and a price) is not a claim about the world, whatever the intent.
-    if knowledge_question(state.query) and not local_business_cue(state.query):
+    if (
+        state.intent != IntentCategory.WEBSEARCH
+        and knowledge_question(state.query)
+        and not local_business_cue(state.query)
+    ):
         state.validation_passed = True
         state.validation_reason = None
         state.node_timings["validate"] = time.time() - start

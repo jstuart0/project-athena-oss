@@ -138,7 +138,7 @@ def test_a_knowledge_question_as_general_info_is_not_forced():
 
 
 def test_a_follow_up_on_this_intents_tool_results_is_not_forced():
-    previous = {"intent": "dining", "parameters": {"tool_calls": ["search_restaurants"]}, "response": "x"}
+    previous = {"intent": "dining", "parameters": {"tool_calls": ["search_restaurants"], "grounded": True}, "response": "x"}
     state = _state("do they have outdoor seating", prev_context=previous)
     assert grounding.prior_tool_context(state)
     assert grounding.forced_tool_calls(state, offered=ALL_TOOLS, search_location="Anytown") == []
@@ -154,7 +154,7 @@ def test_a_retrieve_path_turn_with_data_counts_as_prior_context():
 
 @pytest.mark.parametrize("previous", [
     None,
-    {"intent": "weather", "parameters": {"tool_calls": ["get_weather"]}},
+    {"intent": "weather", "parameters": {"tool_calls": ["get_weather"], "grounded": True}},
     {"intent": "dining", "parameters": {"direct_answer": True}},
     {"intent": "dining", "parameters": {"tool_calls": []}},
 ])

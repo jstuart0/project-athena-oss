@@ -370,3 +370,69 @@ def test_the_two_paths_have_no_routing_rule_of_their_own():
         node = next(n for n in ast.walk(tree) if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == fn)
         names = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "IntentCategory"}
         assert not names, f"{fn} names intents {names}: routing rules belong in answer_route"
+
+
+# --- the streamed syntheses save the context a follow-up reads (ian 3) ---------------------------------------------------
+
+def _stream_save_rig(monkeypatch, *, intent, data):
+    stored = mock.AsyncMock()
+    h.reset_runtime()
+    h.patch_conversation_config(monkeypatch)
+    monkeypatch.setattr(h.main, "_direct_general_info_response", lambda q: True)
+    h.install_mode_client(server_mode="owner")
+    monkeypatch.setattr(h.main, "get_admin_client", lambda: h.fake_admin_client())
+    h._runtime.set_cache_client(SimpleNamespace(client=SimpleNamespace(
+        delete=mock.AsyncMock(), get=mock.AsyncMock(return_value=None), setex=mock.AsyncMock())))
+    h._runtime.set_llm_router(h.CapturingLLM(content="It is sunny and mild in the park today."))
+    monkeypatch.setattr(h.synthesize_module, "store_conversation_context", stored)
+    monkeypatch.setattr(h.main, "record_intent_metric", mock.AsyncMock())
+
+    async def classify(state):
+        state.intent, state.confidence = intent, 0.9
+        return state
+
+    async def route_info(state):
+        return state
+
+    async def retrieve(state):
+        state.retrieved_data = data
+        return state
+
+    async def no_trigger(state, trigger_context="classify"):
+        return False
+
+    async def no_ambient(state):
+        return False
+
+    for name, fn in (("classify_node", classify), ("route_info_node", route_info), ("retrieve_node", retrieve),
+                     ("should_use_tool_calling", no_trigger), ("ambient_fragment_applies", no_ambient)):
+        monkeypatch.setattr(h.main, name, fn)
+    monkeypatch.setattr(h.main, "get_component_config", mock.AsyncMock(return_value={"model_name": "m"}))
+    monkeypatch.setattr(h.main, "get_model_for_component", mock.AsyncMock(return_value="m"))
+    return stored
+
+
+STREAMS = {
+    "/query/stream": lambda: {"query": "weather in the park", "interface_type": "text", "caller_trust": "household"},
+    "/v1/chat/completions": lambda: {"model": "m", "stream": True, "messages": [{"role": "user", "content": "weather in the park"}],
+                                     "extra_body": {"interface_type": "text"}},
+}
+
+
+@pytest.mark.parametrize("path", list(STREAMS))
+@pytest.mark.parametrize("intent", [I.WEATHER, I.SPORTS, I.AIRPORTS])
+def test_a_streamed_synthesis_saves_the_same_context_as_the_graph(monkeypatch, path, intent):
+    stored = _stream_save_rig(monkeypatch, intent=intent, data={"current": {"temp": 70}})
+    asyncio.run(_post(path, STREAMS[path]()))
+    stored.assert_awaited_once()
+    kwargs = stored.await_args.kwargs
+    assert kwargs["intent"] == intent.value and kwargs["parameters"]["grounded"] is True
+    assert kwargs["response"].startswith("It is sunny")
+
+
+@pytest.mark.parametrize("path", list(STREAMS))
+def test_a_streamed_synthesis_with_no_data_saves_no_grounded_marker(monkeypatch, path):
+    stored = _stream_save_rig(monkeypatch, intent=I.WEATHER, data={})
+    asyncio.run(_post(path, STREAMS[path]()))
+    stored.assert_awaited_once()
+    assert "grounded" not in stored.await_args.kwargs["parameters"]

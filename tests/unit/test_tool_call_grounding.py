@@ -106,7 +106,7 @@ def test_an_off_stay_sms_caller_is_forced_only_into_the_tools_it_may_use(monkeyp
 
 def test_a_follow_up_on_earlier_tool_results_is_not_forced(monkeypatch):
     previous = {"intent": "dining", "query": "q", "response": "Luigi's Trattoria is nice.",
-                "parameters": {"tool_calls": ["search_restaurants"]}}
+                "parameters": {"tool_calls": ["search_restaurants"], "grounded": True}}
     state = _state("do they take reservations", prev_context=previous)
     state, execute, _ = _run_tool_node(monkeypatch, state)
     assert _executed(execute) == []
@@ -816,3 +816,76 @@ def test_the_request_location_is_carried_on_the_state(monkeypatch):
     assert TestClient(h.main.app).post("/query", json=body, headers=h.service_headers()).status_code == 200
     assert seen[0].request_location == "47.6, -122.3" and seen[0].entities["location"] == "47.6, -122.3"
     assert grounding.resolve_search_location(seen[0], "home")[0] == "47.6, -122.3"
+
+
+# --- a failed or declined turn is not prior data (ian 1) ----------------------------------------------------------------
+
+def test_a_failed_search_saves_a_context_that_is_not_prior_data_and_the_next_turn_is_forced(monkeypatch):
+    out, _execute, _ = _run_tool_node(
+        monkeypatch, _state("recommend an italian place near me", session_id="s1"),
+        llm=h.CapturingLLM(content="Sorry, the restaurant search is down."),
+        executor_results={"search_restaurants": tool_error_result("boom")},
+    )
+    saved = h.main.store_conversation_context.await_args.kwargs
+    assert saved["parameters"]["grounded"] is False and saved["parameters"]["tool_calls"] == ["search_restaurants"]
+    previous = {"intent": saved["intent"], "query": saved["query"], "response": saved["response"], "parameters": saved["parameters"]}
+
+    follow_up = _state("any Italian places?", prev_context=previous)
+    assert not grounding.prior_tool_context(follow_up)
+    _out, execute, _ = _run_tool_node(monkeypatch, follow_up, llm=h.CapturingLLM(content=INVENTED),
+                                      executor_results={"search_restaurants": tool_error_result("boom")})
+    assert _executed(execute) == ["search_restaurants"]  # forced again, not skipped
+    assert _out.answer == grounding.DECLINE_TEXT  # and the invented venue is declined
+
+
+def test_a_successful_search_saves_a_grounded_context(monkeypatch):
+    _run_tool_node(monkeypatch, _state(session_id="s1"), llm=h.CapturingLLM(content="Luigi's is nearby."),
+                   executor_results={"search_restaurants": {"places": [{"name": "Luigi's"}]}})
+    assert h.main.store_conversation_context.await_args.kwargs["parameters"]["grounded"] is True
+
+
+@pytest.mark.parametrize("parameters", [{"tool_calls": ["search_restaurants"]}, {"tool_calls": ["x"], "grounded": False},
+                                         {"grounded": "yes"}])
+def test_only_a_marker_of_true_makes_prior_data(parameters):
+    state = _state(prev_context={"intent": "dining", "parameters": parameters})
+    assert not grounding.prior_tool_context(state)
+
+
+# --- the knowledge exemption stops at current events and web search (ian 2) -------------------------------------------
+
+@pytest.mark.parametrize("query,intent", [
+    ("why did the Ravens lose last night", I.SPORTS),
+    ("why is Tesla down today", I.STOCKS),
+    ("what is a good stock to buy now", I.STOCKS),
+    ("how is the current price of oil calculated", I.NEWS),
+    ("why is the latest forecast so wrong", I.WEATHER),
+    ("explain the score this weekend", I.SPORTS),
+    ("what is a stock split", I.WEBSEARCH),
+])
+def test_current_questions_and_web_search_keep_layers_three_and_four(query, intent):
+    state = _state(query, intent, answer="Acme Corp fell $5 on a 4:30 PM report.", tool_call_attempted=True)
+    router = mock.Mock(generate=mock.AsyncMock(return_value={"response": '{"contains_hallucinations": true, "reason": "x"}'}))
+    h._runtime.set_llm_router(router)
+    with mock.patch("orchestrator.nodes.validate.get_component_config", mock.AsyncMock(return_value={"model_name": "m"})):
+        out = _validate(state)
+    router.generate.assert_called_once()
+    assert out.validation_passed is False
+
+
+@pytest.mark.parametrize("query", ["why did the Ravens lose last night", "why is Tesla down today",
+                                   "what is a good stock to buy now", "what is the current price of oil"])
+def test_current_questions_are_not_knowledge_questions(query):
+    assert not grounding.knowledge_question(query)
+
+
+# --- experience claims (ian 4) ----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("answer,expected", [
+    ("I tried to look that up but the service didn't answer.", False),
+    ("I tried my best to find it.", False),
+    ("I tried the pasta there and it was great.", True),
+    ("I tried it there last week.", True),
+    ("I've tried their lasagna there.", True),
+])
+def test_tried_alone_is_not_an_experience_claim(answer, expected):
+    assert grounding.experience_claim(answer, "where should we eat") is expected
