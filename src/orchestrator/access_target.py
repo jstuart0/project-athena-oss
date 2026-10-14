@@ -249,6 +249,9 @@ DEVICE_WORDS: dict = {
         "lock", "locks", "unlock", "unlocks", "locking", "locked", "unlocked", "deadbolt", "deadbolts", "door", "doors",
     }),
 }
+# The actions that only read. One set for the planner (which skips an unbacked
+# status check) and the executor (which never sends a service call for one).
+READ_ONLY_ACTIONS: FrozenSet[str] = frozenset({"get_status", "check_status", "status", "check", "read"})
 _DEVICE_KIND_ALIASES = {"media_player": "media", "tv": "media", "speaker": "media"}
 _LIGHT_ACTIONS = frozenset({"set_color", "set_brightness"})
 

@@ -1363,3 +1363,69 @@ class TestTheRouteAppendsTheSkippedStepNote:
             result = _run(route_control_node(state))
         _runtime.reset_for_test()
         assert result.answer == "On it! I couldn't check that one."
+
+
+class TestSkippedStepsNeverRealignClauses:
+    def test_a_later_write_is_grounded_against_the_whole_utterance_after_a_skip(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        query = "check the hall fan and turn off the galley lights"
+        assert len(room_context.step_clauses(query)) == 2
+        steps = [_typed_step("climate", "get_status", room="hall"), _room_step("turn_off", "galley"),
+                 _room_step("turn_on", "hall")]
+        seen = []
+        real = rig.controller._decide_intent_room
+
+        async def spy(intent, original_query, *a, **kw):
+            seen.append(original_query)
+            return await real(intent, original_query, *a, **kw)
+
+        rig.controller._decide_intent_room = spy
+        notes = []
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, query, None, notes)
+
+        assert asyncio.run(go()) is None
+        assert notes == [shc.SKIPPED_STEP_NOTE] and len(steps) == 2
+        # Two steps now match the two clauses, but the plan was not aligned
+        # when it started: every write reads the whole utterance.
+        assert seen == [query, query]
+
+    def test_an_aligned_plan_still_realigns_by_dropping_the_skipped_clause(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        query = "tell me if the hall fan is running and turn the galley lights off in two minutes"
+        steps = [_typed_step("climate", "get_status", room="hall"), _room_step("turn_off", "hall")]
+        notes = []
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, query, None, notes)
+
+        assert asyncio.run(go()) is None
+        assert steps[0]["target"]["decided_room"] == "galley"
+
+
+class TestOneReadOnlyActionSet:
+    def test_the_planner_and_the_executor_share_one_set(self):
+        import orchestrator.sequence_executor as se
+        assert not hasattr(se, "_READ_ACTIONS") and not hasattr(shc, "READ_ONLY_ACTIONS")
+        assert "check_status" in access_target.READ_ONLY_ACTIONS
+
+    @pytest.mark.parametrize("action", sorted(access_target.READ_ONLY_ACTIONS) + ["Check_Status", " get_status "])
+    def test_a_direct_entity_read_step_makes_no_service_call(self, monkeypatch, action):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        executor = SequenceExecutor(rig.controller, rig.raw)
+        target = {"device_type": "climate", "entity_id": "climate.thermostat", "decided_entity": "climate.thermostat"}
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await executor._execute_step({"action": action, "target": target, "parameters": {}}, 1, 1)
+
+        assert "can't read a status" in asyncio.run(go())
+        assert rig.raw.call_service.await_count == 0
+
+    @pytest.mark.parametrize("action", sorted(access_target.READ_ONLY_ACTIONS))
+    def test_the_planner_treats_every_member_as_read_only(self, action):
+        assert shc.SmartHomeController._reads_only({"action": action}) is True
+        assert shc.SmartHomeController._reads_only({"action": "turn_on"}) is False

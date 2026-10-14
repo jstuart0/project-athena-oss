@@ -22,7 +22,6 @@ from shared.local_time import local_now, local_tz
 
 logger = logging.getLogger(__name__)
 
-_READ_ACTIONS = frozenset({"get_status", "status", "check", "read"})
 UNGROUNDED_ENTITY_STEP_REFUSAL = "I didn't run that step because I couldn't tell which device you meant."
 UNGROUNDED_ROOM_STEP_REFUSAL = "I didn't run that step because I couldn't tell which room you meant."
 ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
@@ -369,7 +368,7 @@ class SequenceExecutor:
             logger.warning("sequence_entity_refused", extra={"reason": "entity_not_grounded"})
             return UNGROUNDED_ENTITY_STEP_REFUSAL
 
-        if entity_id and action in _READ_ACTIONS:
+        if entity_id and isinstance(action, str) and action.strip().lower() in access_target.READ_ONLY_ACTIONS:
             # A read is not a service: there is nothing to call.
             return "I can't read a status in the middle of a sequence."
 

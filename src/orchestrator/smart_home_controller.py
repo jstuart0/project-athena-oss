@@ -201,7 +201,6 @@ _DECIDED_DOMAINS = {
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
 SKIPPED_STEP_NOTE = "I couldn't check that one."
-READ_ONLY_ACTIONS = frozenset({"get_status", "check_status", "status", "check", "read"})
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -2872,7 +2871,7 @@ Return ONLY valid JSON."""
             domain = _DECIDED_DOMAINS.get(device_type)
             # The step's own words: its clause when the clauses line up with
             # the steps, else the whole utterance.
-            clause = clauses[index] if len(clauses) == len(steps) else query
+            clause = clauses[index] if aligned else query
             dropped = False
             if target.get('entity_id') and target.get('decided_entity') != target['entity_id']:
                 # Every step, whatever its device type: a model's entity id
@@ -2980,7 +2979,7 @@ Return ONLY valid JSON."""
     def _reads_only(step: Dict) -> bool:
         """Whether a step's action never writes (a status check)."""
         action = step.get('action')
-        return isinstance(action, str) and action.strip().lower() in READ_ONLY_ACTIONS
+        return isinstance(action, str) and action.strip().lower() in access_target.READ_ONLY_ACTIONS
 
     async def _entity_named_in(self, entity_id, clause: str, query: str, directory) -> bool:
         """Whether a model's entity id is one the step's own words call by
