@@ -67,7 +67,7 @@ from orchestrator.utterance_kind import (
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 from orchestrator.context.detector import context_ref_view
 from orchestrator.metrics import ha_write_fanout_confirm_total
-from orchestrator import room_choice, room_context, write_fanout
+from orchestrator import access_target, room_choice, room_context, write_fanout
 from orchestrator.room_choice import storable_intent as _storable_intent
 from orchestrator.turn_capture import audience_class_for
 
@@ -552,7 +552,9 @@ def _carried_cue_query(prev_params: Any, intent: Dict[str, Any], state: Orchestr
         or not isinstance(cue.get("query"), str)
     ):
         return None
-    return f"{cue['query']} {state.query}"
+    if access_target.has_negator(state.query):
+        return None  # "no, not that one": a negated turn does not borrow a cue
+    return f"{cue['query']}. {state.query}"
 
 
 def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
@@ -1283,7 +1285,6 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
-                cue_query = None
                 if has_context and ref_info.get("has_context_ref"):
                     # Use previous context to resolve the command
                     prev = state.prev_context
@@ -1341,7 +1342,6 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # earlier unlock or open.
                         intent['action'] = 'get_status'
                     follow_up = {"fingerprint": state.caller_fingerprint, "audience": _audience_class(state)}
-                    cue_query = _carried_cue_query(prev_params, intent, state)
 
                     # If a new room is named, the earlier decision is dropped and
                     # the command decides afresh; otherwise ("turn them off") it
@@ -1439,6 +1439,13 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # Execute the command (the original query feeds the room decision and
                 # the fan-out gate; the speaker's room is the default only where the
                 # command names none and the directory knows it)
+                # The earlier command's words count as this turn's cue only for
+                # the same caller, audience, device and action, judged on the
+                # final intent (after every override above).
+                cue_query = (
+                    _carried_cue_query(state.prev_context.get("parameters"), intent, state)
+                    if has_context and ref_info.get("has_context_ref") and state.prev_context else None
+                )
                 await _execute_and_record(
                     state, scope, intent, original_query=state.query, uk=uk,
                     foreign_pending=foreign_pending, store_query=state.query, cue_query=cue_query,

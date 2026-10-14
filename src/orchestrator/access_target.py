@@ -274,11 +274,221 @@ def _says_a_temperature(toks: Sequence[str]) -> bool:
     )
 
 
-# A command that changes a device must carry a cue in the user's words (the
-# server never infers a write from a room, a speaker position or a model's
-# guess alone). Every device kind is judged except reads, locks and scenes (a
-# door has its own rules: an opening verb plus a name) and the read-only
-# appliance kinds; a kind with no table is refused (fail closed).
+# Phrases the fast path (and the intent extractor) recognise on their own. One
+# definition: the controller uses them to route, and the write-cue check counts
+# a hit as a cue before negation is applied.
+MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
+    'leave the lights on',
+    'keep the lights on',
+    'lights stay on',
+    "don't turn off the lights",
+    'stop turning off the lights',
+    'leave lights on',
+    'keep lights on',
+    'leave the lights off',
+    'keep the lights off',
+    'lights stay off',
+    "don't turn on the lights",
+    'stop turning on the lights',
+    'leave lights off',
+    'keep lights off',
+    'taking a nap',
+    'gonna nap',
+    'going to nap',
+    'nap time',
+    'disable motion',
+    'turn off motion',
+    'no motion',
+    'motion off',
+    'disable the motion',
+    'stop motion detection',
+    'pause motion',
+    'disable motion detection',
+    'turn off motion detection',
+    'enable motion',
+    'turn on motion',
+    'motion on',
+    'resume motion',
+    'enable the motion',
+    'start motion detection',
+    'resume normal',
+    'turn motion back on',
+    'motion detection on',
+    'normal motion',
+    'reset motion',
+    'reset the motion',
+    'keep it at this brightness',
+    'lock the brightness',
+    'stay at this brightness',
+    'keep this brightness',
+    'maintain this brightness',
+    'brightness override',
+    'lock brightness',
+    'set motion brightness',
+    'override brightness',
+    'keep the brightness',
+    'stay this bright',
+    "don't change brightness",
+)
+
+IMPLICIT_BRIGHTER: Tuple[str, ...] = (
+    "can't see",
+    'cant see',
+    'cannot see',
+    'too dark',
+    'hard to see',
+    'brighter',
+    'more light',
+    'brighten',
+    'bump up',
+    'bump it up',
+    'brightness higher',
+    'set brightness higher',
+    'raise the lights',
+    'lights higher',
+    'higher brightness',
+    'getting dark',
+    'need some light',
+    'need light',
+    'need more light',
+    'give me some light',
+    'some light over here',
+    'some light please',
+    'bring up the lights',
+    'bring the lights up',
+    'kinda dim',
+    'looking dim',
+    'its dim',
+    "it's dim",
+    'bit dim',
+    'pretty dim',
+    'bring them back up',
+    'bring it back up',
+    'back up',
+    'bring em back up',
+    'lights weak',
+    'weak af',
+    'not bright enough',
+    'need it brighter',
+    'super bright',
+    'really bright',
+    'extra bright',
+    'crazy bright',
+)
+
+IMPLICIT_DIMMER: Tuple[str, ...] = (
+    'too bright',
+    'dimmer',
+    'less light',
+    'darker',
+    'softer light',
+    'make it cozy',
+    'lower the lights',
+    'lower lights',
+    'way down',
+    'turn it down',
+    'brightness lower',
+    'set brightness lower',
+    'bring the lights down',
+    'bring down the lights',
+    'lights lower',
+    'lower brightness',
+    'too much light',
+    'thats too much',
+    'not so bright',
+    'a bit less',
+    'little less light',
+    'darken it up',
+    'tone down',
+    'tone it down',
+    'take it easy on my eyes',
+    'easy on my eyes',
+    'fade the lights',
+    'fade lights',
+    'fade down',
+    'fade it down',
+    'fade them down',
+    'fade out',
+    'fading',
+)
+
+TURN_OFF_PHRASES: Tuple[str, ...] = (
+    'lights out',
+    'kill the light',
+    'kill the lights',
+    'cut the lights',
+    'cut the light',
+    'no more lights',
+    'no more light',
+    'shut it off',
+    'shut off the lights',
+    'shut them off',
+    'forget the lights',
+    'forget the light',
+    'off with the lights',
+    'off with the light',
+    'every light off',
+    'every light out',
+    'kill all the lights',
+    'kill all lights',
+    'kill all',
+    'everything off',
+    'all off',
+    'yo everything off',
+)
+
+BRIGHTER_PATTERNS: Tuple[str, ...] = (
+    'brighter',
+    'more light',
+    'brighten',
+    'too dark',
+    'it is dark',
+    'need more light',
+    'can barely see',
+    'increase brightness',
+    'increase light',
+    "can't see",
+    'cant see',
+    'cannot see',
+    'hard to see',
+    'difficult to see',
+)
+
+DIMMER_PATTERNS: Tuple[str, ...] = (
+    'dimmer',
+    'less light',
+    'too bright',
+    'it is too bright',
+    'decrease brightness',
+    'decrease light',
+    'softer light',
+    'make it cozy',
+    'dim a little',
+    'dim a bit',
+    'a little dimmer',
+    'a bit dimmer',
+    'darker',
+    'make it darker',
+    'can you dim',
+    'could you dim',
+)
+
+TEAM_TABLE = """SPORTS TEAM COLORS (use these hue values for team color requests):
+NFL: Ravens(270,45), Steelers(50,0), Browns(30,0), Bengals(30,0), Chiefs(0,50), Bills(240,0), Dolphins(175,30), Patriots(220,0), Jets(120,0), Raiders(0,0), Broncos(30,240), Chargers(50,210), Cowboys(220,0), Eagles(180,0), Giants(240,0), Commanders(45,0), Packers(120,50), Bears(30,220), Lions(210,0), Vikings(270,50), 49ers(0,50), Seahawks(120,220), Cardinals(0,0), Rams(240,50), Falcons(0,0), Panthers(210,0), Saints(50,0), Buccaneers(0,0), Colts(240,0), Titans(210,0), Texans(220,0), Jaguars(175,50)
+MLB: Orioles(30), Yankees(220), Red Sox(0), Blue Jays(240), Rays(210), Mets(240,30), Phillies(0), Braves(220,0), Marlins(210), Nationals(0), Cubs(240,0), Cardinals(0), Brewers(50,220), Reds(0), Pirates(50,0), Dodgers(240), Giants(30,0), Padres(50,45), Diamondbacks(0,175), Rockies(270,0), Astros(30,220), Rangers(240,0), Mariners(175,220), Angels(0), Athletics(120,50), Twins(220,0), White Sox(0,0), Tigers(30,220), Royals(240), Indians/Guardians(0,220)
+NBA: Lakers(270,50), Celtics(120), Warriors(50,240), Bulls(0), Heat(0,0), Nets(0,0), Knicks(240,30), 76ers(240,0), Suns(30,270), Bucks(120), Hawks(0), Spurs(0,0), Mavericks(220,0), Nuggets(50,220), Clippers(0,240), Kings(270), Blazers(0,0), Jazz(50,120,220), Pacers(50,220), Cavaliers(45,0), Pistons(0,240), Magic(240,0), Hornets(175,270), Wizards(220,0), Grizzlies(210), Pelicans(50,0,220), Timberwolves(220,120), Thunder(240,30), Raptors(0,0)
+NHL: Capitals(0,220), Penguins(50,0), Flyers(30,0), Rangers(240,0), Bruins(50,0), Canadiens(0,240), Maple Leafs(240), Red Wings(0), Blackhawks(0,0), Blues(240,50), Avalanche(45,240), Golden Knights(50,0), Kraken(175,0), Sharks(175), Ducks(30,50), Kings(0,0), Flames(0,50), Oilers(30,220), Canucks(120,240), Jets(220), Wild(120,0), Stars(120,0), Predators(50,220), Lightning(240), Panthers(0,220), Devils(0,0), Islanders(30,240), Hurricanes(0,0), Blue Jackets(220,0), Senators(0,50), Sabres(50,220)
+College: Michigan(50,240), Ohio State(0), Penn State(220), Alabama(45,0), Georgia(0,0), Clemson(30,270), LSU(50,270), Notre Dame(50,240), Oklahoma(45,0), Texas(210,30), USC(45,0), UCLA(50,240), Florida(30,240), Auburn(30,220), Tennessee(30,0), Wisconsin(0,0), Oregon(120,50), Washington(270,50), Florida State(45,0), Miami(30,120), NC State(0,0), Duke(240), UNC(210), Kentucky(240), Kansas(240,0), Gonzaga(220,0), Villanova(220,0), Syracuse(30), Army(50,0), Navy(220,50), Air Force(240,0), West Point(50,0)
+Soccer/MLS: LAFC(50,0), LA Galaxy(220,50), Atlanta United(0,50), Seattle Sounders(120,240), NYCFC(210,30), Inter Miami(0,270), Austin FC(120,0), Nashville SC(50,0), Portland Timbers(120,50), Philadelphia Union(50,220), Columbus Crew(50,0), FC Cincinnati(240,30), Toronto FC(0), Vancouver Whitecaps(220,240), Montreal(0,220)
+Premier League: Manchester United(0), Manchester City(210), Liverpool(0), Chelsea(240), Arsenal(0,0), Tottenham(220,0), Newcastle(0,0), Brighton(240), Aston Villa(45,210), West Ham(45,210), Everton(240), Crystal Palace(0,240), Wolves(45,0), Leicester(240), Fulham(0,0), Bournemouth(0,0), Brentford(0,0), Nottingham Forest(0)
+World: Barcelona(45,0), Real Madrid(0,0), Bayern Munich(0), Juventus(0,0), PSG(220,0), AC Milan(0,0), Inter Milan(240,0), Dortmund(50,0), Ajax(0,0), Celtic(120,0), Rangers(240)"""
+
+# A command that changes a device must carry a cue in the user's words, and the
+# cue must name this kind of device (or no device at all): the server never
+# infers a write from a room, a speaker position or a model's guess alone.
+# Every device kind is judged except reads, locks, scenes (a door has its own
+# rules: an opening verb plus a name), the read-only appliance kinds and a
+# cover's opening; a kind with no table is refused (fail closed).
 WRITE_CUE_ACTIONS: FrozenSet[str] = frozenset({"set_color", "set_brightness", "set_level", "increase", "decrease"})
 _ON_OFF_WORDS = frozenset({
     "on", "off", "lit", "kill", "dim", "dimmer", "brighten", "brighter", "dark", "darker", "darken",
@@ -290,8 +500,29 @@ COLOR_WORDS = frozenset({
     "gold", "amber", "warm", "cool", "rainbow", "sunset", "sunrise", "random", "christmas", "color", "colors",
     "colour", "colours", "ravens", "orioles", "steelers", "team",
     "ocean", "vibe", "vibes", "mood", "theme", "party", "disco", "gradient", "pastel", "neon", "candle", "fire",
-    "forest", "sky", "sea", "lava", "romantic", "relax", "cozy", "calm", "wolverines", "maize",
+    "forest", "sky", "sea", "lava", "romantic", "relax", "cozy", "calm", "wolverines", "maize", "glow", "glowing",
+    "lavender", "lilac", "indigo", "turquoise", "crimson", "scarlet", "coral", "peach", "mint", "lime", "navy",
+    "brown", "grey", "gray", "silver", "beige", "maroon", "cream", "aqua", "salmon", "rose", "ruby", "emerald",
 })
+# Team names from the extractor prompt's own table (``TEAM_TABLE``), less the
+# words that are ordinary English.
+_TEAM_STOPWORDS = frozenset({
+    "state", "city", "united", "new", "fc", "sc", "wild", "heat", "magic", "stars", "kings", "suns", "jazz", "nets",
+    "blues", "reds", "jets", "wolves",
+})
+
+
+def _team_words() -> FrozenSet[str]:
+    names = re.findall(r"([A-Za-z0-9][A-Za-z0-9 .]*?)\(", TEAM_TABLE)
+    out = set()
+    for name in names:
+        for tok in tokens(name):
+            if len(tok) > 2 and tok not in _TEAM_STOPWORDS:
+                out.add(tok)
+    return frozenset(out)
+
+
+TEAM_WORDS: FrozenSet[str] = _team_words()
 BRIGHTNESS_WORDS = frozenset({
     "bright", "brighter", "brightness", "brighten", "dim", "dimmer", "dimmed", "dark", "darker", "darken",
     "level", "percent", "max", "maximum", "full", "half", "low", "lower", "high", "higher", "more", "less",
@@ -302,7 +533,7 @@ _CLIMATE_CUE_WORDS = frozenset({
 })
 _MEDIA_CUE_WORDS = frozenset({
     "pause", "resume", "stop", "skip", "next", "previous", "louder", "quieter", "unmute", "mute",
-    "watch", "channel", "volume", "up", "down",
+    "watch", "channel", "volume", "up", "down", "game", "show", "movie",
 })
 _CUE_WORDS = {
     "light": DEVICE_WORDS["light"],
@@ -312,14 +543,17 @@ _CUE_WORDS = {
     "climate": DEVICE_WORDS["climate"] | _CLIMATE_CUE_WORDS,
     "cover": DEVICE_WORDS["cover"] | frozenset({"close", "shut", "lower", "raise"}),
     "bed": frozenset({"bed", "mattress", "warmer", "pad", "blanket"}),
-    "motion": frozenset({
-        "motion", "sensor", "sensors", "auto", "automatic", "leave", "keep", "light", "lights", "nap",
-        "override", "brightness",
-    }),
 }
+# The device_type a model writes, normalised before the check; anything else
+# stays unknown (refused).
 _CUE_KINDS = {
-    "light": "light", "fan": "fan", "switch": "switch", "climate": "climate", "cover": "cover",
-    "media": "media", "media_player": "media", "tv": "media", "speaker": "media",
+    "light": "light", "lights": "light", "lamp": "light", "lamps": "light", "light_group": "light",
+    "fan": "fan", "fans": "fan",
+    "switch": "switch", "switches": "switch", "plug": "switch", "outlet": "switch",
+    "climate": "climate", "thermostat": "climate", "hvac": "climate", "ac": "climate",
+    "cover": "cover", "covers": "cover", "blinds": "cover", "shades": "cover", "curtains": "cover",
+    "media": "media", "media_player": "media", "tv": "media", "television": "media", "speaker": "media",
+    "speakers": "media",
     "bed_warmer": "bed", "motion_control": "motion", "motion": "motion",
 }
 # Kinds a cue is not asked of: doors (own rules), scenes (grounded), and the
@@ -335,26 +569,74 @@ _LEADING_FILLER = frozenset({
     "please", "hey", "ok", "okay", "can", "could", "would", "will", "you", "just", "go", "ahead", "lets", "let",
     "us", "me", "i", "want", "need", "like", "to", "now", "then", "also",
 })
+# What may follow a control verb without being a thing it acts on.
+_OBJECT_FILLER = frozenset({
+    "the", "a", "an", "my", "it", "them", "that", "this", "those", "these", "up", "down", "on", "off", "again",
+    "please", "now", "back", "for", "me", "to", "all", "everything", "everywhere", "in", "here", "there",
+    "around", "of", "some", "more", "less", "louder", "quieter", "higher", "lower", "thanks", "thank", "you",
+})
 _NEGATORS = frozenset({
     "not", "never", "dont", "wont", "cant", "without", "don", "doesn", "didn", "won", "couldn", "shouldn",
     "wouldn", "isn", "aren",
 })
+# A negator that does not negate the command after it: "don't forget to ...",
+# "why don't you ...", "won't you ...", "can't sleep/see ...".
+_NON_NEGATING_NEXT = frozenset({"forget", "you", "sleep", "see", "stand", "wait"})
+_NEGATION_BRIDGE = frozenset({"t", "ever", "really", "just", "please", "you", "to", "even", "want", "need", "be", "go", "ever"})
 _CUE_CLAUSE_SPLIT = re.compile(r"[,;.!?]|\b(?:and|then|also|plus)\b")
 _TEMPERATURE_VERBS = frozenset({"set", "make", "put", "keep", "bring", "need", "want", "turn"})
 _TEMPERATURE_UNITS = frozenset({"degrees", "degree", "celsius", "fahrenheit", "c", "f", "in"})
+_ALL_CONTROL_VERBS = _CONTROL_CUE_VERBS | _CONTROL_CUE_VERBS_BY_KIND["media"] | frozenset(
+    {"make", "set", "put", "keep", "leave", "open", "close", "touch", "change"}
+)
+
+
+def has_negator(text: Optional[str]) -> bool:
+    """Whether the words hold a negator that negates a command after it."""
+    return any(_negation_cut(list(tokens(c)))[1] for c in _CUE_CLAUSE_SPLIT.split((text or "").lower()))
+
+
+def _negation_cut(toks: List[str]) -> Tuple[List[str], bool]:
+    """A clause's tokens with every negated stretch removed, and whether any
+    was. A negator negates the command that follows it, up to the next control
+    verb that starts a new command: "don't turn on the lights" is negated
+    whole; "I can't sleep turn off the lights" keeps its second command."""
+    out: List[str] = []
+    negated = False
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        is_neg = tok in _NEGATORS or (tok == "can" and tuple(toks[i + 1:i + 2]) == ("t",))
+        if not is_neg:
+            out.append(tok)
+            i += 1
+            continue
+        after = i + 1
+        while after < len(toks) and toks[after] == "t":
+            after += 1
+        if (after < len(toks) and toks[after] in _NON_NEGATING_NEXT) or (i and toks[i - 1] == "why"):
+            i = after  # "don't forget", "why don't you", "can't sleep": not a negation
+            continue
+        negated = True
+        probe = after
+        while probe < len(toks) and toks[probe] in _NEGATION_BRIDGE:
+            probe += 1
+        if probe < len(toks) and toks[probe] in _ALL_CONTROL_VERBS:
+            break  # the command right after the negator is the negated one: nothing after it counts
+        verb = next((j for j in range(after, len(toks)) if toks[j] in _CONTROL_CUE_VERBS), None)
+        if verb is None:
+            break
+        i = verb  # content words came first: the negation ends where the next command starts
+    return out, negated
 
 
 def _positive_clauses(query: str, *, negation: bool) -> List[List[str]]:
-    """The query's clauses as token lists, each cut at its first negator
-    ("don't turn on the lights" leaves nothing to count)."""
+    """The query's clauses as token lists, negated stretches removed."""
     out: List[List[str]] = []
     for clause in _CUE_CLAUSE_SPLIT.split((query or "").lower()):
         toks = list(tokens(clause))
         if negation:
-            for i, tok in enumerate(toks):
-                if tok in _NEGATORS or (tok == "can" and tuple(toks[i + 1:i + 2]) == ("t",)):
-                    toks = toks[:i]
-                    break
+            toks = _negation_cut(toks)[0]
         if toks:
             out.append(toks)
     return out
@@ -380,47 +662,98 @@ def _has_brightness_parameter(parameters: Any) -> bool:
     )
 
 
-def lacks_write_cue(device_type: Any, action: Any, query: Optional[str], parameters: Any = None) -> bool:
-    """Whether a device-changing command has no cue in the user's words: a
-    device word for its kind, an on/off word, a control verb that starts a
-    clause, whole-house wording (lights), a temperature (climate), or, for a
-    colour or brightness action, a colour or brightness word. A cue that
-    follows a negator in its clause does not count. A read never lacks one, a
-    lock or scene is judged elsewhere, a cover's opening by the door rules,
-    and a command with no words (a sequence step, planned and checked per
-    clause) is not judged."""
-    if query is None:
-        return False
-    act = action.strip().lower() if isinstance(action, str) else ""
-    if act in READ_ONLY_ACTIONS:
-        return False
-    dtype = device_type.strip().lower() if isinstance(device_type, str) else None
-    if dtype in _CUE_EXEMPT_TYPES:
-        return False
-    kind = _CUE_KINDS.get(dtype or "")
-    if kind is None:
-        return True
-    if kind == "cover" and is_opening_action("cover", act):
-        return False
-    clauses = _positive_clauses(query, negation=kind != "motion")
-    spoken = frozenset(t for toks in clauses for t in toks)
-    evidence = bool(spoken & (COLOR_WORDS | BRIGHTNESS_WORDS)) or "%" in query
-    if act in WRITE_CUE_ACTIONS:
-        return not evidence
-    if _has_brightness_parameter(parameters) and evidence:
-        return False
-    if spoken & _ON_OFF_WORDS or spoken & _CUE_WORDS[kind]:
-        return False
-    verbs = _CONTROL_CUE_VERBS | _CONTROL_CUE_VERBS_BY_KIND.get(kind, frozenset())
+def _builtin_phrase(query: str) -> bool:
+    """A phrase the fast path recognises on its own ("I can't see", "too
+    much light", "fade the lights"). It is a cue however the sentence is
+    negated, because the fast path would have acted on it."""
+    lower = query.lower()
+    return any(p in lower for p in IMPLICIT_BRIGHTER + IMPLICIT_DIMMER + TURN_OFF_PHRASES + BRIGHTER_PATTERNS + DIMMER_PATTERNS)
+
+
+def _verb_leads(clauses: List[List[str]], verbs: FrozenSet[str], *, object_ok: bool) -> bool:
+    """Whether a clause starts with a control verb (after filler). With
+    ``object_ok`` False the verb must stand alone or act on a pronoun or
+    particle ("turn it up", "pause"): "start the coffee maker" needs the
+    thing's name to be a known device."""
     for toks in clauses:
         lead = [t for t in toks if t not in _LEADING_FILLER]
         if lead and lead[0] in verbs:
-            return False
+            if object_ok or not [t for t in lead[1:] if t not in _OBJECT_FILLER]:
+                return True
+    return False
+
+
+WRONG_DEVICE = "wrong_device"
+NO_CUE = "no_cue"
+
+
+def write_cue_problem(
+    device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
+) -> Optional[str]:
+    """None when a device-changing command is backed by the words; else
+    ``NO_CUE`` (nothing in the words asks for a change) or ``WRONG_DEVICE``
+    (the words name a different kind of device).
+
+    A cue is a device word for the command's kind, a built-in fast-path
+    phrase, an on/off word, a control verb that starts a clause, whole-house
+    wording (lights), a temperature (climate), or, for a colour or brightness
+    action, a colour, brightness or team word. Generic cues count only when
+    the words name this kind of device or none at all; a cue after a negator
+    does not count. ``named_entity`` says the words call one of the house's
+    devices of this kind by its name; it lets a control verb act on that
+    named thing ("start the coffee maker") and is no cue on its own. A read is never a problem, a lock or
+    scene is judged elsewhere, a cover's opening by the door rules, and a
+    command with no words (a sequence step, checked per clause) is not
+    judged."""
+    if query is None:
+        return None
+    act = action.strip().lower() if isinstance(action, str) else ""
+    if act in READ_ONLY_ACTIONS:
+        return None
+    dtype = device_type.strip().lower() if isinstance(device_type, str) else None
+    if dtype in _CUE_EXEMPT_TYPES:
+        return None
+    kind = _CUE_KINDS.get(dtype or "")
+    if kind is None:
+        return NO_CUE
+    if kind == "cover" and is_opening_action("cover", act):
+        return None
+    if kind == "motion":
+        lower = query.lower()
+        return None if any(p in lower for p in MOTION_CONTROL_PATTERNS) else NO_CUE
+    if kind == "light" and _builtin_phrase(query):
+        return None
+    clauses = _positive_clauses(query, negation=True)
+    if not clauses:
+        return NO_CUE  # everything said was negated
+    spoken = frozenset(t for toks in clauses for t in toks)
+    if spoken & _CUE_WORDS[kind]:
+        return None
     if kind == "light" and room_context.is_explicit_whole_house(" ".join(" ".join(t) for t in clauses)):
-        return False
+        return None  # "turn on everything but play music in the kitchen": the scope is the lights'
+    # Words that are also colour or brightness words ("warmer") name no device.
+    if any(spoken & (DEVICE_WORDS[k] - COLOR_WORDS - BRIGHTNESS_WORDS) for k in DEVICE_WORDS if k != kind):
+        return WRONG_DEVICE
+    colour_evidence = bool(spoken & (COLOR_WORDS | BRIGHTNESS_WORDS | TEAM_WORDS)) or "%" in query
+    verbs = _CONTROL_CUE_VERBS | _CONTROL_CUE_VERBS_BY_KIND.get(kind, frozenset())
+    if act in WRITE_CUE_ACTIONS:
+        if colour_evidence or _verb_leads(clauses, verbs, object_ok=True):
+            return None
+        return NO_CUE
+    if _has_brightness_parameter(parameters) and (colour_evidence or "%" in query):
+        return None
+    if spoken & _ON_OFF_WORDS or _verb_leads(clauses, verbs, object_ok=named_entity):
+        return None
     if kind == "climate" and any(_temperature_in(toks) for toks in clauses):
-        return False
-    return True
+        return None
+    return NO_CUE
+
+
+def lacks_write_cue(
+    device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
+) -> bool:
+    """``write_cue_problem`` as a yes/no."""
+    return write_cue_problem(device_type, action, query, parameters, named_entity=named_entity) is not None
 
 
 def names_device(text: Optional[str]) -> bool:

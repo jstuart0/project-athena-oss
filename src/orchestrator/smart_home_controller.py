@@ -199,6 +199,11 @@ SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name
 # SmartHomeController._motion_control_rooms). Not an HA domain: the pseudo
 # domain _decide_intent_room uses for the device type.
 MOTION_CONTROL_DOMAIN = "motion_control"
+# The Home Assistant domains whose devices a cue's kind may be named for.
+_CUE_ENTITY_DOMAINS = {
+    "light": ("light",), "fan": ("fan",), "switch": ("switch", "input_boolean"), "media": ("media_player",),
+    "climate": ("climate",), "cover": ("cover",), "bed": ("switch", "climate", "input_boolean"),
+}
 MOTION_ACTIONS = frozenset({
     "leave_lights_on", "leave_lights_off", "disable_motion", "enable_motion", "set_brightness_override",
     "keep_current_brightness",
@@ -1097,31 +1102,7 @@ class SmartHomeController:
 
         # MOTION CONTROL: Detect motion/lighting automation override requests
         # These set a room's motion-flow helpers in Home Assistant
-        motion_control_patterns = [
-            # Leave lights on patterns
-            'leave the lights on', 'keep the lights on', 'lights stay on',
-            'don\'t turn off the lights', 'stop turning off the lights',
-            'leave lights on', 'keep lights on',
-            # Leave lights off patterns
-            'leave the lights off', 'keep the lights off', 'lights stay off',
-            'don\'t turn on the lights', 'stop turning on the lights',
-            'leave lights off', 'keep lights off',
-            'taking a nap', 'gonna nap', 'going to nap', 'nap time',
-            # Disable motion patterns
-            'disable motion', 'turn off motion', 'no motion', 'motion off',
-            'disable the motion', 'stop motion detection', 'pause motion',
-            'disable motion detection', 'turn off motion detection',
-            # Enable/resume motion patterns
-            'enable motion', 'turn on motion', 'motion on', 'resume motion',
-            'enable the motion', 'start motion detection', 'resume normal',
-            'turn motion back on', 'motion detection on', 'normal motion',
-            'reset motion', 'reset the motion',
-            # Brightness override patterns
-            'keep it at this brightness', 'lock the brightness', 'stay at this brightness',
-            'keep this brightness', 'maintain this brightness', 'brightness override',
-            'lock brightness', 'set motion brightness', 'override brightness',
-            'keep the brightness', 'stay this bright', 'don\'t change brightness'
-        ]
+        motion_control_patterns = access_target.MOTION_CONTROL_PATTERNS
         is_motion_control = any(p in query_lower for p in motion_control_patterns)
 
         if is_motion_control:
@@ -1130,34 +1111,8 @@ class SmartHomeController:
 
         # FAST PATH: Implicit brightness requests (without explicit "turn on/off")
         # e.g., "I can't see", "too dark", "make it brighter", "dimmer"
-        implicit_brighter = [
-            "can't see", "cant see", "cannot see", "too dark", "hard to see",
-            "brighter", "more light", "brighten", "bump up", "bump it up",
-            "brightness higher", "set brightness higher", "raise the lights",
-            "lights higher", "higher brightness", "getting dark", "need some light",
-            "need light", "need more light", "give me some light", "some light over here",
-            "some light please", "bring up the lights", "bring the lights up",
-            # Round 13: "kinda dim" / "looking dim" means it's TOO DARK, need more light
-            "kinda dim", "looking dim", "its dim", "it's dim", "bit dim", "pretty dim",
-            # Round 13: "bring them back up", "back up" = restore/increase brightness
-            "bring them back up", "bring it back up", "back up", "bring em back up",
-            # Round 14: slang brightness
-            "lights weak", "weak af", "not bright enough", "need it brighter",
-            # Round 16: "super bright", "make it super bright"
-            "super bright", "really bright", "extra bright", "crazy bright"
-        ]
-        implicit_dimmer = [
-            "too bright", "dimmer", "less light", "darker", "softer light",
-            "make it cozy", "lower the lights", "lower lights", "way down",
-            "turn it down", "brightness lower", "set brightness lower",
-            "bring the lights down", "bring down the lights",  # Round 12
-            "lights lower", "lower brightness", "too much light", "thats too much",
-            "not so bright", "a bit less", "little less light", "darken it up",
-            "tone down", "tone it down", "take it easy on my eyes", "easy on my eyes",
-            # Round 17: fade patterns
-            "fade the lights", "fade lights", "fade down", "fade it down",
-            "fade them down", "fade out", "fading"
-        ]
+        implicit_brighter = access_target.IMPLICIT_BRIGHTER
+        implicit_dimmer = access_target.IMPLICIT_DIMMER
 
         # Round 16: FAST PATH: Light status queries (check BEFORE turn off!)
         # "any lights left on", "which lights are on" = status query, NOT control
@@ -1181,13 +1136,7 @@ class SmartHomeController:
             }
 
         # FAST PATH: Alternative turn off patterns (lights out, kill the lights, cut the lights, no more lights)
-        turn_off_phrases = ['lights out', 'kill the light', 'kill the lights', 'cut the lights',
-                            'cut the light', 'no more lights', 'no more light', 'shut it off',
-                            'shut off the lights', 'shut them off', 'forget the lights', 'forget the light',
-                            'off with the lights', 'off with the light',  # Round 12
-                            'every light off', 'every light out',  # Round 12
-                            'kill all the lights', 'kill all lights', 'kill all',  # Round 12 exclusion support
-                            'everything off', 'all off', 'yo everything off']  # Round 14
+        turn_off_phrases = access_target.TURN_OFF_PHRASES
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
         has_exclusion_in_query = room_context.has_exclusion(query_lower, self._directory())
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
@@ -1483,18 +1432,9 @@ class SmartHomeController:
 
         # Relative brightness: brighter/dimmer/more light/less light/etc.
         # Patterns that mean "make it brighter"
-        brighter_patterns = [
-            'brighter', 'more light', 'brighten', 'too dark', 'it is dark',
-            'need more light', 'can barely see', 'increase brightness', 'increase light',
-            "can't see", "cant see", "cannot see", "hard to see", "difficult to see"
-        ]
+        brighter_patterns = access_target.BRIGHTER_PATTERNS
         # Patterns that mean "make it dimmer"
-        dimmer_patterns = [
-            'dimmer', 'less light', 'too bright', 'it is too bright',
-            'decrease brightness', 'decrease light', 'softer light', 'make it cozy',
-            'dim a little', 'dim a bit', 'a little dimmer', 'a bit dimmer',
-            'darker', 'make it darker', 'can you dim', 'could you dim'
-        ]
+        dimmer_patterns = access_target.DIMMER_PATTERNS
         # Also detect "dim the X" without a specific percentage (relative dimming)
         if 'dim the' in query_lower or 'dim ' in query_lower:
             # Check if there's no explicit percentage/number
@@ -1870,15 +1810,7 @@ Examples:
 "christmas colors" -> {{"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {{"hs_colors": [[0, 100], [120, 100], [0, 100]]}}, "color_description": "red and green christmas"}}
 "random colors" -> {{"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {{"hs_colors": [[0, 100], [120, 100], [240, 100]]}}, "color_description": "vibrant random colors"}}
 
-SPORTS TEAM COLORS (use these hue values for team color requests):
-NFL: Ravens(270,45), Steelers(50,0), Browns(30,0), Bengals(30,0), Chiefs(0,50), Bills(240,0), Dolphins(175,30), Patriots(220,0), Jets(120,0), Raiders(0,0), Broncos(30,240), Chargers(50,210), Cowboys(220,0), Eagles(180,0), Giants(240,0), Commanders(45,0), Packers(120,50), Bears(30,220), Lions(210,0), Vikings(270,50), 49ers(0,50), Seahawks(120,220), Cardinals(0,0), Rams(240,50), Falcons(0,0), Panthers(210,0), Saints(50,0), Buccaneers(0,0), Colts(240,0), Titans(210,0), Texans(220,0), Jaguars(175,50)
-MLB: Orioles(30), Yankees(220), Red Sox(0), Blue Jays(240), Rays(210), Mets(240,30), Phillies(0), Braves(220,0), Marlins(210), Nationals(0), Cubs(240,0), Cardinals(0), Brewers(50,220), Reds(0), Pirates(50,0), Dodgers(240), Giants(30,0), Padres(50,45), Diamondbacks(0,175), Rockies(270,0), Astros(30,220), Rangers(240,0), Mariners(175,220), Angels(0), Athletics(120,50), Twins(220,0), White Sox(0,0), Tigers(30,220), Royals(240), Indians/Guardians(0,220)
-NBA: Lakers(270,50), Celtics(120), Warriors(50,240), Bulls(0), Heat(0,0), Nets(0,0), Knicks(240,30), 76ers(240,0), Suns(30,270), Bucks(120), Hawks(0), Spurs(0,0), Mavericks(220,0), Nuggets(50,220), Clippers(0,240), Kings(270), Blazers(0,0), Jazz(50,120,220), Pacers(50,220), Cavaliers(45,0), Pistons(0,240), Magic(240,0), Hornets(175,270), Wizards(220,0), Grizzlies(210), Pelicans(50,0,220), Timberwolves(220,120), Thunder(240,30), Raptors(0,0)
-NHL: Capitals(0,220), Penguins(50,0), Flyers(30,0), Rangers(240,0), Bruins(50,0), Canadiens(0,240), Maple Leafs(240), Red Wings(0), Blackhawks(0,0), Blues(240,50), Avalanche(45,240), Golden Knights(50,0), Kraken(175,0), Sharks(175), Ducks(30,50), Kings(0,0), Flames(0,50), Oilers(30,220), Canucks(120,240), Jets(220), Wild(120,0), Stars(120,0), Predators(50,220), Lightning(240), Panthers(0,220), Devils(0,0), Islanders(30,240), Hurricanes(0,0), Blue Jackets(220,0), Senators(0,50), Sabres(50,220)
-College: Michigan(50,240), Ohio State(0), Penn State(220), Alabama(45,0), Georgia(0,0), Clemson(30,270), LSU(50,270), Notre Dame(50,240), Oklahoma(45,0), Texas(210,30), USC(45,0), UCLA(50,240), Florida(30,240), Auburn(30,220), Tennessee(30,0), Wisconsin(0,0), Oregon(120,50), Washington(270,50), Florida State(45,0), Miami(30,120), NC State(0,0), Duke(240), UNC(210), Kentucky(240), Kansas(240,0), Gonzaga(220,0), Villanova(220,0), Syracuse(30), Army(50,0), Navy(220,50), Air Force(240,0), West Point(50,0)
-Soccer/MLS: LAFC(50,0), LA Galaxy(220,50), Atlanta United(0,50), Seattle Sounders(120,240), NYCFC(210,30), Inter Miami(0,270), Austin FC(120,0), Nashville SC(50,0), Portland Timbers(120,50), Philadelphia Union(50,220), Columbus Crew(50,0), FC Cincinnati(240,30), Toronto FC(0), Vancouver Whitecaps(220,240), Montreal(0,220)
-Premier League: Manchester United(0), Manchester City(210), Liverpool(0), Chelsea(240), Arsenal(0,0), Tottenham(220,0), Newcastle(0,0), Brighton(240), Aston Villa(45,210), West Ham(45,210), Everton(240), Crystal Palace(0,240), Wolves(45,0), Leicester(240), Fulham(0,0), Bournemouth(0,0), Brentford(0,0), Nottingham Forest(0)
-World: Barcelona(45,0), Real Madrid(0,0), Bayern Munich(0), Juventus(0,0), PSG(220,0), AC Milan(0,0), Inter Milan(240,0), Dortmund(50,0), Ajax(0,0), Celtic(120,0), Rangers(240)
+{access_target.TEAM_TABLE}
 
 For team colors, alternate between the team's primary colors. Example:
 "michigan wolverines" -> maize(50,100) and blue(240,100) alternating
@@ -2460,12 +2392,17 @@ Return ONLY valid JSON."""
             # ``cue_query`` carries the earlier turn's words for a follow-up of
             # the same caller, audience and device; the room and the fan-out
             # gate still read ``original_query``.
-            if access_target.lacks_write_cue(
-                device_type, action, cue_query if cue_query is not None else original_query, parameters,
-            ):
+            words = cue_query if cue_query is not None else original_query
+            problem = access_target.write_cue_problem(device_type, action, words, parameters)
+            if problem is not None and words is not None:
+                # The words may call one of the house's devices of this kind by
+                # its own name ("start the coffee maker").
+                if await self._words_name_a_device(device_type, words):
+                    problem = access_target.write_cue_problem(device_type, action, words, parameters, named_entity=True)
+            if problem is not None:
                 import logging
-                logging.getLogger(__name__).info("write_without_cue_refused")
-                return NO_WRITE_CUE_TEXT
+                logging.getLogger(__name__).info("write_without_cue_refused reason=%s", problem)
+                return NO_DEVICE_TEXT if problem == access_target.WRONG_DEVICE else NO_WRITE_CUE_TEXT
 
             # Where the command acts is decided once, here, and recorded on
             # the intent (decided_room and friends): replays and follow-ups
@@ -6608,6 +6545,25 @@ Return ONLY the JSON, no other text."""
             # to switch from the words alone; nothing here writes without an answer.
             logger.error(f"Failed to parse motion control intent: {e}")
             return room_context.unprocessable_intent("unparseable")
+
+    async def _words_name_a_device(self, device_type, words: str) -> bool:
+        """Whether the words call one of the house's devices of this kind by
+        its friendly name ("coffee maker" for a switch named that)."""
+        domains = _CUE_ENTITY_DOMAINS.get(access_target._CUE_KINDS.get(
+            device_type.strip().lower() if isinstance(device_type, str) else "", ""), ())
+        if not domains:
+            return False
+        try:
+            entities = await self.entity_manager.get_entities()
+        except Exception:
+            return False
+        for entity_id, state in (entities or {}).items():
+            if not isinstance(entity_id, str) or entity_id.split(".", 1)[0] not in domains:
+                continue
+            name = ((state or {}).get('attributes') or {}).get('friendly_name')
+            if room_context.names_entity(entity_id, name, words):
+                return True
+        return False
 
     @staticmethod
     def _retried_motion_matches_words(intent: Dict, query: str) -> bool:

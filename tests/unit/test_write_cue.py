@@ -188,8 +188,9 @@ class TestEveryKindIsJudged:
         ("bed_warmer", "warm_bed", "warm the bed"), ("bed_warmer", "warm_bed", "mattress to level 3"),
         ("motion_control", "disable_motion", "disable motion in the study"),
         ("motion_control", "leave_lights_on", "leave the lights on for 2 hours"),
-        ("motion_control", "leave_lights_off", "don't turn the lights on when I walk in"),
-        ("motion_control", "leave_lights_on", "stop the lights from turning off"),
+        ("motion_control", "leave_lights_off", "don't turn on the lights, I'm taking a nap"),
+        ("motion_control", "leave_lights_on", "stop turning off the lights"),
+        ("motion_control", "set_brightness_override", "set motion brightness to 50%"),
     ])
     def test_with_a_cue(self, device_type, action, query):
         assert self.lacks(device_type, action, query) is False
@@ -270,20 +271,181 @@ class TestControlVerbs:
     lacks = staticmethod(access_target.lacks_write_cue)
 
     @pytest.mark.parametrize("device_type,action,query", [
-        ("switch", "turn_on", "start the coffee maker"), ("switch", "turn_on", "run the dishwasher"),
-        ("switch", "turn_on", "can you start the dishwasher"), ("media", "play", "change the channel"),
-        ("media", "play", "watch the game"), ("media", "increase", "turn it up"), ("fan", "turn_on", "activate the study"),
-        ("media", "pause", "please pause"), ("switch", "turn_off", "stop the washer"),
+        ("media", "play", "change the channel"), ("media", "play", "watch the game"),
+        ("media", "increase", "turn it up"), ("media", "pause", "please pause"), ("switch", "turn_on", "start it"),
+        ("fan", "turn_on", "activate it"),
     ])
     def test_a_clause_initial_control_verb_is_a_cue(self, device_type, action, query):
         assert self.lacks(device_type, action, query) is False, query
 
+    @pytest.mark.parametrize("device_type,action,query", [
+        ("switch", "turn_on", "start the coffee maker"), ("switch", "turn_on", "run the dishwasher"),
+        ("switch", "turn_on", "can you start the dishwasher"), ("switch", "turn_off", "stop the washer"),
+    ])
+    def test_a_control_verb_acting_on_a_named_thing_needs_the_thing_to_be_a_device_of_the_house(self, device_type, action, query):
+        assert self.lacks(device_type, action, query) is True, query
+        assert self.lacks(device_type, action, query, named_entity=True) is False, query
+
     @pytest.mark.parametrize("device_type", ["light", "fan", "switch", "media", "climate"])
     def test_let_the_guest_in_still_refuses(self, device_type):
         assert self.lacks(device_type, "turn_on", Q) is True
+        assert self.lacks(device_type, "turn_on", Q, named_entity=True) is True
 
     def test_a_verb_in_the_middle_of_a_clause_is_not_a_cue(self):
         assert self.lacks("switch", "turn_on", "the guest said to start the car") is True
+
+
+class TestTheCueMustNameThisKindOfDevice:
+    problem = staticmethod(access_target.write_cue_problem)
+
+    @pytest.mark.parametrize("device_type,query", [
+        ("fan", "turn on the lights"), ("light", "turn on the fan"), ("fan", "start the coffee maker"),
+        ("switch", "turn off the tv"), ("media", "turn on the thermostat"), ("climate", "turn on the lights"),
+    ])
+    def test_the_three_probes_and_their_kin_are_refused(self, device_type, query):
+        assert self.problem(device_type, "turn_on", query) is not None, (device_type, query)
+
+    def test_a_different_kind_is_a_wrong_device(self):
+        assert self.problem("fan", "turn_on", "turn on the lights") == access_target.WRONG_DEVICE
+        assert self.problem("light", "turn_on", "turn on the fan") == access_target.WRONG_DEVICE
+
+    def test_no_device_named_at_all_passes_on_a_generic_cue(self):
+        assert self.problem("fan", "turn_on", "turn it on") is None
+        assert self.problem("light", "turn_off", "turn them off") is None
+        assert self.problem("switch", "turn_on", "on please") is None
+
+    def test_the_kinds_own_word_passes_beside_another_kind(self):
+        assert self.problem("light", "turn_on", "turn on the lights and the fan") is None
+        assert self.problem("fan", "turn_on", "turn on the lights and the fan") is None
+
+    def test_a_switch_named_by_its_friendly_name_passes_a_control_verb(self):
+        assert self.problem("switch", "turn_on", "start the coffee maker") == access_target.NO_CUE
+        assert self.problem("switch", "turn_on", "start the coffee maker", named_entity=True) is None
+
+    def test_naming_a_device_is_not_a_cue_by_itself(self):
+        assert self.problem("light", "turn_on", Q, named_entity=True) == access_target.NO_CUE
+
+    def test_a_colour_word_that_is_also_a_climate_word_names_no_other_device(self):
+        assert self.problem("light", "set_color", "make it warmer") is None
+
+    def test_end_to_end_the_wrong_device_gets_the_device_phrase_and_writes_nothing(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        intent = {"device_type": "fan", "action": "turn_on", "room": "study", "target_scope": "group", "parameters": {}}
+        answer = run(rig, intent, "turn on the lights")
+        assert answer == shc.NO_DEVICE_TEXT and rig.written == []
+
+    def test_end_to_end_a_switch_named_in_the_house_passes_the_verb(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        rig.manager._entities_cache = {**rig.manager._entities_cache, "switch.coffee": {
+            "entity_id": "switch.coffee", "state": "off", "attributes": {"friendly_name": "Coffee Maker"}}}
+        rig.manager._build_indexes()
+        intent = {"device_type": "switch", "action": "turn_on", "room": None, "target_scope": "group", "parameters": {}}
+        for query in ("start the coffee maker", "start the espresso machine"):
+            answer = run(rig, intent, query)
+            if "coffee" in query:
+                assert answer not in (shc.NO_WRITE_CUE_TEXT, shc.NO_DEVICE_TEXT), answer
+            else:
+                assert answer == shc.NO_WRITE_CUE_TEXT
+
+
+class TestMotionNeedsAMotionPhrase:
+    problem = staticmethod(access_target.write_cue_problem)
+
+    def test_turn_off_the_lights_typed_as_motion_control_refuses(self):
+        assert self.problem("motion_control", "disable_motion", "turn off the lights") == access_target.NO_CUE
+        assert self.problem("motion_control", "leave_lights_off", Q) == access_target.NO_CUE
+
+    @pytest.mark.parametrize("phrase", access_target.MOTION_CONTROL_PATTERNS)
+    def test_every_routing_pattern_is_a_motion_cue(self, phrase):
+        assert self.problem("motion_control", "disable_motion", f"please {phrase} now") is None
+
+    def test_one_list_routes_and_judges(self):
+        import re
+        source = (Path(__file__).resolve().parents[2] / "src/orchestrator/smart_home_controller.py").read_text()
+        assert "access_target.MOTION_CONTROL_PATTERNS" in source and "'lights stay on'" not in source
+
+
+class TestBuiltInPhrasesAreCues:
+    lacks = staticmethod(access_target.lacks_write_cue)
+
+    @pytest.mark.parametrize("query", [
+        "I can't see", "need some light", "too much light", "not bright enough", "fade the lights", "easy on my eyes",
+        "it's too dark", "tone it down", "make it cozy", "lights out", "kill all",
+    ])
+    @pytest.mark.parametrize("action", ["turn_on", "turn_off", "increase", "decrease", "set_brightness"])
+    def test_a_fast_path_phrase_counts_before_negation(self, query, action):
+        assert self.lacks("light", action, query) is False, (query, action)
+
+    def test_a_phrase_that_the_fast_path_does_not_know_still_needs_a_cue(self):
+        assert self.lacks("light", "turn_on", "I can see fine") is True
+
+
+class TestNegationIsLocal:
+    lacks = staticmethod(access_target.lacks_write_cue)
+
+    @pytest.mark.parametrize("query", [
+        "don't forget to turn off the lights", "why don't you turn on the lights", "won't you turn on the lights",
+        "I can't sleep turn off the lights", "can't sleep, turn off the lights", "you don't need to wait turn on the lights",
+    ])
+    def test_these_do_not_negate_the_command_after_them(self, query):
+        assert self.lacks("light", "turn_off", query) is False, query
+
+    @pytest.mark.parametrize("query", [
+        "don't turn on the lights", "do not turn off the lights", "I don't want to turn on the lights",
+        "never turn on the lights", "please don't switch the lights on",
+    ])
+    def test_a_negated_command_is_still_refused(self, query):
+        assert self.lacks("light", "turn_on", query) is True, query
+
+    def test_negation_ends_at_the_next_control_verb(self):
+        assert self.lacks("light", "turn_on", "I don't like it dark turn on the lights") is False
+
+    def test_has_negator_ignores_the_idioms(self):
+        assert access_target.has_negator("no, not that one") is True
+        assert access_target.has_negator("don't turn it on") is True
+        assert access_target.has_negator("don't forget the kitchen") is False
+        assert access_target.has_negator("turn them on") is False
+
+
+class TestColourActions:
+    lacks = staticmethod(access_target.lacks_write_cue)
+
+    @pytest.mark.parametrize("query", [
+        "turn the lights lavender", "lights lavender please", "the nursery should glow lavender", "make it glow",
+        "go Packers", "Ohio State in the den", "Ravens colors", "make the nursery lavender please",
+    ])
+    def test_these_carry_evidence_or_a_device_word_or_a_verb(self, query):
+        assert self.lacks("light", "set_color", query) is False, query
+
+    @pytest.mark.parametrize("query", [Q, "the nursery please"])
+    def test_these_do_not(self, query):
+        assert self.lacks("light", "set_color", query) is True, query
+
+    def test_team_words_come_from_the_prompts_own_table(self):
+        import re
+        table = access_target.TEAM_TABLE
+        assert "Packers" in table and "packers" in access_target.TEAM_WORDS and "ohio" in access_target.TEAM_WORDS
+        source = (Path(__file__).resolve().parents[2] / "src/orchestrator/smart_home_controller.py").read_text()
+        assert "{access_target.TEAM_TABLE}" in source and "Packers(120,50)" not in source
+        for name in re.findall(r"([A-Za-z0-9][A-Za-z0-9 .]*?)\(", table):
+            toks = [t for t in name.lower().replace(".", "").split() if len(t) > 2 and t not in access_target._TEAM_STOPWORDS]
+            assert all(t in access_target.TEAM_WORDS for t in toks), name
+
+
+class TestDeviceTypeAliases:
+    lacks = staticmethod(access_target.lacks_write_cue)
+
+    @pytest.mark.parametrize("device_type,action,query", [
+        ("lights", "turn_on", "turn on the lights"), ("thermostat", "set_temperature", "set the study to 70"),
+        ("hvac", "set_temperature", "it's cold in here"), ("tv", "turn_on", "turn on the tv"),
+        ("Lights", "turn_off", "lights off"), ("blinds", "close", "close the blinds"),
+    ])
+    def test_aliases_are_normalised(self, device_type, action, query):
+        assert self.lacks(device_type, action, query) is False
+
+    @pytest.mark.parametrize("device_type", ["vacuum", "robot", "garage_robot", "", None, 3])
+    def test_anything_else_stays_fail_closed(self, device_type):
+        assert self.lacks(device_type, "turn_on", "turn on the lights") is True
 
 
 class TestRefusedTurnsAreNeverStored:
@@ -360,6 +522,18 @@ class TestFollowUpsCarryTheEarlierCue:
         chat = Chat(monkeypatch)
         chat.turn("turn on the galley lights", fp=None)
         assert chat.written and "write_cue" not in chat.stored_parameters()
+
+    def test_a_turn_with_a_negator_borrows_no_cue(self, monkeypatch):
+        chat = self._chat(monkeypatch)
+        out = self._follow(chat, "no, not the study")
+        assert chat.written == [] and out.answer == shc.NO_WRITE_CUE_TEXT
+
+    def test_the_carried_words_are_joined_with_a_clause_break(self):
+        from orchestrator.nodes import route_control as rc
+        state = type("S", (), {"caller_fingerprint": "fp-a", "query": "the study too", "knowledge_audience": None, "mode": "owner", "permissions": {"mode": "owner"}})()
+        cue = {"fp": "fp-a", "aud": rc._audience_class(state), "device_type": "light", "action": "turn_on", "query": "turn on the galley lights"}
+        got = rc._carried_cue_query({"write_cue": cue}, {"device_type": "light", "action": "turn_on"}, state)
+        assert got == "turn on the galley lights. the study too"
 
     def test_a_different_device_gets_no_carry(self, monkeypatch):
         chat = self._chat(monkeypatch)
@@ -492,3 +666,29 @@ class TestRetriedMotionAnswers:
         chat = self._chat(monkeypatch, self.MOTION_OFF)
         got = asyncio.run(chat.rig.controller._extract_motion_control_intent("disable motion in the office"))
         assert got["action"] == "disable_motion"
+
+
+class TestMotionInMyRoom:
+    def _chat(self, monkeypatch):
+        from ._room_chat_harness import Chat
+        from .test_motion_control_rooms import helper_states
+        chat = Chat(monkeypatch)
+        for slug in ("study", "galley"):
+            chat.rig.manager._entities_cache.update(helper_states(slug))
+        chat.rig.manager._build_indexes()
+        return chat
+
+    @pytest.mark.parametrize("model_room", [None, "my room", "my_room", "galley"])
+    def test_disable_motion_in_my_room_reaches_the_speakers_room(self, monkeypatch, model_room):
+        chat = self._chat(monkeypatch)
+        chat.llm.reply = {"device_type": "motion_control", "room": model_room, "action": "disable_motion", "parameters": {}}
+        chat.turn("disable motion in my room", room="study")
+        assert chat.written == ["input_boolean.study_motion_disable"], (model_room, chat.written)
+
+
+def test_the_carried_cue_is_computed_from_the_final_intent_right_before_execution():
+    source = (Path(__file__).resolve().parents[2] / "src/orchestrator/nodes/route_control.py").read_text()
+    call = source.index("_carried_cue_query(state.prev_context")
+    assert source.index("Ensure we have required fields") < call < source.index("await _execute_and_record(", call)
+    assert source.count("_carried_cue_query(") == 2  # the definition and the one call
+    assert source.index("forced after the whole merge") < call
