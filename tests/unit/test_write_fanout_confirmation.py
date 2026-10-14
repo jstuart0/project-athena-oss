@@ -1658,6 +1658,10 @@ class _TwoRoomEntityManager:
         for room in self.ROOMS:
             for i in range(3):
                 ents[f"light.{room}_{i}"] = {"state": "on", "attributes": {"friendly_name": f"{room.title()} Light {i}"}}
+            ents[f"input_boolean.{room}_motion_disable"] = {"state": "off", "attributes": {}}
+            for name in ("leave_lights_on", "brightness_override"):
+                ents[f"input_boolean.{room}_{name}"] = {"state": "off", "attributes": {}}
+            ents[f"input_number.{room}_leave_lights_on_minutes"] = {"state": "60", "attributes": {}}
         return ents
 
     async def find_lights_by_room(self, room):

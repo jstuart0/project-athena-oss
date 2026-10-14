@@ -192,11 +192,35 @@ WHOLE_HOUSE_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
 SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name one room."
 
 
+# Motion control is discovered, not configured: a room has it when Home
+# Assistant holds ``input_boolean.<room>_motion_disable`` (see
+# SmartHomeController._motion_control_rooms). Not an HA domain: the pseudo
+# domain _decide_intent_room uses for the device type.
+MOTION_CONTROL_DOMAIN = "motion_control"
+MOTION_DISABLE_SUFFIX = "_motion_disable"
+_INPUT_BOOLEAN = "input_boolean."
+
+# The helpers each action writes or reads, beside the always-present
+# ``<room>_motion_disable``: (domain, name after the room) pairs.
+_MOTION_ACTION_HELPERS = {
+    "leave_lights_on": (("input_number", "leave_lights_on_minutes"), ("input_boolean", "leave_lights_on")),
+    "leave_lights_off": (("input_number", "leave_lights_off_minutes"), ("input_boolean", "leave_lights_off")),
+    "disable_motion": (),
+    "enable_motion": (
+        ("input_boolean", "leave_lights_on"), ("input_boolean", "leave_lights_off"),
+        ("input_boolean", "brightness_override"),
+    ),
+    "set_brightness_override": (("input_number", "override_brightness"), ("input_boolean", "brightness_override")),
+    "keep_current_brightness": (("input_number", "override_brightness"), ("input_boolean", "brightness_override")),
+}
+MOTION_NOT_SET_UP = "Motion control isn't set up for that room."
+
 # The device types whose room is decided by room_context.decide_room, and the
 # HA domain each writes.
 _DECIDED_DOMAINS = {
     "light": "light", "fan": "fan", "switch": "switch",
     "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
+    "motion_control": MOTION_CONTROL_DOMAIN,
 }
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 
@@ -938,7 +962,7 @@ class SmartHomeController:
             }
 
         # MOTION CONTROL: Detect motion/lighting automation override requests
-        # These control Node-RED motion flow variables for bedrooms/office
+        # These set a room's motion-flow helpers in Home Assistant
         motion_control_patterns = [
             # Leave lights on patterns
             'leave the lights on', 'keep the lights on', 'lights stay on',
@@ -2391,6 +2415,12 @@ Return ONLY valid JSON."""
             lt = await self._finalize_light_targets(matches, per_light=True)
             return bool(lt.write_ids)
         scope = current_ha_scope()
+        if domain == MOTION_CONTROL_DOMAIN:
+            slug = (await self._motion_control_rooms()).get(key)
+            if slug is None:
+                return None
+            disable = f"{_INPUT_BOOLEAN}{slug}{MOTION_DISABLE_SUFFIX}"
+            return True if scope is None else check_entity_permission(disable, scope.permissions)
         spoken = key.replace('_', ' ')
         entities = await self.entity_manager.get_entities()
         ids = [
@@ -2472,6 +2502,8 @@ Return ONLY valid JSON."""
         lights = domain == 'light'
         directory = self._directory()
         given = intent.get('room')
+        if room_context.is_speaker_relative(given):
+            given = None
         if given == 'multi_room' and intent.get('rooms'):
             keys = list(dict.fromkeys(room_key(r) for r in intent['rooms'] if r))
             decision = room_context.Rooms(tuple(keys), tuple(self._spoken_room(k) for k in keys))
@@ -3781,7 +3813,8 @@ Return ONLY valid JSON."""
                     minutes_ago = int(seconds_ago / 60)
 
                     if state == 'on':
-                        active_rooms.append(room)
+                        if room_key(room) not in {room_key(r) for r in active_rooms}:
+                            active_rooms.append(room)
                         last_motion_info.append({
                             'room': room,
                             'time': changed_time,
@@ -5365,11 +5398,10 @@ Do NOT mention rooms that have no current or recent motion."""
     async def _extract_motion_control_intent(self, query: str, device_room: str = None) -> Dict:
         """
         Use LLM to extract motion control intent from natural language.
-        Controls Node-RED motion flow variables for bedrooms and office.
+        Controls a room's motion-flow helpers in Home Assistant. Which rooms
+        have them is discovered (see _motion_control_rooms), never listed here.
 
-        Rooms with motion control: office, alpha, beta, master_bedroom
-
-        Variables per room:
+        Helpers per room (``<room>`` is the room's key):
         - input_boolean.<room>_leave_lights_on: Keep lights on after motion stops
         - input_boolean.<room>_leave_lights_off: Keep lights off (nap mode)
         - input_boolean.<room>_brightness_override: Use custom brightness
@@ -5401,9 +5433,7 @@ AVAILABLE ACTIONS:
 - "set_brightness_override": Lock brightness at a specific level when motion triggers lights.
 - "keep_current_brightness": Lock brightness at current level (will query current brightness).
 
-ROOMS WITH MOTION CONTROL: office, alpha, beta, master_bedroom
-- "alpha" and "beta" are guest bedrooms
-- "master_bedroom" can also be called "bedroom", "master", "my room"
+ROOM: the room the user names, as they say it; null when they name none (the speaker's room is used).
 
 Return JSON with this structure:
 {{
@@ -5420,7 +5450,7 @@ Return JSON with this structure:
 Examples:
 "leave the lights on for 2 hours" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_on", "parameters": {{"duration_minutes": 120}}, "reason": "Lights will stay on for 2 hours"}}
 "keep the lights off, I'm taking a nap" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_off", "parameters": {{"duration_minutes": 180}}, "reason": "Lights will stay off for your nap"}}
-"disable motion in the office" -> {{"device_type": "motion_control", "room": "office", "action": "disable_motion", "parameters": {{}}, "reason": "Motion detection disabled, use switch only"}}
+"disable motion in the nursery" -> {{"device_type": "motion_control", "room": "nursery", "action": "disable_motion", "parameters": {{}}, "reason": "Motion detection disabled, use switch only"}}
 "turn motion back on" -> {{"device_type": "motion_control", "room": null, "action": "enable_motion", "parameters": {{}}, "reason": "Motion detection resumed"}}
 "keep the room at this brightness" -> {{"device_type": "motion_control", "room": null, "action": "keep_current_brightness", "parameters": {{}}, "reason": "Brightness locked at current level"}}
 "set motion brightness to 50%" -> {{"device_type": "motion_control", "room": null, "action": "set_brightness_override", "parameters": {{"brightness_percent": 50}}, "reason": "Motion will set lights to 50%"}}
@@ -5457,7 +5487,7 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = json.loads(text)
-            logger.info(f"Motion control intent extracted: {intent}")
+            logger.info("motion_control_intent_extracted action=%s has_room=%s", intent.get("action"), bool(intent.get("room")))
             return intent
 
         except json.JSONDecodeError as e:
@@ -5483,50 +5513,112 @@ Return ONLY the JSON, no other text."""
                 "reason": "Motion settings updated"
             }
 
+    async def _motion_control_rooms(self) -> Dict[str, str]:
+        """The rooms that have motion control, from the states Home
+        Assistant reports: ``{room key: slug}`` for every
+        ``input_boolean.<slug>_motion_disable``. The slug is the room's key
+        (``room_key`` of its name), so "Sun Room" has
+        ``sun_room_motion_disable``. That one helper is what makes a
+        room count; the others an action needs are checked when it runs."""
+        entities = await self.entity_manager.get_entities()
+        rooms: Dict[str, str] = {}
+        for entity_id in entities:
+            if entity_id.startswith(_INPUT_BOOLEAN) and entity_id.endswith(MOTION_DISABLE_SUFFIX):
+                slug = entity_id[len(_INPUT_BOOLEAN):-len(MOTION_DISABLE_SUFFIX)]
+                if slug and room_key(slug) == slug:
+                    rooms[slug] = slug
+        return rooms
+
+    async def _motion_rooms_reply(self, rooms: Dict[str, str]) -> str:
+        """The reply for a room without motion control: only the rooms the
+        request may use are named, so a denied caller learns of none."""
+        usable = [
+            key for key in rooms
+            if await self._room_has_permitted_target(MOTION_CONTROL_DOMAIN, key) is True
+        ]
+        if not usable:
+            return MOTION_NOT_SET_UP
+        labels = sorted(self._spoken_room(key) for key in usable)
+        return f"{MOTION_NOT_SET_UP} It's set up for {_join_spoken(labels)}."
+
+    @staticmethod
+    def _motion_write_set(slug: str, action: str) -> List[str]:
+        """Every entity an action writes, whether or not Home Assistant has it."""
+        ids = [f"{domain}.{slug}_{name}" for domain, name in _MOTION_ACTION_HELPERS.get(action, ())]
+        if action in ("disable_motion", "enable_motion"):
+            ids.append(f"{_INPUT_BOOLEAN}{slug}{MOTION_DISABLE_SUFFIX}")
+        return ids
+
+    async def _current_room_brightness(self, room: str) -> Optional[int]:
+        """The room's lights' brightness (0-100) when any is on, from the
+        entity states; None when none is on."""
+        entities = await self.entity_manager.get_entities()
+        for match in await self._resolve_room_lights(room):
+            state = entities.get(match['entity_id']) or {}
+            if state.get('state') == 'on':
+                level = (state.get('attributes') or {}).get('brightness', 255)
+                return int((level / 255) * 100)
+        return None
+
     async def _handle_motion_control_intent(self, action: str, parameters: Dict, ha_client, room: str = None, original_query: str = None) -> str:
         """
-        Handle motion control commands by setting Node-RED motion flow variables.
+        Handle motion control commands by setting the room's motion-flow
+        helpers in Home Assistant. ``room`` is the room the command acts on
+        (decided upstream: the one named, else the speaker's).
 
-        Rooms with motion control helpers:
-        - office: input_boolean.office_*, input_number.office_*
-        - alpha: input_boolean.alpha_*, input_number.alpha_*
-        - beta: input_boolean.beta_*, input_number.beta_*
-        - master_bedroom: input_boolean.master_bedroom_*, input_number.master_bedroom_*
+        A room has motion control when ``input_boolean.<room>_motion_disable``
+        exists, where ``<room>`` is the room's key (``sun_room`` for
+        "Sun Room"). The other helpers, named for the room the same way,
+        are what each action writes:
+        input_boolean ``_leave_lights_on``, ``_leave_lights_off``,
+        ``_brightness_override``; input_number ``_leave_lights_on_minutes``,
+        ``_leave_lights_off_minutes``, ``_override_brightness``.
         """
         from orchestrator.mode_permission import ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
-        # Normalize room name to match HA entity naming
-        room_map = {
-            "office": "office",
-            "alpha": "alpha",
-            "beta": "beta",
-            "master_bedroom": "master_bedroom",
-            "master bedroom": "master_bedroom",
-            "bedroom": "master_bedroom",
-            "master": "master_bedroom",
-            "my room": "master_bedroom",
-            "my bedroom": "master_bedroom"
-        }
-
-        normalized_room = room_map.get(room.lower() if room else "", None)
-
+        motion_rooms = await self._motion_control_rooms()
+        normalized_room = motion_rooms.get(room_key(room or ""))
         if not normalized_room:
-            # Check if room has motion control
-            valid_rooms = ["office", "alpha", "beta", "master_bedroom"]
-            return f"Motion control is only available in: {', '.join(valid_rooms)}. Which room would you like to control?"
+            logger.info("motion_control_room_unsupported room_given=%s rooms_with_helpers=%d", bool(room), len(motion_rooms))
+            return await self._motion_rooms_reply(motion_rooms)
+        spoken_room = self._spoken_room(normalized_room)
 
-        # Build entity names
+        # Authorize the whole write set before saying anything about the
+        # room's helpers, so a denied caller learns nothing about them.
+        from orchestrator.mode_permission import (
+            check_entity_permission, current_ha_scope, permission_refusal_message, record_precheck_denial,
+        )
+        scope = current_ha_scope()
+        denied_ids = [] if scope is None else [
+            eid for eid in self._motion_write_set(normalized_room, action)
+            if not check_entity_permission(eid, scope.permissions)
+        ]
+        if scope is not None and (
+            denied_ids or not check_entity_permission(f"{_INPUT_BOOLEAN}{normalized_room}{MOTION_DISABLE_SUFFIX}", scope.permissions)
+        ):
+            logger.info("motion_control_denied action=%s denied=%d", action, len(denied_ids))
+            record_precheck_denial(scope, "input_boolean", action or "change", denied_ids or [f"{_INPUT_BOOLEAN}{normalized_room}{MOTION_DISABLE_SUFFIX}"])
+            return permission_refusal_message((_INPUT_BOOLEAN.rstrip("."),), scope)
+
+        entities = await self.entity_manager.get_entities()
+        missing = [
+            f"{domain}.{normalized_room}_{name}" for domain, name in _MOTION_ACTION_HELPERS.get(action, ())
+            if f"{domain}.{normalized_room}_{name}" not in entities
+        ]
+        if missing:
+            logger.info("motion_control_helpers_missing action=%s missing=%d", action, len(missing))
+            return f"Motion control in the {spoken_room} isn't fully set up for that. Some of its Home Assistant helpers are missing."
+
         leave_on_bool = f"input_boolean.{normalized_room}_leave_lights_on"
         leave_off_bool = f"input_boolean.{normalized_room}_leave_lights_off"
         brightness_override_bool = f"input_boolean.{normalized_room}_brightness_override"
-        motion_disable_bool = f"input_boolean.{normalized_room}_motion_disable"
+        motion_disable_bool = f"input_boolean.{normalized_room}{MOTION_DISABLE_SUFFIX}"
         leave_on_minutes = f"input_number.{normalized_room}_leave_lights_on_minutes"
         leave_off_minutes = f"input_number.{normalized_room}_leave_lights_off_minutes"
         override_brightness = f"input_number.{normalized_room}_override_brightness"
-        light_entity = f"light.{normalized_room}"
 
         duration = parameters.get("duration_minutes", 60)
         brightness = parameters.get("brightness_percent")
@@ -5557,7 +5649,7 @@ Return ONLY the JSON, no other text."""
                 time_str = f"{hours} hour{'s' if hours != 1 else ''}" if hours > 0 else ""
                 if mins > 0:
                     time_str += f" {mins} minute{'s' if mins != 1 else ''}" if time_str else f"{mins} minute{'s' if mins != 1 else ''}"
-                return f"Lights will stay on in the {normalized_room.replace('_', ' ')} for {time_str}."
+                return f"Lights will stay on in the {spoken_room} for {time_str}."
 
             elif action == "leave_lights_off":
                 # Set duration first, then enable the boolean
@@ -5574,7 +5666,7 @@ Return ONLY the JSON, no other text."""
                 time_str = f"{hours} hour{'s' if hours != 1 else ''}" if hours > 0 else ""
                 if mins > 0:
                     time_str += f" {mins} minute{'s' if mins != 1 else ''}" if time_str else f"{mins} minute{'s' if mins != 1 else ''}"
-                return f"Lights will stay off in the {normalized_room.replace('_', ' ')} for {time_str}."
+                return f"Lights will stay off in the {spoken_room} for {time_str}."
 
             elif action == "disable_motion":
                 # Disable motion detection - only physical switch works
@@ -5582,7 +5674,7 @@ Return ONLY the JSON, no other text."""
                     "input_boolean", "turn_on",
                     {"entity_id": motion_disable_bool}
                 )
-                return f"Motion detection disabled in the {normalized_room.replace('_', ' ')}. Use the light switch to control lights."
+                return f"Motion detection disabled in the {spoken_room}. Use the light switch to control lights."
 
             elif action == "enable_motion":
                 # Reset all overrides and enable motion
@@ -5592,7 +5684,7 @@ Return ONLY the JSON, no other text."""
                     ha_client.call_service("input_boolean", "turn_off", {"entity_id": leave_off_bool}),
                     ha_client.call_service("input_boolean", "turn_off", {"entity_id": brightness_override_bool})
                 )
-                return f"Motion detection resumed in the {normalized_room.replace('_', ' ')}. All overrides cleared."
+                return f"Motion detection resumed in the {spoken_room}. All overrides cleared."
 
             elif action == "set_brightness_override":
                 if brightness is None:
@@ -5606,17 +5698,13 @@ Return ONLY the JSON, no other text."""
                     "input_boolean", "turn_on",
                     {"entity_id": brightness_override_bool}
                 )
-                return f"Motion will set lights to {brightness}% brightness in the {normalized_room.replace('_', ' ')}."
+                return f"Motion will set lights to {brightness}% brightness in the {spoken_room}."
 
             elif action == "keep_current_brightness":
-                # Query current brightness from the light
+                # Read the room's current brightness from the entity states
                 try:
-                    light_state = await ha_client.get_state(light_entity)
-                    if light_state and light_state.get("state") == "on":
-                        current_brightness = light_state.get("attributes", {}).get("brightness", 255)
-                        # Convert from 0-255 to 0-100 percent
-                        brightness_percent = int((current_brightness / 255) * 100)
-
+                    brightness_percent = await self._current_room_brightness(normalized_room)
+                    if brightness_percent is not None:
                         await ha_client.call_service(
                             "input_number", "set_value",
                             {"entity_id": override_brightness, "value": brightness_percent}
@@ -5625,9 +5713,9 @@ Return ONLY the JSON, no other text."""
                             "input_boolean", "turn_on",
                             {"entity_id": brightness_override_bool}
                         )
-                        return f"Brightness locked at {brightness_percent}% in the {normalized_room.replace('_', ' ')}."
+                        return f"Brightness locked at {brightness_percent}% in the {spoken_room}."
                     else:
-                        return f"The {normalized_room.replace('_', ' ')} lights are off. Please turn them on first or specify a brightness level."
+                        return f"The {spoken_room} lights are off. Please turn them on first or specify a brightness level."
                 except Exception as e:
                     logger.error(f"Error getting current brightness: {e}")
                     return "I couldn't determine the current brightness. Please specify a level like 'set motion brightness to 50 percent'."

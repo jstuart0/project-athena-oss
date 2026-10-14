@@ -462,6 +462,18 @@ def _room_like(words: Sequence[str]) -> bool:
     )
 
 
+# A room given as a place relative to the speaker names no room of its own;
+# the speaker's room answers it (decide_room).
+_SPEAKER_RELATIVE_PHRASES = frozenset({
+    ("my", "room"), ("this", "room"), ("the", "room"), ("here",), ("in", "here"), ("my", "current", "room"),
+})
+
+
+def is_speaker_relative(phrase: Optional[str]) -> bool:
+    """Whether a model-supplied room is "my room" or "here" rather than a name."""
+    return tokens(phrase or "") in _SPEAKER_RELATIVE_PHRASES
+
+
 def unknown_room_phrase(query: Optional[str], directory: Optional[RoomDirectory]) -> str:
     """A phrase that is shaped like a room ("the sunroom lights", "lights in
     the sunroom", "turn on sunroom lights") but names none the directory
