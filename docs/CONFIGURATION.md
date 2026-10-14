@@ -2733,8 +2733,8 @@ Every answered turn on `/query`, `/query/stream`, `/query/stream/v2` and `/v1/ch
 
 | Level | What |
 |---|---|
-| Always (Analytics Mode on) | the question and the answer, the route and channel (spoken or text), who was talking (owner, guest, household or unverified, website visitor), the outcome (answered, no answer, error, cut off, refused, withheld), room, the server's mode, intent, confidence, and the response time |
-| With **Debug detail** also on | the model, tools used, token counts, validation result, node timings, complexity, an error class, and a small fixed set of flags (cache hit, the caller trust tier, whether the owner was proven, and similar) |
+| Always (Analytics Mode on) | the question and the answer, the route and channel (spoken or text), who was talking (owner, guest, household or unverified, website visitor), the outcome (answered, no answer, error, cut off, refused, withheld), room, the server's mode, intent, confidence, the response time, the model that answered, the tools used (names from a fixed list) and node timings in milliseconds |
+| With **Debug detail** also on | token counts, validation result, complexity, an error class, and a small fixed set of flags (cache hit, the caller trust tier, whether the owner was proven, and similar) |
 
 No guest id, guest or speaker name, device id or fingerprint is stored. A guest may say their own name in a conversation, so captured text can contain names; it is visible to owners only.
 

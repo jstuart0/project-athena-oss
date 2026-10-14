@@ -383,9 +383,9 @@ def withhold_reason(query: Optional[str], owner_command: Optional[Callable[[str]
 class CaptureRecord:
     """One answered turn, in the shape the writer statement takes.
 
-    Base fields are stored whenever Analytics Mode is on. The debug-only
-    block is written only if the debug flag is on at write time (the SQL
-    nulls it otherwise). No identity is carried: no guest id or name, speaker
+    Base fields, the model, the tools and the node timings are stored whenever
+    Analytics Mode is on. The remaining debug block is written only if the
+    debug flag is on at write time (the SQL nulls it otherwise). No identity is carried: no guest id or name, speaker
     name, device id or fingerprint.
     """
 
@@ -406,7 +406,6 @@ class CaptureRecord:
     confidence: Optional[float] = None
     is_fallback: Optional[bool] = None
     response_time_ms: Optional[int] = None
-    # debug-only
     model_used: Optional[str] = None
     rag_tools_used: Optional[List[str]] = None
     tokens_generated: Optional[int] = None
@@ -477,6 +476,7 @@ CAPTURE_RAG_TOOL_NAMES = frozenset(
         "request_media",
     }
 )
+# CAPTURE_RAG_TOOL_NAMES is closed to rag_tools.TOOL_DEFINITIONS (set-equality drift test).
 CAPTURE_TOOL_NAMES = CAPTURE_RAG_TOOL_NAMES | CAPTURE_RETRIEVE_SERVICES
 CAPTURE_GRAPH_NODE_NAMES = frozenset(
     {
@@ -495,8 +495,8 @@ CAPTURE_GRAPH_NODE_NAMES = frozenset(
         "finalize",
     }
 )
-CAPTURE_NODE_NAMES = CAPTURE_GRAPH_NODE_NAMES | {"tool_selection", "post_synthesis_fallback"}
-_MODEL_NAME_RE = re.compile(r"^[\w.:/@-]{1,100}$")
+CAPTURE_NODE_NAMES = CAPTURE_GRAPH_NODE_NAMES | {"post_synthesis_fallback"}
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/@-]{1,100}$")
 
 
 def _clean_model(model: Optional[str]) -> Optional[str]:

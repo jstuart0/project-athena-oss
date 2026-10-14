@@ -348,15 +348,15 @@ def test_json_blocks_are_bounded():
 def test_standard_rows_keep_model_tools_and_timings_but_drop_off_list_values():
     rec = cc.sanitize_record(_record(
         model_used="qwen3:4b-instruct@q4/x_1.5", rag_tools_used=["get_weather", "call 555-1234", "weather", "get_weather"],
-        node_timings_ms={"classify": 12.5, "tool_selection": 3.0, "call 555-1234": 9.0},
+        node_timings_ms={"classify": 12.5, "post_synthesis_fallback": 3.0, "tool_selection": 4.0, "call 555-1234": 9.0},
     ))
     assert rec.model_used == "qwen3:4b-instruct@q4/x_1.5"
     assert rec.rag_tools_used == ["get_weather", "weather"]
-    assert rec.node_timings_ms == {"classify": 12.5, "tool_selection": 3.0}
+    assert rec.node_timings_ms == {"classify": 12.5, "post_synthesis_fallback": 3.0}
 
 
 def test_model_name_must_match_the_model_pattern():
-    for bad in ("has space", "a" * 101, "", "x\ny", "answer: 1234"):
+    for bad in ("has space", "a" * 101, "", "x\ny", "answer: 1234", "mod\u00e9l", "\u0663\u0664"):
         assert cc.sanitize_record(_record(model_used=bad)).model_used is None, bad
     assert cc.sanitize_record(_record(model_used="a" * 100)).model_used == "a" * 100
 
