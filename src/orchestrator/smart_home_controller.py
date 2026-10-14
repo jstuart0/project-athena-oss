@@ -260,6 +260,10 @@ _SCENE_NOT_DISTINGUISHING = frozenset({
     "scene", "script", "routine", "mode", "the", "a", "an", "of", "to", "for", "and", "my", "in", "on", "at",
 })
 _OPENING_VERBS = frozenset({"unlock", "unlocks", "open", "opens", "release", "unbolt", "undo"})
+# How old a lock or cover state may be when it is read back. Everything else
+# keeps the entity manager's five-minute cache.
+ACCESS_READ_MAX_AGE_SECONDS = 5.0
+LOCK_READ_REFUSAL = "I can't check the locks for this request."
 SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening, so ask me when you want it."
 # What a sequence step target may carry in from a model: where, what and how.
 # Everything else, the server's decision keys above all, is dropped.
@@ -1918,7 +1922,7 @@ Return ONLY the JSON, no other text."""
         # Get model from database or use fallback
         admin_client = get_admin_client()
         config = await admin_client.get_component_model("smart_home_control")
-        model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
+        model = config.get("model_name") if config and config.get("enabled") else get_config().athena_default_model
 
         # Use LLM to extract intent (llama3.1:8b better at structured output than phi3:mini).
         # The answer picks the device and the write, so it must come from the
@@ -2216,7 +2220,7 @@ Return ONLY valid JSON."""
         # Get model from admin config
         admin_client = get_admin_client()
         config = await admin_client.get_component_model("smart_home_control")
-        model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
+        model = config.get("model_name") if config and config.get("enabled") else get_config().athena_default_model
 
         logger.info(f"Extracting sequence intent with model {model}")
 
@@ -4188,6 +4192,10 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         try:
+            unknown_room = self._occupancy_unknown_room(original_query)
+            if unknown_room:
+                return f"I don't know a room called {unknown_room}."
+
             # Step 1: Fetch motion sensors with stuck detection
             # This excludes stuck sensors and creates alerts for them
             healthy_sensors, stuck_sensors = await self._get_all_motion_sensors_with_stuck_detection()
@@ -4847,7 +4855,7 @@ Return ONLY valid JSON."""
         recent_rooms = []  # Motion in last 5 minutes
         all_room_status = []
 
-        for room, data in sorted(room_states.items()):
+        for room, data in sorted(room_states.items(), key=lambda kv: kv[0] or ""):
             state = data['state']
             seconds_ago = data['seconds_ago']
             minutes_ago = int(seconds_ago / 60)
@@ -4859,90 +4867,94 @@ Return ONLY valid JSON."""
             # We only care about active and recent for occupancy estimation
             # Historical motion (> 5 min ago) is ignored
 
-        # Build separate sections for active vs recent motion
-        motion_sections = []
-        if active_rooms:
-            motion_sections.append(f"CURRENTLY ACTIVE (motion detected now): {', '.join(sorted(active_rooms))}")
-        else:
-            motion_sections.append("CURRENTLY ACTIVE: None")
+        mention = room_context.find_room_mention(original_query, self._directory())
+        if mention.kind != "none" and not mention.in_exclusion:
+            return self._named_room_occupancy(mention, room_states)
 
-        if recent_rooms:
-            motion_sections.append(f"RECENT MOTION (within last 5 minutes): {', '.join(sorted(recent_rooms))}")
+        template = self._occupancy_template(active_rooms, recent_rooms)
+        if len(active_rooms) < 2 or not self._COUNT_QUESTION_RE.search(original_query or ""):
+            return template
 
-        motion_summary = "\n".join(motion_sections)
-
-        # Build the LLM prompt
-        layout_section = ""
-        if house_layout:
-            layout_section = f"""
-HOUSE LAYOUT:
-{house_layout}
-"""
-
-        occupancy_prompt = f"""Estimate how many people are likely home based on motion sensor data.
-{layout_section}
-{motion_summary}
-
-CURRENT TIME: {now.strftime('%I:%M %p')}
-
-IMPORTANT RULES:
-- CURRENTLY ACTIVE means the sensor is detecting motion RIGHT NOW
-- RECENT MOTION means motion stopped within the last 5 minutes
-- Multiple sensors in the same room = still 1 person in that room
-- Adjacent rooms (like bedroom + bathroom) could be the same person moving
-
-HOW TO COUNT:
-- 1 active room = at least 1 person
-- Multiple DISTANT active rooms at the same time = multiple people
-- Recent motion + 1 active room = probably just 1 person who moved
-- No active motion = could be empty OR people are still/sleeping
-
-Respond with a brief estimate (1-2 sentences) stating:
-1. How many people you estimate are home
-2. Your confidence level (low/medium/high)
-
-Do NOT mention rooms that have no current or recent motion."""
-
-        # Get model from database or use fallback
+        # Only a head-count question over several active rooms needs judgment.
+        occupancy_prompt = (
+            "Motion is detected right now in these rooms: " + ", ".join(sorted(active_rooms)) + ".\n"
+            f"{('House layout: ' + house_layout) if house_layout else ''}\n"
+            "In one plain sentence, with no list and no formatting, say whether this means at least two "
+            "people are home or possibly just one. Do not mention rooms without motion."
+        )
         admin_client = get_admin_client()
         config = await admin_client.get_component_model("smart_home_control")
-        model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
-
+        model = config.get("model_name") if config and config.get("enabled") else get_config().athena_default_model
         try:
             llm_response = await self.llm_router.generate(
-                model=model,
-                prompt=occupancy_prompt,
-                temperature=0.3,
-                max_tokens=200
+                model=model, prompt=occupancy_prompt, temperature=0.3, max_tokens=80,
             )
-
-            response_text = llm_response.get("response", "").strip()
-            logger.info(f"Occupancy estimation: response_text_len={len(response_text)}")
-
-            # Validate response is a complete sentence, not just a number like "1."
-            # LLM sometimes returns just the count instead of a full response
-            is_valid = (
-                len(response_text) >= 15 and  # Minimum reasonable sentence length
-                not response_text.replace('.', '').replace(' ', '').isdigit() and  # Not just a number
-                any(c.isalpha() for c in response_text)  # Has at least some letters
-            )
-
-            if is_valid:
-                return response_text
-            else:
-                logger.warning(f"LLM returned invalid occupancy response: '{response_text}', using fallback")
-                # Fall through to fallback logic below
-
+            text = (llm_response.get("response", "") or "").strip()
+            logger.info(f"Occupancy estimation: response_text_len={len(text)}")
+            if 15 <= len(text) <= 240 and "\n" not in text and not re.search(r"[*#`]|^\s*\d+[.)]", text):
+                return text
+            logger.warning("LLM returned an unusable occupancy sentence; using the template")
         except Exception as e:
-            logger.error(f"LLM occupancy reasoning error: {e}")
+            logger.error(f"LLM occupancy reasoning error: {type(e).__name__}")
+        return template
 
-        # Fallback to simple response (both for LLM error and invalid response)
+    _COUNT_QUESTION_RE = re.compile(
+        r"\b(how many|more than (one|1)|at least (two|2)|two or more|multiple|(two|2) (or more )?(people|persons))\b",
+        re.IGNORECASE,
+    )
+    # Words after "in"/"at" that are not a room: the whole house, "at all",
+    # "at this time", "at the front door".
+    _OCCUPANCY_NOT_A_ROOM = frozenset({
+        "house", "home", "here", "there", "building", "place", "apartment", "residence", "anywhere", "everywhere",
+        "all", "this", "that", "time", "front", "back", "door", "doors", "gate", "entrance", "entry", "least",
+        "once", "night", "moment", "present", "the", "a", "my", "our", "your",
+    })
+    _OCCUPANCY_ROOM_RE = re.compile(
+        r"\b(?:in|inside|at)\s+(?:the\s+|my\s+|our\s+)?([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*)?)", re.IGNORECASE,
+    )
+    _OCCUPANCY_TAIL_WORDS = frozenset({"right", "now", "currently", "at", "the", "moment", "today", "tonight"})
+
+    def _occupancy_unknown_room(self, query: Optional[str]) -> Optional[str]:
+        """The word a person used for a room the house doesn't have ("is
+        there anyone in the pantry"), else None. A room the directory
+        knows, a whole-house word and a question with no place return None."""
+        if not query or room_context.find_room_mention(query, self._directory()).kind != "none":
+            return None
+        if self._explicit_whole_house(query):
+            return None
+        match = self._OCCUPANCY_ROOM_RE.search(query)
+        if not match:
+            return None
+        words = [w for w in match.group(1).lower().split() if w not in self._OCCUPANCY_TAIL_WORDS]
+        if not words or any(w in self._OCCUPANCY_NOT_A_ROOM for w in words):
+            return None
+        return words[0][:32]
+
+    @staticmethod
+    def _spoken_rooms(rooms: Sequence[str]) -> str:
+        names = [f"the {r}" if r else NO_ROOM_PHRASE.lower() for r in sorted(rooms, key=lambda r: r or "")]
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+
+    @classmethod
+    def _occupancy_template(cls, active_rooms: Sequence[str], recent_rooms: Sequence[str]) -> str:
         if active_rooms:
-            return f"Based on current motion, there's at least 1 person home. Motion detected in: {', '.join(active_rooms)}."
-        elif recent_rooms:
-            return f"Someone was recently in {', '.join(recent_rooms)}, but no current motion detected."
-        else:
-            return "No recent motion detected. The house may be empty or everyone is stationary."
+            return f"Motion in {cls._spoken_rooms(active_rooms)} right now."
+        if recent_rooms:
+            return f"No motion right now; there was some in {cls._spoken_rooms(recent_rooms)} in the last 5 minutes."
+        return "No motion anywhere in the last 5 minutes; someone may still be home."
+
+    @staticmethod
+    def _named_room_occupancy(mention, room_states: Dict[str, Dict]) -> str:
+        keys = {ref.key for ref in mention.candidates}
+        label = mention.candidates[0].label if len(mention.candidates) == 1 else mention.phrase
+        here = [d for r, d in room_states.items() if room_key(r or "") in keys]
+        if not here:
+            return f"I don't have a motion sensor in the {label}."
+        if any(d['state'] == 'on' for d in here):
+            return f"Yes, there's motion in the {label} right now."
+        if any(d['seconds_ago'] < 300 for d in here):
+            return f"No motion in the {label} right now, but there was some in the last 5 minutes."
+        return f"No motion in the {label} in the last 5 minutes."
 
     async def _handle_media_intent(self, action: str, parameters: Dict, original_query: str = None, room: str = None, ha_client = None) -> str:
         """Handle media player queries and control"""
@@ -5494,6 +5506,56 @@ Do NOT mention rooms that have no current or recent motion."""
         refs = outcome.refs
         return [r.entity_id for r in refs] if refs else list(labels)
 
+    # "lock up", "lock everything", goodnight and leaving mean every permitted
+    # lock; "lock all the doors" and "are the doors locked" mean door locks.
+    _BROAD_LOCK_RE = re.compile(
+        r"\block(?:ing)?\s+(?:it\s+)?(?:up|down)\b|\beverything\b|\bgood\s?night\b|\bleaving\b|\bheading out\b|\bbed\b"
+    )
+
+    @classmethod
+    def _door_scope(cls, entity_ids: Sequence[str], locks: Dict[str, Dict], query: Optional[str]) -> Tuple[List[str], List[str]]:
+        """(the locks a request about 'the locks' covers, those it leaves
+        out). Door-scoped wording leaves out child locks, keypads and the
+        like; broad wording or no wording leaves nothing out."""
+        if query is None or cls._BROAD_LOCK_RE.search(query.lower()):
+            return list(entity_ids), []
+        doors = [e for e in entity_ids if access_target.is_access_lock(e, (locks.get(e) or {}).get('attributes'))]
+        return doors, [e for e in entity_ids if e not in doors]
+
+    @staticmethod
+    def _left_out(skipped: Sequence[str], labels: Dict[str, str]) -> str:
+        if not skipped:
+            return ""
+        names = [labels[e] for e in skipped]
+        spoken = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+        if len(names) > 3:
+            spoken = f"{names[0]}, {names[1]} and {len(names) - 2} more"
+        return f" I left out {spoken}."
+
+    @staticmethod
+    def _lock_summary(
+        entity_ids: Sequence[str], labels: Dict[str, str], locks: Dict[str, Dict], hidden: frozenset = frozenset(),
+    ) -> str:
+        """Many locks in a sentence: a state shared by several is a count
+        ("3 doors are locked"), one alone is named ("the back door is
+        unavailable")."""
+        by_state: Dict[str, List[str]] = {}
+        for entity_id in entity_ids:
+            by_state.setdefault(str((locks[entity_id] or {}).get('state') or 'unknown'), []).append(entity_id)
+        order = sorted(by_state, key=lambda st: (st != 'locked', st != 'unlocked', st))
+        parts = []
+        for state in order:
+            members = by_state[state]
+            if len(members) > 1:
+                parts.append(f"{len(members)} doors are {state}")
+            elif members[0] in hidden:
+                parts.append(f"one is {state}")
+            else:
+                name = labels[members[0]]
+                parts.append(f"{name if name.lower().startswith('the ') else 'the ' + name.lower()} is {state}")
+        text = "; ".join(parts) + "."
+        return text[0].upper() + text[1:]
+
     async def _handle_lock_intent(
         self, action: str, room: str, ha_client, original_query: str = None, *, intent: Optional[Dict] = None,
     ) -> str:
@@ -5516,6 +5578,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
             if not locks:
                 return "I couldn't find any locks in the home automation system."
+            no_doors = "I couldn't find any door locks in the home automation system."
+            left_out: List[str] = []
 
             if action == "get_status":
                 # A status read is not a write: it reports every lock, as it
@@ -5526,9 +5590,40 @@ Do NOT mention rooms that have no current or recent motion."""
                 if target_ids is None:
                     return self._door_prompt(outcome, domain='lock', action=action, room=room,
                                              intent=intent, original_query=original_query)
+                aggregate = isinstance(outcome, (access_target.Every, access_target.Unnamed))
+                skipped: List[str] = []
+                hidden: set = set()
+                if aggregate:
+                    scope = current_ha_scope()
+                    if scope is not None:
+                        permitted_ids, denied_ids = self._split_permitted(target_ids)
+                        perms = scope.permissions
+                        if perms.get('audience') == 'public' or perms.get('mode') == 'degraded':
+                            # Public or unverified: only the locks this request may use.
+                            target_ids = permitted_ids
+                            if not target_ids:
+                                return LOCK_READ_REFUSAL
+                        else:
+                            # Household, guest, owner: every lock counts, and a
+                            # restricted one is never named on its own.
+                            hidden = set(denied_ids)
+                    target_ids, skipped = self._door_scope(target_ids, locks, original_query)
+                    skipped = [e for e in skipped if e not in hidden]
+                    if not target_ids:
+                        return no_doors
+                    fresh = await self.entity_manager.get_entities(max_age=ACCESS_READ_MAX_AGE_SECONDS)
+                    locks = {e: fresh.get(e) or locks[e] for e in target_ids}
+                else:
+                    locks = {
+                        e: (await self.entity_manager.get_entity(e, max_age=ACCESS_READ_MAX_AGE_SECONDS)) or locks[e]
+                        for e in target_ids
+                    }
+                if len(target_ids) == 1 and target_ids[0] in hidden:
+                    return f"One door is {locks[target_ids[0]].get('state', 'unknown')}."
                 if len(target_ids) == 1:
                     self._record_access_decision(intent, target_ids[0], 'status')
-                return ". ".join(f"{labels[e]} is {locks[e].get('state', 'unknown')}" for e in target_ids) + "."
+                    return f"{labels[target_ids[0]]} is {locks[target_ids[0]].get('state', 'unknown')}."
+                return self._lock_summary(target_ids, labels, locks, hidden) + self._left_out(skipped, labels)
 
             if action not in ("lock", "unlock"):
                 return "I'm not sure what you want to do with the lock."
@@ -5555,6 +5650,10 @@ Do NOT mention rooms that have no current or recent motion."""
                 if target_ids is None:
                     return self._door_prompt(outcome, domain='lock', action=action, room=room,
                                              intent=intent, original_query=original_query)
+                if isinstance(outcome, (access_target.Every, access_target.Unnamed)):
+                    target_ids, left_out = self._door_scope(target_ids, locks, original_query)
+                    if not target_ids:
+                        return no_doors
 
             # ATHENA-128 4.3 (bob r2 (1)): gated unconditionally at the
             # try-body level, before either write branch, so the gate
@@ -5575,11 +5674,14 @@ Do NOT mention rooms that have no current or recent motion."""
                     ha_client.call_service("lock", "lock", {"entity_id": entity_id})
                     for entity_id in target_ids
                 ])
+                self.entity_manager.invalidate(target_ids)
+                note = self._left_out(left_out, labels)
                 if len(target_ids) > 2:
-                    return f"Done! I've locked all {len(target_ids)} doors."
-                return f"Done! I've locked {', '.join(labels[e] for e in target_ids)}."
+                    return f"Done! I've locked all {len(target_ids)} doors.{note}"
+                return f"Done! I've locked {', '.join(labels[e] for e in target_ids)}.{note}"
 
             await ha_client.call_service("lock", "unlock", {"entity_id": target_ids[0]})
+            self.entity_manager.invalidate(target_ids[:1])
             self._record_access_decision(intent, target_ids[0], 'open')
             return f"Done! I've unlocked {labels[target_ids[0]]}."
 
@@ -5775,7 +5877,7 @@ Do NOT mention rooms that have no current or recent motion."""
         logger = logging.getLogger(__name__)
 
         try:
-            all_entities = await self.entity_manager.get_entities()
+            all_entities = await self.entity_manager.get_entities(max_age=ACCESS_READ_MAX_AGE_SECONDS)
             covers = {k: v for k, v in all_entities.items() if k.startswith('cover.')}
 
             if not covers:
@@ -5863,6 +5965,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 ha_client.call_service("cover", _cover_service, {"entity_id": entity_id})
                 for entity_id in target_ids
             ])
+            self.entity_manager.invalidate(target_ids)
             if opened_door is not None:
                 self._record_access_decision(intent, opened_door, 'open')
             elif action == "close":
@@ -6650,7 +6753,7 @@ Return ONLY the JSON, no other text."""
         # Get model from database or use fallback
         admin_client = get_admin_client()
         config = await admin_client.get_component_model("smart_home_control")
-        model = config.get("model_name") if config and config.get("enabled") else "llama3.1:8b"
+        model = config.get("model_name") if config and config.get("enabled") else get_config().athena_default_model
 
         whole_prompt_guaranteed = True
         try:

@@ -453,12 +453,23 @@ import orchestrator.smart_home_controller as shc
 from orchestrator.sequence_executor import SequenceExecutor
 
 
-class _FakeEntityManagerSeq:
+class _FreshnessStub:
+    """The entity manager's freshness surface, for fakes that return a fixed set."""
+
+    def invalidate(self, entity_ids):
+        pass
+
+    async def get_entity(self, entity_id, max_age=None):
+        return (await self.get_entities()).get(entity_id)
+
+
+
+class _FakeEntityManagerSeq(_FreshnessStub):
     def __init__(self, n=12):
         self._entities = {f"light.office_{i}": {"state": "on", "attributes": {"friendly_name": f"Office Light {i}"}} for i in range(n)}
         self._n = n
 
-    async def get_entities(self):
+    async def get_entities(self, force_refresh=False, max_age=None):
         return dict(self._entities)
 
     async def find_lights_by_room(self, room):
@@ -560,7 +571,7 @@ NEUTRAL_TEXT = "I'm not sure what you're agreeing to."
 DECLINED_TEXT = "Okay, I won't."
 
 
-class _FakeEntityManager54:
+class _FakeEntityManager54(_FreshnessStub):
     def __init__(self, n_lights=OFFICE_N, n_locks=0):
         self.n_lights = n_lights
         self._locks = {
@@ -568,7 +579,7 @@ class _FakeEntityManager54:
             for i in range(n_locks)
         }
 
-    async def get_entities(self):
+    async def get_entities(self, force_refresh=False, max_age=None):
         ents = {
             f"light.office_{i}": {"state": "on", "attributes": {"friendly_name": f"Office Light {i}"}}
             for i in range(self.n_lights)
@@ -1520,7 +1531,7 @@ class TestKillSwitchRuntime:
 B4_N = 8
 
 
-class _B4EntityManager:
+class _B4EntityManager(_FreshnessStub):
     def __init__(self, n=B4_N):
         self._entities = {}
         for i in range(n):
@@ -1533,7 +1544,7 @@ class _B4EntityManager:
                     "state": "on", "attributes": {"friendly_name": f"{room.title()} Light {i}"},
                 }
 
-    async def get_entities(self, force_refresh=False):
+    async def get_entities(self, force_refresh=False, max_age=None):
         return dict(self._entities)
 
     async def find_lights_by_room(self, room):
@@ -1662,13 +1673,13 @@ KITCHEN_LIGHTS_OFF_JSON = (
 ROOM_ONLY = {"anaphora_types": ["room_only"], "has_context_ref": True, "ref_types": ["room_only"], "is_continuation": True}
 
 
-class _TwoRoomEntityManager:
+class _TwoRoomEntityManager(_FreshnessStub):
     """3 office + 3 kitchen lights (under the fan-out threshold, so the gate
     can't be what stops a write) plus a thermostat."""
 
     ROOMS = ("office", "kitchen")
 
-    async def get_entities(self):
+    async def get_entities(self, force_refresh=False, max_age=None):
         ents = {}
         for room in self.ROOMS:
             for i in range(3):

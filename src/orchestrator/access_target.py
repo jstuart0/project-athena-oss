@@ -184,6 +184,44 @@ def is_access_cover(entity_id: str, attributes: Optional[Mapping]) -> bool:
     )
 
 
+# A lock that is not a door: a child lock on an appliance, a keypad, a safe.
+NON_DOOR_LOCK_DEVICE_CLASSES: FrozenSet[str] = frozenset({"child_lock", "keypad", "panel", "safe"})
+NON_DOOR_LOCK_WORDS: FrozenSet[str] = frozenset({
+    "child", "kid", "kids", "keypad", "panel", "safe", "minisplit", "display", "buttons",
+})
+
+
+# A door, gate or entry word in a lock's name or id makes it a door whatever
+# else the name says ("Front Door Keypad", "Kids Room Door").
+DOOR_LOCK_WORDS: FrozenSet[str] = frozenset({
+    "door", "doors", "gate", "gates", "entry", "front", "back", "garage", "deadbolt", "deadbolts",
+})
+
+
+def is_access_lock(entity_id: str, attributes: Optional[Mapping]) -> bool:
+    """Whether a lock is a door. A door, gate, entry, front, back, garage or
+    deadbolt word in its name or id always makes it one. Otherwise a device
+    class or a name saying child lock, keypad, panel, safe or a mini-split's
+    lock makes it something else, and an unnamed or unclassified lock is a
+    door. A summary of "all the doors" and a door-scoped write use only
+    these; a read of a lock the user names does not need this test."""
+    attrs = attributes if isinstance(attributes, Mapping) else {}
+    name = attrs.get("friendly_name")
+    object_id = entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    spoken = tokens(name if isinstance(name, str) else "") + tokens(object_id)
+    if any(t in DOOR_LOCK_WORDS for t in spoken):
+        return True
+    device_class = attrs.get("device_class")
+    if isinstance(device_class, str) and device_class.strip().lower() in NON_DOOR_LOCK_DEVICE_CLASSES:
+        return False
+    if "mini" in spoken and "split" in spoken:
+        return False
+    for i, word in enumerate(spoken):
+        if word in NON_DOOR_LOCK_WORDS and not (word == "safe" and spoken[i + 1:i + 2] == ("room",)):
+            return False
+    return True
+
+
 def entity_domain(entity_id: Any) -> Optional[str]:
     if not isinstance(entity_id, str) or "." not in entity_id:
         return None

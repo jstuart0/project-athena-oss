@@ -82,6 +82,9 @@ GLOBS = (
     "tests/unit/test_tool_call_grounding.py",
     "tests/unit/test_answer_route.py",
     "tests/integration/test_semantic_cache_real_redis.py",
+    "tests/unit/test_access_lock.py",
+    "tests/unit/test_entity_freshness.py",
+    "tests/unit/test_occupancy_answer.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
@@ -168,6 +171,9 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_tool_call_grounding.py",
     "tests/unit/test_answer_route.py",
     "tests/integration/test_semantic_cache_real_redis.py",
+    "tests/unit/test_access_lock.py",
+    "tests/unit/test_entity_freshness.py",
+    "tests/unit/test_occupancy_answer.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

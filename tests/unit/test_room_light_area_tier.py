@@ -129,6 +129,7 @@ class Cfg:
     ha_satellite_room_map = ""
     ha_whole_house_unassigned_lights = False
     ha_room_light_exclude_entities = ""
+    athena_default_model = "test-default-model"
 
 
 def fanout_cfg(threshold=6, hard_limit=18):
@@ -158,7 +159,9 @@ class Rig:
         shared.config._clear_cache_for_tests()
         hem._clear_room_light_exclude_cache()
 
-        self.manager = hem.HAEntityManager(MagicMock())
+        ha = MagicMock()
+        ha.get_state = AsyncMock(side_effect=lambda entity_id, **_: dict(self.manager._entities_cache[entity_id]))
+        self.manager = hem.HAEntityManager(ha)
         self.manager._entities_cache = state_map
         self.manager._cache_time = datetime.now()
         self.manager._build_indexes()

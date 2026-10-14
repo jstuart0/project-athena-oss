@@ -4,6 +4,7 @@ Dynamically fetches and caches HA entities for intelligent device control
 """
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -373,7 +374,14 @@ class HAEntityManager:
         self._entities_cache = None
         self._cache_time = None
         self._cache_duration = timedelta(minutes=5)
-        
+        # One refresh at a time: callers that arrive while one runs wait for
+        # it and reuse its result instead of each asking Home Assistant.
+        self._refresh_lock = asyncio.Lock()
+        self._bulk_generation = 0  # counts finished bulk fetches
+        self._bulk_done_at = float("-inf")  # monotonic end of the last bulk fetch
+        self._entity_read_at: Dict[str, float] = {}  # monotonic time of each id's last single read
+        self._stale_ids: set = set()
+
         # Indexed lookups
         self._entities_by_area = {}
         self._entities_by_type = {}
@@ -381,7 +389,12 @@ class HAEntityManager:
     
     async def refresh_entities(self):
         """Fetch all entities from Home Assistant"""
+        stale_before = set(self._stale_ids)
         entities = await self._ha.get_states()
+        self._bulk_done_at = time.monotonic()
+        self._bulk_generation += 1
+        self._entity_read_at = {}
+        self._stale_ids -= stale_before  # an id marked while this ran stays marked
         self._entities_cache = {e['entity_id']: e for e in entities}
         self._cache_time = datetime.now()
         
@@ -434,14 +447,71 @@ class HAEntityManager:
         """When the cached states were read from Home Assistant, as an aware UTC time."""
         return self._cache_time.astimezone(timezone.utc)
 
-    async def get_entities(self, force_refresh=False) -> Dict:
-        """Get cached entities or refresh if needed"""
-        if force_refresh or self._entities_cache is None or \
-           (datetime.now() - self._cache_time) > self._cache_duration:
-            await self.refresh_entities()
-        
+    def _bulk_is_stale(self, max_age: Optional[float]) -> bool:
+        if self._entities_cache is None or self._cache_time is None:
+            return True
+        age = (datetime.now() - self._cache_time).total_seconds()
+        limit = self._cache_duration.total_seconds() if max_age is None else min(max_age, self._cache_duration.total_seconds())
+        return age > limit
+
+    async def get_entities(self, force_refresh=False, max_age: Optional[float] = None) -> Dict:
+        """The cached entities, refreshed when they are older than ``max_age``
+        seconds (default: the five-minute cache) or when ``force_refresh``.
+        Concurrent refreshes share one Home Assistant call, and ids marked
+        stale by ``invalidate`` are re-read singly, not the whole set."""
+        generation = self._bulk_generation
+        if force_refresh or self._bulk_is_stale(max_age):
+            async with self._refresh_lock:
+                # Re-check under the lock: a refresh that finished while this
+                # call waited is as good as one of our own.
+                covered = self._bulk_generation != generation if force_refresh else not self._bulk_is_stale(max_age)
+                if not covered:
+                    await self.refresh_entities()
+        if self._stale_ids:
+            async with self._refresh_lock:
+                for entity_id in sorted(self._stale_ids):
+                    try:
+                        await self._read_entity(entity_id)
+                    except Exception as exc:
+                        # A failed single read keeps the cached value, drops
+                        # the mark (the next write marks it again) and never
+                        # fails the unrelated read that triggered it.
+                        self._stale_ids.discard(entity_id)
+                        logger.warning("entity_stale_reread_failed", error_type=type(exc).__name__)
         return self._entities_cache
-    
+
+    def invalidate(self, entity_ids: Iterable[str]) -> None:
+        """Mark entities as changed (a write just went to them): the next read
+        fetches just these, and the rest of the cache stays."""
+        for entity_id in entity_ids:
+            if isinstance(entity_id, str):
+                self._stale_ids.add(entity_id)
+                self._entity_read_at.pop(entity_id, None)
+
+    async def get_entity(self, entity_id: str, max_age: Optional[float] = None) -> Optional[Dict]:
+        """One entity's state, read singly (``/api/states/<id>``) when it is
+        older than ``max_age`` seconds or stale. The bulk cache must already
+        hold the entity; None when it doesn't (the caller named something Home
+        Assistant no longer reports)."""
+        cache = await self.get_entities()
+        if entity_id not in cache:
+            return None
+        async with self._refresh_lock:
+            read_at = self._entity_read_at.get(entity_id, self._bulk_done_at)
+            fresh = max_age is not None and (time.monotonic() - read_at) <= max_age
+            if not fresh or entity_id in self._stale_ids:
+                await self._read_entity(entity_id)
+        return self._entities_cache.get(entity_id)
+
+    async def _read_entity(self, entity_id: str) -> None:
+        """Fetch one entity and patch it into the cache. The caller holds
+        the refresh lock."""
+        state = await self._ha.get_state(entity_id)
+        self._entities_cache[entity_id] = state
+        self._entity_read_at[entity_id] = time.monotonic()
+        self._stale_ids.discard(entity_id)
+        self._build_indexes()
+
     async def find_lights_by_room(self, room_name: str) -> List[Dict]:
         """Find the light entities that cover a room (compound names like 'hall and hallway' work).
 

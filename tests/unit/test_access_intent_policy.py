@@ -280,7 +280,7 @@ class TestLocks:
         answer, _ = rig.run_scoped(lock_intent("get_status", room="front_door"), "is the front door locked")
         assert answer == "Front Door Lock is locked."
         answer, _ = rig.run_scoped(lock_intent("get_status"), "are the doors locked")
-        assert answer.count(" is locked") == 3
+        assert answer == "3 doors are locked."
         assert rig.calls == []
 
     def test_the_speakers_room_does_not_pick_a_lock(self, monkeypatch):
@@ -1329,7 +1329,7 @@ class TestStatusReadsAreUnguarded:
     def test_a_guest_can_ask_whether_the_doors_are_locked(self, monkeypatch):
         rig = DoorRig(monkeypatch, THREE_LOCKS)
         answer, _ = rig.run_scoped(lock_intent("get_status"), "are the doors locked", perms=guest(), mode="guest")
-        assert answer.count(" is locked") == 3 and rig.calls == []
+        assert answer == "3 doors are locked." and rig.calls == []  # a verified guest hears the count
 
     def test_an_owner_in_degraded_mode_can_ask(self, monkeypatch):
         rig = DoorRig(monkeypatch, THREE_LOCKS)
@@ -1340,7 +1340,7 @@ class TestStatusReadsAreUnguarded:
         perms = {"mode": "degraded", "restricted_entities": [r"^lock\.back_door$"], "allowed_domains": []}
         rig = DoorRig(monkeypatch, THREE_LOCKS)
         answer, _ = rig.run_scoped(lock_intent("get_status"), "are the doors locked", perms=perms)
-        assert "Back Door Lock is locked" in answer
+        assert answer == "2 doors are locked."  # unverified (degraded): only the locks the request may use
 
     def test_door_cover_status_is_read_by_a_guest_and_under_a_read_only_scope(self, monkeypatch):
         rig = DoorRig(monkeypatch, HOUSE_COVERS)
@@ -1354,7 +1354,7 @@ class TestStatusReadsAreUnguarded:
             with mp.ha_permission_scope(guest(), mode="guest", read_only=True):
                 return await rig2.controller.execute_intent(lock_intent("get_status"), rig2.raw, "is it locked")
 
-        assert "Front Door Lock is locked" in asyncio.run(go2())
+        assert asyncio.run(go2()) == "3 doors are locked."
 
     def test_the_opening_path_still_uses_the_permitted_set(self, monkeypatch):
         perms = {"mode": "degraded", "restricted_entities": [r"^lock\.back_door$"], "allowed_domains": []}
