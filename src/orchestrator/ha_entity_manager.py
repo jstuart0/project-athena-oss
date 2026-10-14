@@ -470,7 +470,14 @@ class HAEntityManager:
         if self._stale_ids:
             async with self._refresh_lock:
                 for entity_id in sorted(self._stale_ids):
-                    await self._read_entity(entity_id)
+                    try:
+                        await self._read_entity(entity_id)
+                    except Exception as exc:
+                        # A failed single read keeps the cached value, drops
+                        # the mark (the next write marks it again) and never
+                        # fails the unrelated read that triggered it.
+                        self._stale_ids.discard(entity_id)
+                        logger.warning("entity_stale_reread_failed", error_type=type(exc).__name__)
         return self._entities_cache
 
     def invalidate(self, entity_ids: Iterable[str]) -> None:

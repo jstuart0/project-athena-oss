@@ -164,3 +164,24 @@ def test_an_id_marked_while_a_bulk_fetch_runs_stays_marked():
         assert cache["lock.front"]["state"] == "unlocked"
         assert ha.single_calls == ["lock.front"]
     run(go())
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("404"), asyncio.TimeoutError(), PermissionError("withheld 401")])
+def test_a_failing_single_reread_keeps_the_cache_and_never_fails_other_reads(failure):
+    async def go():
+        ha, m = make()
+        await m.get_entities()
+
+        async def broken(entity_id, **_):
+            raise failure
+
+        ha.get_state = broken
+        m.invalidate(["lock.front"])
+        cache = await m.get_entities()
+        assert cache["lock.front"]["state"] == "locked" and cache["light.den"]["state"] == "off"
+        assert "lock.front" not in m._stale_ids  # dropped; the next write marks it again
+        m.invalidate(["lock.front"])
+        ha.get_state = FakeHA.get_state.__get__(ha)
+        ha.flip("lock.front", "unlocked")
+        assert (await m.get_entities())["lock.front"]["state"] == "unlocked"
+    run(go())

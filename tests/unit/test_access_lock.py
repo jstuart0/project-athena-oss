@@ -20,10 +20,14 @@ DOORS = {
     "lock.side": {"state": "locked", "attributes": {"friendly_name": "Side Door"}},
     "lock.garage": {"state": "locked", "attributes": {"friendly_name": "Garage Entry"}},
 }
+DOOR_NOUN_OVERRIDES = [
+    ("lock.a", "Front Door Keypad"), ("lock.b", "Side Panel Door"), ("lock.c", "Kids Room Door"),
+    ("lock.d", "Garage Keypad"), ("lock.e", "Back Gate Child Lock"), ("lock.deadbolt_panel", "Panel"),
+]
 NOT_DOORS = {
     "lock.hp": {"state": "unlocked", "attributes": {"friendly_name": "Heat Pump Child Lock"}},
     "lock.split": {"state": "unlocked", "attributes": {"friendly_name": "Mini Split Lock"}},
-    "lock.pad": {"state": "unlocked", "attributes": {"friendly_name": "Garage Keypad"}},
+    "lock.pad": {"state": "unlocked", "attributes": {"friendly_name": "Alarm Keypad"}},
     "lock.box": {"state": "unlocked", "attributes": {"friendly_name": "Gun Safe"}},
     "lock.cls": {"state": "unlocked", "attributes": {"friendly_name": "Odd", "device_class": "child_lock"}},
 }
@@ -77,7 +81,7 @@ def _ask(controller, action, query):
 
 def test_all_the_locks_leaves_out_child_and_keypad_locks_and_summarises():
     answer, _ = _ask(_controller({**DOORS, **NOT_DOORS}), "get_status", "are all the locks locked")
-    assert answer == "3 doors are locked; the back door is unavailable."
+    assert answer.startswith("3 doors are locked; the back door is unavailable. I left out ")
 
 
 def test_a_named_child_lock_can_still_be_read():
@@ -110,3 +114,36 @@ def test_closing_a_cover_marks_it_stale_for_the_next_read():
 
     assert asyncio.run(go()).startswith("Done!")
     assert controller.entity_manager.invalidated == ["cover.garage"]
+
+
+@pytest.mark.parametrize("entity_id,name", DOOR_NOUN_OVERRIDES)
+def test_a_door_noun_always_makes_a_lock_a_door(entity_id, name):
+    assert at.is_access_lock(entity_id, {"friendly_name": name, "device_class": "keypad"})
+
+
+def test_broad_wording_keeps_every_lock_and_door_wording_names_what_it_skipped():
+    entities = {**DOORS, **NOT_DOORS}
+    for query in ("lock up", "lock everything", "good night, lock up"):
+        controller = _controller(entities)
+        answer, ha = _ask(controller, "lock", query)
+        written = {c.args[2]["entity_id"] for c in ha.call_service.call_args_list}
+        assert written == set(entities), query
+    controller = _controller(entities)
+    answer, ha = _ask(controller, "lock", "lock all the doors")
+    assert "I left out" in answer and "Heat Pump Child Lock" in answer
+    answer, _ = _ask(_controller(entities), "get_status", "are the doors locked")
+    assert answer.startswith("3 doors are locked; the back door is unavailable.") and "I left out" in answer
+    answer, _ = _ask(_controller(entities), "get_status", "status of everything locked")
+    assert "left out" not in answer
+
+
+def test_a_non_owner_aggregate_read_counts_only_permitted_locks():
+    controller = _controller(DOORS)
+    perms = {"mode": "degraded", "restricted_entities": [r"^lock\.side$"], "allowed_domains": []}
+
+    async def go(p, mode):
+        with mp.ha_permission_scope(p, mode=mode, utterance=classify_utterance("are the doors locked"), read_only=True):
+            return await controller._handle_lock_intent("get_status", None, mock.MagicMock(), "are the doors locked")
+
+    assert asyncio.run(go(perms, "degraded")) == "2 doors are locked; the back door is unavailable."
+    assert asyncio.run(go({"mode": "owner"}, "owner")) == "3 doors are locked; the back door is unavailable."

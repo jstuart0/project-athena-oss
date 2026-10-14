@@ -263,6 +263,7 @@ _OPENING_VERBS = frozenset({"unlock", "unlocks", "open", "opens", "release", "un
 # How old a lock or cover state may be when it is read back. Everything else
 # keeps the entity manager's five-minute cache.
 ACCESS_READ_MAX_AGE_SECONDS = 5.0
+LOCK_READ_REFUSAL = "I can't check the locks for this request."
 SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening, so ask me when you want it."
 # What a sequence step target may carry in from a model: where, what and how.
 # Everything else, the server's decision keys above all, is dropped.
@@ -4901,8 +4902,12 @@ Return ONLY valid JSON."""
         r"\b(how many|more than (one|1)|at least (two|2)|two or more|multiple|(two|2) (or more )?(people|persons))\b",
         re.IGNORECASE,
     )
-    _OCCUPANCY_WHOLE_HOUSE_WORDS = frozenset({
+    # Words after "in"/"at" that are not a room: the whole house, "at all",
+    # "at this time", "at the front door".
+    _OCCUPANCY_NOT_A_ROOM = frozenset({
         "house", "home", "here", "there", "building", "place", "apartment", "residence", "anywhere", "everywhere",
+        "all", "this", "that", "time", "front", "back", "door", "doors", "gate", "entrance", "entry", "least",
+        "once", "night", "moment", "present", "the", "a", "my", "our", "your",
     })
     _OCCUPANCY_ROOM_RE = re.compile(
         r"\b(?:in|inside|at)\s+(?:the\s+|my\s+|our\s+)?([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*)?)", re.IGNORECASE,
@@ -4921,9 +4926,9 @@ Return ONLY valid JSON."""
         if not match:
             return None
         words = [w for w in match.group(1).lower().split() if w not in self._OCCUPANCY_TAIL_WORDS]
-        if not words or any(w in self._OCCUPANCY_WHOLE_HOUSE_WORDS for w in words):
+        if not words or any(w in self._OCCUPANCY_NOT_A_ROOM for w in words):
             return None
-        return words[0]
+        return words[0][:32]
 
     @staticmethod
     def _spoken_rooms(rooms: Sequence[str]) -> str:
@@ -5501,11 +5506,31 @@ Return ONLY valid JSON."""
         refs = outcome.refs
         return [r.entity_id for r in refs] if refs else list(labels)
 
+    # "lock up", "lock everything", goodnight and leaving mean every permitted
+    # lock; "lock all the doors" and "are the doors locked" mean door locks.
+    _BROAD_LOCK_RE = re.compile(
+        r"\block(?:ing)?\s+(?:it\s+)?(?:up|down)\b|\beverything\b|\bgood\s?night\b|\bleaving\b|\bheading out\b|\bbed\b"
+    )
+
+    @classmethod
+    def _door_scope(cls, entity_ids: Sequence[str], locks: Dict[str, Dict], query: Optional[str]) -> Tuple[List[str], List[str]]:
+        """(the locks a request about 'the locks' covers, those it leaves
+        out). Door-scoped wording leaves out child locks, keypads and the
+        like; broad wording or no wording leaves nothing out."""
+        if query is None or cls._BROAD_LOCK_RE.search(query.lower()):
+            return list(entity_ids), []
+        doors = [e for e in entity_ids if access_target.is_access_lock(e, (locks.get(e) or {}).get('attributes'))]
+        return doors, [e for e in entity_ids if e not in doors]
+
     @staticmethod
-    def _door_locks_only(entity_ids: Sequence[str], locks: Dict[str, Dict]) -> List[str]:
-        """The doors among these locks: a child lock, keypad, safe or
-        mini-split lock is left out of every unnamed or "all" target."""
-        return [e for e in entity_ids if access_target.is_access_lock(e, (locks.get(e) or {}).get('attributes'))]
+    def _left_out(skipped: Sequence[str], labels: Dict[str, str]) -> str:
+        if not skipped:
+            return ""
+        names = [labels[e] for e in skipped]
+        spoken = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+        if len(names) > 3:
+            spoken = f"{names[0]}, {names[1]} and {len(names) - 2} more"
+        return f" I left out {spoken}."
 
     @staticmethod
     def _lock_summary(entity_ids: Sequence[str], labels: Dict[str, str], locks: Dict[str, Dict]) -> str:
@@ -5550,6 +5575,7 @@ Return ONLY valid JSON."""
             if not locks:
                 return "I couldn't find any locks in the home automation system."
             no_doors = "I couldn't find any door locks in the home automation system."
+            left_out: List[str] = []
 
             if action == "get_status":
                 # A status read is not a write: it reports every lock, as it
@@ -5561,8 +5587,14 @@ Return ONLY valid JSON."""
                     return self._door_prompt(outcome, domain='lock', action=action, room=room,
                                              intent=intent, original_query=original_query)
                 aggregate = isinstance(outcome, (access_target.Every, access_target.Unnamed))
+                skipped: List[str] = []
                 if aggregate:
-                    target_ids = self._door_locks_only(target_ids, locks)
+                    scope = current_ha_scope()
+                    if scope is not None and scope.permissions.get('mode') != 'owner':
+                        target_ids = self._split_permitted(target_ids)[0]
+                        if not target_ids:
+                            return LOCK_READ_REFUSAL
+                    target_ids, skipped = self._door_scope(target_ids, locks, original_query)
                     if not target_ids:
                         return no_doors
                     fresh = await self.entity_manager.get_entities(max_age=ACCESS_READ_MAX_AGE_SECONDS)
@@ -5575,7 +5607,7 @@ Return ONLY valid JSON."""
                 if len(target_ids) == 1:
                     self._record_access_decision(intent, target_ids[0], 'status')
                     return f"{labels[target_ids[0]]} is {locks[target_ids[0]].get('state', 'unknown')}."
-                return self._lock_summary(target_ids, labels, locks)
+                return self._lock_summary(target_ids, labels, locks) + self._left_out(skipped, labels)
 
             if action not in ("lock", "unlock"):
                 return "I'm not sure what you want to do with the lock."
@@ -5603,7 +5635,7 @@ Return ONLY valid JSON."""
                     return self._door_prompt(outcome, domain='lock', action=action, room=room,
                                              intent=intent, original_query=original_query)
                 if isinstance(outcome, (access_target.Every, access_target.Unnamed)):
-                    target_ids = self._door_locks_only(target_ids, locks)
+                    target_ids, left_out = self._door_scope(target_ids, locks, original_query)
                     if not target_ids:
                         return no_doors
 
@@ -5627,9 +5659,10 @@ Return ONLY valid JSON."""
                     for entity_id in target_ids
                 ])
                 self.entity_manager.invalidate(target_ids)
+                note = self._left_out(left_out, labels)
                 if len(target_ids) > 2:
-                    return f"Done! I've locked all {len(target_ids)} doors."
-                return f"Done! I've locked {', '.join(labels[e] for e in target_ids)}."
+                    return f"Done! I've locked all {len(target_ids)} doors.{note}"
+                return f"Done! I've locked {', '.join(labels[e] for e in target_ids)}.{note}"
 
             await ha_client.call_service("lock", "unlock", {"entity_id": target_ids[0]})
             self.entity_manager.invalidate(target_ids[:1])
