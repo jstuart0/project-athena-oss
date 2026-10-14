@@ -54,7 +54,12 @@ _UNSPECIFIC = (IntentCategory.GENERAL_INFO, IntentCategory.UNKNOWN)
 _SPORTS_EVIDENCE = re.compile(
     r"\b(?:scores?|standings|playoffs?|championship|nfl|nba|mlb|nhl|mls|ncaa|football|soccer|basketball|baseball|hockey)\b"
 )
-_WEATHER_EVIDENCE = re.compile(r"\b(?:weather|forecast|raining|snowing|rain today|snow today)\b")
+_WEATHER_EVIDENCE = re.compile(
+    r"\b(?:weather|forecast|rain|raining|snow|snowing|sleet|hail|storms?|"
+    r"(?:cold|hot|warm|temperature|temp)\s+(?:is it\s+)?outside|outside\s+temp(?:erature)?|outdoors?\s+temp(?:erature)?)\b"
+)
+# Music, film and show titles share these words ("the rain album").
+_MEDIA_WORDS = re.compile(r"\b(?:album|song|songs|track|band|lyrics|movie|film|show|series|podcast|playlist|book)\b")
 _PATTERN_EVIDENCE: Mapping[IntentCategory, "re.Pattern[str]"] = {
     IntentCategory.SPORTS: _SPORTS_EVIDENCE,
     IntentCategory.WEATHER: _WEATHER_EVIDENCE,
@@ -161,7 +166,7 @@ def _any(query: str, phrases) -> bool:
 
 def _has_evidence(intent: IntentCategory, query: str) -> bool:
     pattern = _PATTERN_EVIDENCE.get(intent)
-    if pattern is None:
+    if pattern is None or (intent == IntentCategory.WEATHER and _MEDIA_WORDS.search(query)):
         return False
     if pattern.search(query):
         return True

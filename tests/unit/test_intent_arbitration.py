@@ -68,3 +68,31 @@ def test_it_logs_the_rule_and_no_query_text(capsys):
     logged = capsys.readouterr().out
     assert "intent_arbitration" in logged and "pattern_over_general_info" in logged
     assert "ravens" not in logged
+
+
+W = I.WEATHER
+
+
+@pytest.mark.parametrize("query", [
+    "how cold is it outside",
+    "will it rain tomorrow",
+    "is it going to snow",
+    "chance of rain this weekend",
+    "any sleet or hail coming",
+    "is there a storm tonight",
+    "what's the outside temperature",
+])
+@pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
+def test_weather_phrasing_takes_the_pattern_over_general_info(query, llm_conf):
+    assert _arb(query, G, llm_conf, W).intent == W
+
+
+@pytest.mark.parametrize("query", [
+    "play the rain album",
+    "tell me about the movie storm",
+    "who sings the song rain",
+    "what is a train",
+])
+@pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
+def test_weather_words_in_media_or_other_words_stay_general(query, llm_conf):
+    assert _arb(query, G, llm_conf, W).intent == G

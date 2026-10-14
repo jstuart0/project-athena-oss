@@ -31,6 +31,8 @@ NOT_THE_AGENT = [
     "motion in the garage",
     "turn on the kitchen lights",
     "leave the lights on, I'm taking a nap",
+    "I wonder if there was motion in the hall",
+    "I wonder if there was motion in the hall and the lights came on",
 ]
 THE_AGENT = [
     "when there's motion in the hallway turn on the lamp",
@@ -111,3 +113,13 @@ def test_the_exemption_covers_a_question_and_a_motion_control_directly():
         assert _is_agent_exempt(query, classify_utterance(query)), query
     for query in ("turn off the porch light at 6pm", "when there's motion in the hall turn on the lamp"):
         assert not _is_agent_exempt(query, classify_utterance(query)), query
+
+
+def test_automation_listing_is_not_blocked_by_the_exemption():
+    """The exemption never claims a request to list or manage automations. "list my automations"
+    reaches the agent; "what automations do I have" is narration to the clause rules, at base
+    as now, and the exemption leaves it exactly as it was."""
+    for query in ("list my automations", "show me my routines", "what automations do I have"):
+        assert _is_agent_exempt(query, classify_utterance(query)) is False, query
+    assert should_use_automation_agent("list my automations") is True
+    assert should_use_automation_agent("show me my routines") is True

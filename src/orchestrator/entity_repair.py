@@ -1,8 +1,10 @@
-"""Repair of misheard or mistyped entity words, for routing only.
+"""Repair of misheard or mistyped sports words, for routing only.
 
-``repair_for_routing`` fixes a word that is a near miss of a name from a known
-vocabulary (team names, sports nouns, room words, device words) so the intent
-classifier can see what was meant ("whats the scor of the ravens game").
+``repair_for_routing`` fixes a word that is a near miss of a team name or a
+sports noun, and only in an utterance that already talks about sports, so the
+intent classifier can see what was meant ("how did the falons do"). Rooms and
+devices are never repaired: their near misses are ordinary words ("flight" and
+"light", "night" and "knight", "officer" and "office").
 
 The output is for classification and nothing else. It feeds the pattern
 classifier, the classifier prompt and the sports team entity. It is never
@@ -20,10 +22,9 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, Tuple
+from typing import FrozenSet, Tuple
 
 from orchestrator.access_target import TEAM_WORDS
-from orchestrator.room_context import COMMON_ROOM_WORDS
 
 CUTOFF = 0.85
 MAX_QUERY_CHARS = 200
@@ -34,26 +35,25 @@ SPORTS_NOUNS: FrozenSet[str] = frozenset({
     "score", "scores", "game", "games", "standings", "playoffs", "playoff", "schedule",
     "football", "baseball", "basketball", "hockey", "soccer", "championship",
 })
-DEVICE_WORDS: FrozenSet[str] = frozenset({
-    "lights", "light", "lamp", "lamps", "thermostat", "garage", "blinds", "shades", "television", "temperature",
+# Words that say the utterance is about a contest. A team name is also context.
+SPORTS_CONTEXT_WORDS: FrozenSet[str] = SPORTS_NOUNS | frozenset({
+    "won", "win", "wins", "lost", "lose", "beat", "play", "plays", "played", "playing", "vs", "versus",
+    "match", "record", "team", "teams",
 })
-ROOM_WORDS: FrozenSet[str] = frozenset(
-    w for phrase in COMMON_ROOM_WORDS for w in phrase.split() if len(w) >= MIN_TOKEN_CHARS and w.isalpha()
-)
+_FRAME_RE = re.compile(r"\bhow (?:did|are|do|have) (?:the )?[a-z]+ (?:do|doing|done|play|playing|look|looking)\b")
+# Ordinary words that sit one edit from a team name or a sports noun. Never repaired.
+COMMON_WORDS: FrozenSet[str] = frozenset({
+    "flight", "flights", "night", "nights", "place", "places", "lighting", "texas", "charges", "charge",
+    "supper", "officer", "office", "light", "lights", "bear", "bears", "store", "stores",
+    "scare", "scared", "came", "gamer", "plays", "state", "states", "giant", "heat", "kings", "king",
+})
 
 KIND_TEAM = "team"
 KIND_SPORTS = "sports"
-KIND_ROOM = "room"
-KIND_DEVICE = "device"
 
-_VOCABULARIES: Tuple[Tuple[str, FrozenSet[str]], ...] = (
-    (KIND_TEAM, TEAM_WORDS),
-    (KIND_SPORTS, SPORTS_NOUNS),
-    (KIND_ROOM, ROOM_WORDS),
-    (KIND_DEVICE, DEVICE_WORDS),
-)
-_KNOWN: FrozenSet[str] = frozenset().union(*(words for _, words in _VOCABULARIES))
-_CHOICES: Dict[str, Tuple[str, ...]] = {kind: tuple(sorted(words)) for kind, words in _VOCABULARIES}
+_TEAM_CHOICES: Tuple[str, ...] = tuple(sorted(TEAM_WORDS))
+_SPORTS_CHOICES: Tuple[str, ...] = tuple(sorted(SPORTS_NOUNS))
+_KNOWN: FrozenSet[str] = TEAM_WORDS | SPORTS_NOUNS
 _WORD_RE = re.compile(r"[A-Za-z]+")
 
 
@@ -75,35 +75,36 @@ def _is_inflection_of_known(word: str) -> bool:
 
 def _closest(word: str) -> Tuple[str, str]:
     """(kind, vocabulary word) for the best near miss of ``word``, or ("", "")."""
-    for kind, _ in _VOCABULARIES:
-        match = difflib.get_close_matches(word, _CHOICES[kind], n=1, cutoff=CUTOFF)
+    for kind, choices in ((KIND_TEAM, _TEAM_CHOICES), (KIND_SPORTS, _SPORTS_CHOICES)):
+        match = difflib.get_close_matches(word, choices, n=1, cutoff=CUTOFF)
         if match:
             return kind, match[0]
     return "", ""
 
 
-def repair_for_routing(query: str) -> Repair:
-    """The query with near-miss entity words corrected. Unchanged when the
-    query is over the caps or nothing is a near miss.
+def _sports_context(lowered_words: set, lowered_query: str) -> bool:
+    return bool(lowered_words & (TEAM_WORDS | SPORTS_CONTEXT_WORDS)) or bool(_FRAME_RE.search(lowered_query))
 
-    A sports noun is only repaired next to a team name or another sports noun,
-    so "core values" stays as spoken."""
+
+def repair_for_routing(query: str) -> Repair:
+    """The query with near-miss team and sports words corrected. Unchanged when
+    the query is over the caps, has no sports context, or nothing is a near miss."""
     if not query or len(query) > MAX_QUERY_CHARS:
         return Repair(query or "")
-    words = _WORD_RE.findall(query)
     if len(query.split()) > MAX_TOKENS:
         return Repair(query)
-    lowered = {w.lower() for w in words}
-    sports_context = bool(lowered & (TEAM_WORDS | SPORTS_NOUNS))
+    lowered = query.lower()
+    if not _sports_context({w.lower() for w in _WORD_RE.findall(query)}, lowered):
+        return Repair(query)
     changes = []
 
     def fix(match: "re.Match[str]") -> str:
         word = match.group(0)
         low = word.lower()
-        if len(low) < MIN_TOKEN_CHARS or low in _KNOWN or _is_inflection_of_known(low):
+        if len(low) < MIN_TOKEN_CHARS or low in _KNOWN or low in COMMON_WORDS or _is_inflection_of_known(low):
             return word
         kind, meant = _closest(low)
-        if not kind or (kind == KIND_SPORTS and not sports_context):
+        if not kind:
             return word
         changes.append((low, meant, kind))
         return meant
