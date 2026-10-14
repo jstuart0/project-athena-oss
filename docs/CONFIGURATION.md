@@ -1769,6 +1769,26 @@ the missing key.
 | `TMDB_API_KEY` | 1M/month | [themoviedb.org](https://www.themoviedb.org/settings/api) |
 | `TICKETMASTER_API_KEY` | 5,000/day | [developer.ticketmaster.com](https://developer.ticketmaster.com/) |
 
+### Media requests (Overseerr / Seerr / Jellyseerr)
+
+The media requests service (`athena-rag-media`, owner mode only) searches
+and requests movies and shows through your Overseerr-compatible server,
+which hands approved requests to Radarr and Sonarr.
+
+- **Preferred:** save an External API Key named `overseerr` with the
+  server's API key (Settings → General in Overseerr) and its address as the
+  endpoint URL, with or without `/api/v1`
+  (`http://overseerr.example.lan:5055/api/v1`).
+- **Fallback:** `OVERSEERR_URL` and `OVERSEERR_API_KEY`. A saved key wins
+  over both. There is no built-in address; with neither set, the assistant
+  says media requests aren't set up.
+- Unlike the other RAG keys, this service re-reads the saved key every 60
+  seconds, so a change needs no restart, and keeps the last value it read
+  while admin-backend is down.
+- Requests are made as the key's owner (normally Overseerr's admin), so
+  they are approved automatically. A TV request asks for every season.
+- `GET /health` reports `overseerr_configured` and `overseerr_connected`.
+
 ### News & Information
 
 News reads its key from the admin key store only — its own code has no

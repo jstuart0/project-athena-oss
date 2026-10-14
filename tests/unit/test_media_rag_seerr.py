@@ -77,6 +77,8 @@ def net(monkeypatch):
     def install(**kwargs):
         fake = FakeNet(**kwargs)
         monkeypatch.setattr(media, "http_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+        # get_admin_url() may already be cached by another test module.
+        monkeypatch.setattr(media, "ADMIN_API_URL", ADMIN)
         monkeypatch.setattr(media, "_admin_settings", {})
         monkeypatch.setattr(media, "_admin_settings_read_at", None)
         monkeypatch.setattr(media, "ENV_OVERSEERR_URL", "")
