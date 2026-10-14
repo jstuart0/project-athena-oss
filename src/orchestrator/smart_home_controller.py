@@ -5533,7 +5533,9 @@ Return ONLY valid JSON."""
         return f" I left out {spoken}."
 
     @staticmethod
-    def _lock_summary(entity_ids: Sequence[str], labels: Dict[str, str], locks: Dict[str, Dict]) -> str:
+    def _lock_summary(
+        entity_ids: Sequence[str], labels: Dict[str, str], locks: Dict[str, Dict], hidden: frozenset = frozenset(),
+    ) -> str:
         """Many locks in a sentence: a state shared by several is a count
         ("3 doors are locked"), one alone is named ("the back door is
         unavailable")."""
@@ -5546,6 +5548,8 @@ Return ONLY valid JSON."""
             members = by_state[state]
             if len(members) > 1:
                 parts.append(f"{len(members)} doors are {state}")
+            elif members[0] in hidden:
+                parts.append(f"one is {state}")
             else:
                 name = labels[members[0]]
                 parts.append(f"{name if name.lower().startswith('the ') else 'the ' + name.lower()} is {state}")
@@ -5588,13 +5592,23 @@ Return ONLY valid JSON."""
                                              intent=intent, original_query=original_query)
                 aggregate = isinstance(outcome, (access_target.Every, access_target.Unnamed))
                 skipped: List[str] = []
+                hidden: set = set()
                 if aggregate:
                     scope = current_ha_scope()
-                    if scope is not None and scope.permissions.get('mode') != 'owner':
-                        target_ids = self._split_permitted(target_ids)[0]
-                        if not target_ids:
-                            return LOCK_READ_REFUSAL
+                    if scope is not None:
+                        permitted_ids, denied_ids = self._split_permitted(target_ids)
+                        perms = scope.permissions
+                        if perms.get('audience') == 'public' or perms.get('mode') == 'degraded':
+                            # Public or unverified: only the locks this request may use.
+                            target_ids = permitted_ids
+                            if not target_ids:
+                                return LOCK_READ_REFUSAL
+                        else:
+                            # Household, guest, owner: every lock counts, and a
+                            # restricted one is never named on its own.
+                            hidden = set(denied_ids)
                     target_ids, skipped = self._door_scope(target_ids, locks, original_query)
+                    skipped = [e for e in skipped if e not in hidden]
                     if not target_ids:
                         return no_doors
                     fresh = await self.entity_manager.get_entities(max_age=ACCESS_READ_MAX_AGE_SECONDS)
@@ -5604,10 +5618,12 @@ Return ONLY valid JSON."""
                         e: (await self.entity_manager.get_entity(e, max_age=ACCESS_READ_MAX_AGE_SECONDS)) or locks[e]
                         for e in target_ids
                     }
+                if len(target_ids) == 1 and target_ids[0] in hidden:
+                    return f"One door is {locks[target_ids[0]].get('state', 'unknown')}."
                 if len(target_ids) == 1:
                     self._record_access_decision(intent, target_ids[0], 'status')
                     return f"{labels[target_ids[0]]} is {locks[target_ids[0]].get('state', 'unknown')}."
-                return self._lock_summary(target_ids, labels, locks) + self._left_out(skipped, labels)
+                return self._lock_summary(target_ids, labels, locks, hidden) + self._left_out(skipped, labels)
 
             if action not in ("lock", "unlock"):
                 return "I'm not sure what you want to do with the lock."

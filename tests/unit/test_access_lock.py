@@ -137,13 +137,31 @@ def test_broad_wording_keeps_every_lock_and_door_wording_names_what_it_skipped()
     assert "left out" not in answer
 
 
-def test_a_non_owner_aggregate_read_counts_only_permitted_locks():
+def _read(controller, perms, mode, query="are the doors locked"):
+    async def go():
+        with mp.ha_permission_scope(perms, mode=mode, utterance=classify_utterance(query), read_only=True):
+            return await controller._handle_lock_intent("get_status", None, mock.MagicMock(), query)
+
+    return asyncio.run(go())
+
+
+RESTRICT_SIDE = [r"^lock\.side$"]
+
+
+def test_public_and_unverified_audiences_count_only_permitted_locks():
     controller = _controller(DOORS)
-    perms = {"mode": "degraded", "restricted_entities": [r"^lock\.side$"], "allowed_domains": []}
+    degraded = {"mode": "degraded", "restricted_entities": RESTRICT_SIDE, "allowed_domains": []}
+    public = {"mode": "degraded", "audience": "public", "restricted_entities": RESTRICT_SIDE, "allowed_domains": []}
+    assert _read(controller, degraded, "degraded") == "2 doors are locked; the back door is unavailable."
+    assert _read(controller, public, "owner") == "2 doors are locked; the back door is unavailable."
+    nothing = {"mode": "degraded", "restricted_entities": [r"^lock\."], "allowed_domains": []}
+    assert _read(controller, nothing, "degraded") == shc.LOCK_READ_REFUSAL
 
-    async def go(p, mode):
-        with mp.ha_permission_scope(p, mode=mode, utterance=classify_utterance("are the doors locked"), read_only=True):
-            return await controller._handle_lock_intent("get_status", None, mock.MagicMock(), "are the doors locked")
 
-    assert asyncio.run(go(perms, "degraded")) == "2 doors are locked; the back door is unavailable."
-    assert asyncio.run(go({"mode": "owner"}, "owner")) == "3 doors are locked; the back door is unavailable."
+def test_a_verified_guest_hears_the_count_and_the_owner_is_unchanged():
+    controller = _controller(DOORS)
+    assert _read(controller, {"mode": "owner"}, "owner") == "3 doors are locked; the back door is unavailable."
+    guest_perms = mp.apply_guest_baseline({"mode": "guest"})
+    answer = _read(controller, guest_perms, "guest")
+    assert answer == "3 doors are locked; one is unavailable."  # counted; the restricted lock is never named
+    assert "Back" not in answer and "Front" not in answer
