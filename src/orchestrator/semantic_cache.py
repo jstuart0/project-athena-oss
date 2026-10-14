@@ -51,6 +51,110 @@ CACHE_TTL_CONFIG = {
 }
 
 
+# The cache is deny-by-default by final intent: each IntentCategory value maps
+# to a CACHE_TTL_CONFIG category or to None (never cached). An intent that
+# isn't listed fails closed, so a new action intent can't be cached by omission.
+# Websearch, music, TV, SMS, notification, control and personal (Tesla) answers
+# report or change state and are never replayed.
+INTENT_CACHE_CATEGORY: Dict[str, Optional[str]] = {
+    "control": None,
+    "weather": "weather",
+    "airports": "airports",
+    "sports": "sports",
+    "flights": "flights",
+    "events": "events",
+    "streaming": "streaming",
+    "news": "news",
+    "stocks": "stocks",
+    "recipes": "recipes",
+    "dining": "dining",
+    "directions": "directions",
+    "websearch": None,
+    "text_me_that": None,
+    "music_play": None,
+    "music_control": None,
+    "tv_control": None,
+    "notification_pref": None,
+    "tesla": None,
+    "general_info": "general",
+    "unknown": None,
+}
+
+
+def _intent_value(intent: Any) -> Optional[str]:
+    value = getattr(intent, "value", intent)
+    return value if isinstance(value, str) else None
+
+
+def _intent_ttl(intent: Any) -> int:
+    category = INTENT_CACHE_CATEGORY.get(_intent_value(intent))
+    return CACHE_TTL_CONFIG.get(category, 0) if category else 0
+
+
+def cacheable_turn(
+    intent: Any,
+    *,
+    grounded: bool,
+    is_fallback: bool,
+    identity_answer: bool,
+    local_business_cue: bool,
+    ungrounded: bool,
+) -> bool:
+    """Whether a finished turn may be stored (and, for a stored entry, replayed).
+
+    True only when the intent maps to a category with a TTL above zero and no
+    blocking flag holds. A tool-owned intent also needs tool data; a
+    general-knowledge answer must not claim specifics it never had and must not
+    be a local-business request."""
+    from orchestrator.grounding import TOOL_OWNED
+    from orchestrator.state import IntentCategory
+
+    if _intent_ttl(intent) <= 0 or is_fallback or identity_answer:
+        return False
+    value = _intent_value(intent)
+    if value in {i.value for i in TOOL_OWNED} and not grounded:
+        return False
+    if value == IntentCategory.GENERAL_INFO.value and (ungrounded or local_business_cue):
+        return False
+    return True
+
+
+def cached_entry_usable(entry: Dict[str, Any], query: str) -> bool:
+    """Whether a stored entry may be replayed: the same deny-by-default rule on
+    the intent it was stored under. An entry written before the grounding flag
+    existed has no flag and is not replayed for a tool-owned intent."""
+    from orchestrator.grounding import TOOL_OWNED, local_business_cue
+    from orchestrator.state import IntentCategory
+
+    intent = _intent_value(entry.get("intent"))
+    if _intent_ttl(intent) <= 0:
+        return False
+    metadata = entry.get("_cache_metadata") or {}
+    if intent in {i.value for i in TOOL_OWNED}:
+        return metadata.get("grounded") is True
+    if intent == IntentCategory.GENERAL_INFO.value:
+        return not local_business_cue(query)
+    return True
+
+
+BARE_REPLY_MAX_WORDS = 6
+
+
+def is_bare_reply(query: str) -> bool:
+    """A short yes, no or continuation ("Yes.", "no thanks", "go on"): its
+    meaning is the last exchange, which the key doesn't hold, so it never reads
+    the cache."""
+    from orchestrator.context.detector import CONTEXT_REF_PATTERNS
+    from shared.fast_path_vocab import BARE_AFFIRMATION_RE, BARE_NEGATION_RE, normalize_reply
+
+    reply = normalize_reply(query)
+    if not reply or len(reply.split()) > BARE_REPLY_MAX_WORDS:
+        return False
+    if BARE_AFFIRMATION_RE.match(reply) or BARE_NEGATION_RE.match(reply):
+        return True
+    return any(reply == c or reply.startswith(c + " ") for c in CONTEXT_REF_PATTERNS["continuations"])
+
+
 # Intent patterns that should NEVER be cached
 UNCACHEABLE_PATTERNS = [
     r"\bwhat time\b",
@@ -709,6 +813,7 @@ async def cache_response(
     *,
     knowledge_digest: str,
     interface_type: str,
+    grounded: Optional[bool] = None,
 ) -> bool:
     """
     Cache a query response with appropriate TTL based on intent category.
@@ -722,6 +827,8 @@ async def cache_response(
         guest_id: The device-identified guest's id, if any (part of the key)
         knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
         interface_type: The request's interface type (the last part of the key)
+        grounded: Whether the turn held tool data; stored in the entry's metadata
+            so a replay can check it
 
     Returns:
         True if cached successfully, False otherwise
@@ -748,7 +855,8 @@ async def cache_response(
                 "category": category,
                 "normalized_query": normalized_query,
                 "cached_at": datetime.now(timezone.utc).isoformat(),
-                "ttl_seconds": ttl
+                "ttl_seconds": ttl,
+                "grounded": grounded,
             }
         }
 
@@ -767,34 +875,44 @@ async def cache_response(
         return False
 
 
-async def invalidate_cache(category: str = None, pattern: str = None) -> int:
+INVALIDATE_BATCH = 500
+
+
+async def invalidate_cache(pattern: str = None) -> int:
     """
-    Invalidate cached responses by category or pattern.
+    Remove cached responses: every semantic key, or those matching ``pattern``.
 
-    Args:
-        category: Invalidate all caches for this category (e.g., "weather")
-        pattern: Invalidate caches matching this pattern
-
-    Returns:
-        Number of keys invalidated
+    The scan is a Redis SCAN over ``athena_semantic:*`` (or the pattern, always
+    kept under that prefix so it can't reach another feature's keys) in batches
+    of 500, and the removal is a batched UNLINK. Returns the number of keys
+    removed; 0 when Redis is unavailable. Keys carry no version bump (constraint
+    g): this is how a release flushes entries written under the old rules. There
+    is no per-category form: the normalized part of a key is not the TTL category
+    (recipes are ``recipe_*``, general answers are a hash).
     """
-    cache = get_cache_client()
-
-    try:
-        if category:
-            pattern = f"athena_semantic:{category}_*"
-        elif not pattern:
-            pattern = "athena_semantic:*"
-
-        # Note: This requires SCAN which may not be available in all Redis configs
-        # For now, just log the intent
-        logger.info("semantic_cache_invalidate_requested", pattern=pattern)
-
-        # Would need: keys = await cache.client.keys(pattern)
-        # For each key: await cache.delete(key)
-
-        return 0  # Placeholder - full implementation needs Redis SCAN
-
-    except Exception as e:
-        logger.warning("semantic_cache_invalidate_error", error=str(e))
+    client = getattr(get_cache_client(), "client", None)
+    if client is None:
         return 0
+
+    prefix = "athena_semantic:"
+    if not pattern:
+        pattern = prefix + "*"
+    elif not pattern.startswith(prefix):
+        pattern = prefix + pattern.lstrip(":")
+
+    removed = 0
+    batch: list = []
+    try:
+        async for key in client.scan_iter(match=pattern, count=INVALIDATE_BATCH):
+            batch.append(key)
+            if len(batch) >= INVALIDATE_BATCH:
+                removed += await client.unlink(*batch)
+                batch = []
+        if batch:
+            removed += await client.unlink(*batch)
+    except Exception as e:
+        logger.warning("semantic_cache_invalidate_error", error_class=type(e).__name__, removed=removed)
+        return removed
+
+    logger.info("semantic_cache_invalidated", pattern=pattern, removed=removed)
+    return removed

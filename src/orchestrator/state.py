@@ -117,6 +117,7 @@ class OrchestratorState(BaseModel):
     intent: Optional[IntentCategory] = None
     confidence: float = 0.0
     entities: Dict[str, Any] = Field(default_factory=dict)
+    request_location: Optional[str] = Field(None, description="The location the request itself carried (the browser's); the only entity location accepted when it isn't in the user's words")
     complexity: Optional[str] = Field(None, description="Query complexity: simple, complex, super_complex")
 
     # Model selection
@@ -140,6 +141,7 @@ class OrchestratorState(BaseModel):
     citations: List[str] = Field(default_factory=list)
     skip_synthesis: bool = Field(False, description="Skip LLM synthesis (used by status query optimization)")
     identity_answer: bool = Field(False, description="The answer is the fixed identity reply (speaker unknown); never cached")
+    tool_call_attempted: bool = Field(False, description="tool_call_node ran for this intent; validation of its answer ends the turn instead of looping back to it")
     was_truncated: bool = Field(False, description="Whether response was truncated due to token limit")
     is_fallback: bool = Field(False, description="Whether response is a fallback/error (should not be cached)")
 

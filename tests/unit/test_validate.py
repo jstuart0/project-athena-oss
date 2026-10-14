@@ -205,10 +205,13 @@ def test_specific_facts_with_supporting_data_passes():
 # ---------------------------------------------------------------------------
 
 def test_specific_facts_base_knowledge_populated_passes():
+    # The house's own rows vouch for a house question; a data intent (weather,
+    # dining, ...) is vouched for only by tool data (test_tool_call_grounding.py).
     state = _make_state(
         answer="It will be $25.00 for that service.",
         retrieved_data={},
         base_knowledge_populated=True,
+        intent=IntentCategory.UNKNOWN,
     )
     router = _make_llm_router()
     _runtime.set_llm_router(router)
@@ -419,14 +422,17 @@ def test_general_info_no_retrieval_bypasses_llm_fact_check():
     router.generate.assert_not_called()
 
 
-# Test 18: Conversation history (non-GENERAL_INFO intent) bypasses Layer 4.
+# Test 18: Conversation history (a non-data, non-GENERAL_INFO intent) bypasses Layer 4.
 def test_training_knowledge_fallback_bypasses_llm_fact_check():
-    # WEATHER intent with conversation history — matches is_training_knowledge_path via
-    # the history branch (synthesize.py:152-166 permits training knowledge here).
+    # UNKNOWN intent with conversation history — matches is_training_knowledge_path via
+    # the history branch (synthesize.py:152-166 permits training knowledge here). The
+    # time in the answer sends it to Layer 4 unless the bypass fires, so the assertion
+    # below fails if the bypass is gone. (A data intent such as weather no longer takes
+    # this bypass: test_tool_call_grounding.py.)
     state = _make_state_with_history(
-        query="What's the weather in Baltimore?",
-        answer="Baltimore is generally mild in May, around 65°F.",
-        intent=IntentCategory.WEATHER,
+        query="What was that about earlier?",
+        answer="We were talking about the schedule, which starts at 3:00 PM.",
+        intent=IntentCategory.UNKNOWN,
         retrieved_data={},
         base_knowledge_populated=False,
     )
@@ -443,9 +449,9 @@ def test_training_knowledge_fallback_bypasses_llm_fact_check():
 # Test 19: Bypass path increments the training_knowledge_fallback metric label.
 def test_training_knowledge_fallback_increments_bypass_metric():
     state = _make_state_with_history(
-        query="What's the weather in Baltimore?",
-        answer="Baltimore is generally mild in May, around 65°F.",
-        intent=IntentCategory.WEATHER,
+        query="What was that about earlier?",
+        answer="We were talking about the schedule, which starts at 3:00 PM.",
+        intent=IntentCategory.UNKNOWN,
         retrieved_data={},
         base_knowledge_populated=False,
     )
@@ -455,7 +461,10 @@ def test_training_knowledge_fallback_increments_bypass_metric():
     with _patch_guardrails(), \
          patch("orchestrator.nodes.validate.validation_counter", mock_counter):
         _run(validate_node(state))
-    mock_counter.labels(passed="true", reason="training_knowledge_fallback").inc.assert_called_once()
+    # labels() returns one mock whatever its arguments, so the label values are
+    # asserted on the labels() call itself.
+    assert mock_counter.labels.call_args_list == [call(passed="true", reason="training_knowledge_fallback")]
+    mock_counter.labels.return_value.inc.assert_called_once()
 
 
 # Test 20: Bypass path does NOT increment hallucination_counter (Decision 3 in plan).
@@ -465,7 +474,7 @@ def test_training_knowledge_fallback_does_not_increment_hallucination_counter():
     state = _make_state_with_history(
         query="What's the weather in Baltimore?",
         answer="Call 555-123-4567 for a weather update.",
-        intent=IntentCategory.WEATHER,
+        intent=IntentCategory.UNKNOWN,  # a data intent (weather) no longer takes this bypass
         retrieved_data={},
         base_knowledge_populated=False,
     )

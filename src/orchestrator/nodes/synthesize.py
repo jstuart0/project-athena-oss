@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Optional
 
 import structlog
 
+from orchestrator.grounding import grounded, no_data_prompt, sports_status_rule, tool_owned_without_data
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
@@ -61,6 +63,95 @@ class _LLMRouterProxy:
 
 
 llm_router = _LLMRouterProxy()
+
+
+async def save_synthesis_context(state: OrchestratorState, answer: Optional[str] = None) -> None:
+    """Store the conversation context a data turn's follow-up reads.
+
+    One writer for the graph's synthesize_node and the two streamed syntheses
+    (/query/stream, /v1 stream), which pass the answer they streamed, so a stream
+    follow-up on weather, sports or airports gets the same context (and the
+    ``grounded`` marker) as a graph follow-up."""
+    answer = answer if answer is not None else state.answer
+    # Store conversation context for follow-up queries
+    # This enables "what about tomorrow?" for weather, "how about the Lakers?" for sports, etc.
+    # Never over another caller's pending write confirmation.
+    if state.session_id and answer and state.intent and not holds_foreign_pending(state.prev_context, state.caller_fingerprint):
+        try:
+            # Extract entities based on intent type
+            context_entities = {}
+            context_params = {}
+
+            if state.intent == IntentCategory.WEATHER:
+                # Extract location from query or use default
+                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["query_type"] = "weather"
+                if state.retrieved_data:
+                    context_params["last_data"] = state.retrieved_data
+
+            elif state.intent == IntentCategory.SPORTS:
+                # Extract team/sport info
+                context_entities["team"] = state.entities.get("team")
+                context_entities["sport"] = state.entities.get("sport")
+                context_entities["query_type"] = "sports"
+
+            elif state.intent == IntentCategory.DINING:
+                # Extract cuisine/location preferences
+                context_entities["cuisine"] = state.entities.get("cuisine")
+                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["query_type"] = "dining"
+
+            elif state.intent == IntentCategory.NEWS:
+                # Extract topic
+                context_entities["topic"] = state.entities.get("topic")
+                context_entities["query_type"] = "news"
+
+            elif state.intent == IntentCategory.EVENTS:
+                # Extract event type/location
+                context_entities["event_type"] = state.entities.get("event_type")
+                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["query_type"] = "events"
+
+            elif state.intent == IntentCategory.STREAMING:
+                # Extract movie/show info
+                context_entities["title"] = state.entities.get("title")
+                context_entities["query_type"] = "streaming"
+
+            elif state.intent == IntentCategory.STOCKS:
+                # Extract stock symbol
+                context_entities["symbol"] = state.entities.get("symbol")
+                context_entities["query_type"] = "stocks"
+
+            elif state.intent == IntentCategory.FLIGHTS:
+                # Extract flight info
+                context_entities["origin"] = state.entities.get("origin")
+                context_entities["destination"] = state.entities.get("destination")
+                context_entities["query_type"] = "flights"
+
+            elif state.intent == IntentCategory.DIRECTIONS:
+                # Extract directions info
+                context_entities["origin"] = state.entities.get("origin")
+                context_entities["destination"] = state.entities.get("destination")
+                context_entities["travel_mode"] = state.entities.get("travel_mode", "driving")
+                context_entities["query_type"] = "directions"
+
+            # A follow-up on this turn's data keeps the conversation prompt
+            # (grounding.prior_tool_context reads this marker).
+            if grounded(state):
+                context_params["grounded"] = True
+
+            # Store context for all RAG-based intents
+            await store_conversation_context(
+                session_id=state.session_id,
+                intent=state.intent.value,
+                query=state.query,
+                entities=context_entities,
+                parameters=context_params,
+                response=answer,  # Store full response for conversation continuity
+                ttl=300  # 5 minute TTL
+            )
+        except Exception as ctx_err:
+            logger.warning(f"Failed to store synthesis context: {ctx_err}")
 
 
 async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
@@ -122,7 +213,7 @@ CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
    - Any specific factual details not in the context
 4. If asked for recommendations but context is empty, say "I couldn't find current information for that request"
 5. Be concise and only state facts that appear in the Context Data
-6. If context contains errors or no results, acknowledge that honestly
+6. If context contains errors or no results, acknowledge that honestly{sports_status_rule(state)}
 
 Response:"""
         elif is_continuation and state.conversation_history:
@@ -163,7 +254,7 @@ Response:"""
             # use conversation history to answer, while still being honest about lacking
             # external data.
             has_conversation_context = bool(state.conversation_history or state.history_summary)
-            if has_conversation_context:
+            if has_conversation_context and not tool_owned_without_data(state):
                 synthesis_prompt = f"""Question: {state.query}
 
 Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
@@ -179,18 +270,7 @@ INSTRUCTIONS:
 
 Response:"""
             else:
-                synthesis_prompt = f"""Question: {state.query}
-
-CRITICAL: You do NOT have access to current or specific information to answer this question.
-
-You must respond with:
-1. Acknowledge you don't have current/specific information
-2. Suggest where the user can find this information
-3. NEVER make up specific facts, dates, names, numbers, or events
-
-Respond honestly about your limitations.
-
-Response:"""
+                synthesis_prompt = no_data_prompt(state.query)
 
         addressee = await resolve_addressee(state, get_admin_client())
         visible_knowledge = (
@@ -385,80 +465,7 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
                 logger.warning(f"SMS content detection failed: {sms_err}")
                 # Non-critical - continue without SMS offer
 
-        # Store conversation context for follow-up queries
-        # This enables "what about tomorrow?" for weather, "how about the Lakers?" for sports, etc.
-        # Never over another caller's pending write confirmation.
-        if state.session_id and state.answer and state.intent and not holds_foreign_pending(state.prev_context, state.caller_fingerprint):
-            try:
-                # Extract entities based on intent type
-                context_entities = {}
-                context_params = {}
-
-                if state.intent == IntentCategory.WEATHER:
-                    # Extract location from query or use default
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "weather"
-                    if state.retrieved_data:
-                        context_params["last_data"] = state.retrieved_data
-
-                elif state.intent == IntentCategory.SPORTS:
-                    # Extract team/sport info
-                    context_entities["team"] = state.entities.get("team")
-                    context_entities["sport"] = state.entities.get("sport")
-                    context_entities["query_type"] = "sports"
-
-                elif state.intent == IntentCategory.DINING:
-                    # Extract cuisine/location preferences
-                    context_entities["cuisine"] = state.entities.get("cuisine")
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "dining"
-
-                elif state.intent == IntentCategory.NEWS:
-                    # Extract topic
-                    context_entities["topic"] = state.entities.get("topic")
-                    context_entities["query_type"] = "news"
-
-                elif state.intent == IntentCategory.EVENTS:
-                    # Extract event type/location
-                    context_entities["event_type"] = state.entities.get("event_type")
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "events"
-
-                elif state.intent == IntentCategory.STREAMING:
-                    # Extract movie/show info
-                    context_entities["title"] = state.entities.get("title")
-                    context_entities["query_type"] = "streaming"
-
-                elif state.intent == IntentCategory.STOCKS:
-                    # Extract stock symbol
-                    context_entities["symbol"] = state.entities.get("symbol")
-                    context_entities["query_type"] = "stocks"
-
-                elif state.intent == IntentCategory.FLIGHTS:
-                    # Extract flight info
-                    context_entities["origin"] = state.entities.get("origin")
-                    context_entities["destination"] = state.entities.get("destination")
-                    context_entities["query_type"] = "flights"
-
-                elif state.intent == IntentCategory.DIRECTIONS:
-                    # Extract directions info
-                    context_entities["origin"] = state.entities.get("origin")
-                    context_entities["destination"] = state.entities.get("destination")
-                    context_entities["travel_mode"] = state.entities.get("travel_mode", "driving")
-                    context_entities["query_type"] = "directions"
-
-                # Store context for all RAG-based intents
-                await store_conversation_context(
-                    session_id=state.session_id,
-                    intent=state.intent.value,
-                    query=state.query,
-                    entities=context_entities,
-                    parameters=context_params,
-                    response=state.answer or "",  # Store full response for conversation continuity
-                    ttl=300  # 5 minute TTL
-                )
-            except Exception as ctx_err:
-                logger.warning(f"Failed to store synthesis context: {ctx_err}")
+        await save_synthesis_context(state)
 
     except Exception as e:
         logger.error(f"Synthesis error: {e}", exc_info=True)

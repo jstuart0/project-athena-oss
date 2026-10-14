@@ -20,6 +20,8 @@ on:
       - "tests/unit/ha_auth_fakes.py"
       - "tests/unit/test_ha_auth_*.py"
       - "tests/integration/test_ha_auth_real_redis.py"
+      - "tests/integration/test_semantic_cache_real_redis.py"
+      - "src/orchestrator/semantic_cache.py"
       - "src/orchestrator/requirements.txt"
       - "src/orchestrator/requirements-test.txt"
       - "admin/backend/requirements.txt"
@@ -38,6 +40,8 @@ on:
       - "tests/unit/ha_auth_fakes.py"
       - "tests/unit/test_ha_auth_*.py"
       - "tests/integration/test_ha_auth_real_redis.py"
+      - "tests/integration/test_semantic_cache_real_redis.py"
+      - "src/orchestrator/semantic_cache.py"
       - "src/orchestrator/requirements.txt"
       - "src/orchestrator/requirements-test.txt"
       - "admin/backend/requirements.txt"
@@ -97,3 +101,4 @@ jobs:
           HA_AUTH_TEST_REDIS_URL: redis://localhost:6379/15
         run: |
           python3 -m pytest -q -p no:cacheprovider -m integration tests/integration/test_ha_auth_real_redis.py
+          python3 -m pytest -q -p no:cacheprovider -m integration tests/integration/test_semantic_cache_real_redis.py

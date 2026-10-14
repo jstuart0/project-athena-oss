@@ -270,7 +270,8 @@ class _Graph:
         synth.retrieved_data = {"weather": {"current": {"temp": 70}}}
         await h.synthesize_module.synthesize_node(synth)
         return {"intent": h.IntentCategory.WEATHER, "answer": self.answer, "confidence": 1.0,
-                "citations": [], "request_id": "r", "node_timings": {}, "validation_passed": True}
+                "citations": [], "request_id": "r", "node_timings": {}, "validation_passed": True,
+                "retrieved_data": {"weather": {"current": {"temp": 70}}}}
 
 
 @pytest.fixture

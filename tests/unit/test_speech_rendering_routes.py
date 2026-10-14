@@ -53,7 +53,8 @@ class _Graph:
     async def ainvoke(self, state):
         self.calls += 1
         return {"intent": h.IntentCategory.WEATHER, "answer": self.answer, "confidence": 1.0,
-                "citations": [], "request_id": "r", "node_timings": {}, "validation_passed": True}
+                "citations": [], "request_id": "r", "node_timings": {}, "validation_passed": True,
+                "retrieved_data": {"current": {"temperature": 70}}}
 
 
 class _TokenLLM:
