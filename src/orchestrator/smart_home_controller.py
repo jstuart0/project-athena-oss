@@ -2842,6 +2842,9 @@ Return ONLY valid JSON."""
         scene_text = await self._plan_sequence_scenes(steps, query)
         if scene_text is not None:
             return scene_text
+        unbacked = await self._first_unbacked_step(steps, query)
+        if unbacked:
+            return NO_DEVICE_TEXT
         door_text = await self._plan_sequence_doors(steps, query)
         if door_text is not None:
             return door_text
@@ -2912,6 +2915,32 @@ Return ONLY valid JSON."""
             target.update({k: v for k, v in intent.items() if k in (
                 'room', 'rooms', 'excluded_rooms', 'decided_room', 'decided_rooms', 'decided_excluded', 'room_label')})
         return None
+
+    async def _first_unbacked_step(self, steps: Sequence[Dict], query: str) -> bool:
+        """Whether some step's device type is not asked for by its own words
+        (``access_target.device_backed``), or by the friendly name of the
+        entity it carries. A model-invented step ("set the temperature" for
+        "turn on the lights") writes nothing. Scenes are grounded apart, and
+        a step carrying a door's id is judged by the door's kind."""
+        directory = self._directory()
+        clauses = room_context.step_clauses(query, directory)
+        for index, step in enumerate(steps):
+            target = step.get('target') or {}
+            device_type = target.get('device_type', 'light')
+            entity_id = target.get('entity_id')
+            if device_type == 'scene' or (isinstance(entity_id, str) and entity_id.startswith(('scene.', 'script.'))):
+                continue
+            clause = clauses[index] if len(clauses) == len(steps) else query
+            action = step.get('action')
+            if access_target.device_backed(device_type, clause, query, action):
+                continue
+            door = access_target.entity_domain(entity_id)
+            if door in ('lock', 'cover') and access_target.device_backed(door, clause, query, action):
+                continue
+            if entity_id and await self._entity_named_in(entity_id, clause, query, directory):
+                continue
+            return True
+        return False
 
     async def _entity_named_in(self, entity_id, clause: str, query: str, directory) -> bool:
         """Whether a model's entity id is one the step's own words call by

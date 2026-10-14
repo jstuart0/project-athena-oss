@@ -229,6 +229,77 @@ def named_by_words(label: str, query: Optional[str]) -> bool:
     return bool(wanted) and wanted <= frozenset(tokens(query or ""))
 
 
+# The words that say a device type is what a clause is about. One table for
+# every sequence step's device type; the cover and lock words are this
+# module's own vocabularies.
+DEVICE_WORDS: dict = {
+    "light": frozenset({"light", "lights", "lamp", "lamps", "bulb", "bulbs", "lighting"}),
+    "fan": frozenset({"fan", "fans"}),
+    "switch": frozenset({"switch", "switches", "plug", "plugs", "outlet", "outlets"}),
+    "media": frozenset({
+        "tv", "television", "speaker", "speakers", "music", "play", "playing", "volume", "stereo", "radio",
+        "song", "songs", "playlist", "mute", "media", "shield",
+    }),
+    "climate": frozenset({
+        "thermostat", "temperature", "heat", "heating", "cooling", "degrees", "degree", "ac", "hvac",
+        "conditioning", "warmer", "colder", "cooler",
+    }),
+    "cover": NON_ACCESS_COVER_WORDS | frozenset({"garage", "garages", "gate", "gates", "door", "doors", "opener", "openers"}),
+    "lock": frozenset({
+        "lock", "locks", "unlock", "unlocks", "locking", "locked", "unlocked", "deadbolt", "deadbolts", "door", "doors",
+    }),
+}
+_DEVICE_KIND_ALIASES = {"media_player": "media", "tv": "media", "speaker": "media"}
+_LIGHT_ACTIONS = frozenset({"set_color", "set_brightness"})
+
+
+def device_kind(device_type: Any) -> Optional[str]:
+    """The table key for a step's device type, or None for a type the table
+    does not know (a scene is grounded separately)."""
+    if not isinstance(device_type, str):
+        return None
+    kind = device_type.strip().lower()
+    kind = _DEVICE_KIND_ALIASES.get(kind, kind)
+    return kind if kind in DEVICE_WORDS else None
+
+
+def _says_a_temperature(toks: Sequence[str]) -> bool:
+    """"set the study to 70": a set command to a plausible indoor
+    temperature, in a clause that names no other device."""
+    return "set" in toks and any(
+        toks[i] == "to" and toks[i + 1].isdigit() and 50 <= int(toks[i + 1]) <= 90 for i in range(len(toks) - 1)
+    )
+
+
+def device_backed(device_type: Any, clause: Optional[str], query: Optional[str], action: Any = None) -> bool:
+    """Whether the step's own words ask for this kind of device: a word of the
+    type's table in the clause. A clause that names no device of any kind
+    ("then dim it") is a referent, and the utterance may back it. A light is
+    also the default for a clause that names no other device, and for a colour
+    or brightness action. A type the table does not know is not backed."""
+    kind = device_kind(device_type)
+    if kind is None:
+        return False
+    def words(text: Optional[str]) -> frozenset:
+        return frozenset(tokens(text or ""))
+
+    clause_words = words(clause)
+    if clause_words & DEVICE_WORDS[kind]:
+        return True
+    others = [k for k in DEVICE_WORDS if k != kind and k != "light"]
+    names_other = any(clause_words & DEVICE_WORDS[k] for k in others) or (
+        kind != "light" and bool(clause_words & DEVICE_WORDS["light"])
+    )
+    if kind == "light":
+        return not names_other or (isinstance(action, str) and action in _LIGHT_ACTIONS)
+    if names_other:
+        return False
+    if kind == "climate" and _says_a_temperature(tokens(clause or "")):
+        return True
+    # A referent clause: the utterance backs it.
+    return bool(words(query) & DEVICE_WORDS[kind])
+
+
 def mentions_non_access_cover(query: Optional[str]) -> bool:
     return any(t in NON_ACCESS_COVER_WORDS for t in tokens(query or ""))
 

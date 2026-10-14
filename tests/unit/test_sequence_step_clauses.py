@@ -823,13 +823,11 @@ class TestEveryStepsDeviceComesFromTheWords:
         text = rig.run(steps, "turn on the hall light")
         assert text == shc.NO_DEVICE_TEXT
         assert rig.raw.call_service.await_count == 0
-        assert "entity_id" not in steps[0]["target"]
 
     def test_a_climate_step_with_a_room_and_a_dropped_entity_does_not_write_the_entity(self, monkeypatch):
         rig = _devices(SequenceLightRig(monkeypatch))
         steps = [_typed_step("climate", "turn_on", "light.galley_all", room="hall")]
-        assert rig.plan(steps, "turn on the hall light") is None
-        assert "entity_id" not in steps[0]["target"]
+        assert rig.plan(steps, "turn on the hall light") == shc.NO_DEVICE_TEXT
         rig.run([_typed_step("climate", "turn_on", "light.galley_all", room="hall")], "turn on the hall light")
         assert "light.galley_all" not in {c[2] for c in self._calls(rig)}
 
@@ -848,8 +846,16 @@ class TestEveryStepsDeviceComesFromTheWords:
         assert ("lock", "lock", "lock.front_door") in rig.calls
 
     @pytest.mark.parametrize("device_type,entity_id", [
-        ("light", "switch.coffee"), ("fan", "light.galley_all"), ("switch", "light.galley_all"),
-        ("media_player", "light.galley_all"), ("light", "climate.thermostat"),
+        ("fan", "light.galley_all"), ("switch", "light.galley_all"), ("media_player", "light.galley_all"),
+    ])
+    def test_a_type_the_words_do_not_ask_for_is_refused(self, monkeypatch, device_type, entity_id):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step(device_type, "turn_on", entity_id)]
+        assert rig.run(steps, "turn on the hall light") == shc.NO_DEVICE_TEXT
+        assert rig.raw.call_service.await_count == 0
+
+    @pytest.mark.parametrize("device_type,entity_id", [
+        ("light", "switch.coffee"), ("light", "climate.thermostat"),
     ])
     def test_a_mismatched_type_and_entity_domain_is_dropped(self, monkeypatch, device_type, entity_id):
         rig = _devices(SequenceLightRig(monkeypatch))
@@ -876,14 +882,16 @@ class TestEveryStepsDeviceComesFromTheWords:
         assert rig.plan(steps, query) is None
         assert steps[0]["target"]["entity_id"] == entity_id and steps[0]["target"]["decided_entity"] == entity_id
 
-    @pytest.mark.parametrize("device_type,entity_id", [
-        ("media_player", "media_player.tv"), ("fan", "fan.ceiling"), ("switch", "switch.coffee"),
-        ("climate", "climate.thermostat"),
+    @pytest.mark.parametrize("device_type,entity_id,query", [
+        ("media_player", "media_player.tv", "turn on the speaker in the hall"),
+        ("fan", "fan.ceiling", "turn on the fan in the hall"),
+        ("switch", "switch.coffee", "turn on the switch in the hall"),
+        ("climate", "climate.thermostat", "set the thermostat in the hall to 70"),
     ])
-    def test_the_same_entities_not_named_are_dropped(self, monkeypatch, device_type, entity_id):
+    def test_the_same_entities_not_named_are_dropped(self, monkeypatch, device_type, entity_id, query):
         rig = _devices(SequenceLightRig(monkeypatch))
         steps = [_typed_step(device_type, "turn_on", entity_id, room="hall")]
-        rig.plan(steps, "turn on the hall light")
+        rig.plan(steps, query)
         assert "entity_id" not in steps[0]["target"]
 
     def test_a_model_forged_decided_entity_is_stripped(self, monkeypatch):
@@ -1086,3 +1094,111 @@ class TestTheExecutorForwardsOnlyTheServersRoom:
         steps = [_typed_step("cover", "open", room="whole_house")]
         assert rig.run(steps, "open everything") == shc.NO_DEVICE_TEXT
         assert rig.raw.call_service.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Reconcile r4: a step needs its own device word
+# ---------------------------------------------------------------------------
+
+class TestAStepNeedsItsOwnDeviceWord:
+    def _plan_from(self, rig, steps, query, speaker="hall"):
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, query, speaker)
+
+        return asyncio.run(go())
+
+    def _calls(self, rig):
+        return [(c.args[0], c.args[1], (c.args[2] or {}).get("entity_id")) for c in rig.raw.call_service.await_args_list]
+
+    def test_an_invented_climate_step_for_turn_on_the_lights_writes_nothing(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70)]
+        assert rig.run(steps, "turn on the lights") == shc.NO_DEVICE_TEXT
+        assert self._calls(rig) == []
+
+    def test_an_invented_cover_step_for_turn_on_the_lights_writes_nothing(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open")]
+        assert self._plan_from(rig, steps, "turn on the lights") == shc.NO_DEVICE_TEXT
+        assert rig.run([_typed_step("cover", "open")], "turn on the lights") == shc.NO_DEVICE_TEXT
+        assert self._calls(rig) == []
+
+    def test_an_invented_step_beside_a_real_one_refuses_the_whole_plan(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_room_step("turn_on", "hall"), _typed_step("climate", "set_temperature", temperature=70)]
+        assert rig.run(steps, "turn on the hall lights") == shc.NO_DEVICE_TEXT
+        assert self._calls(rig) == []
+
+    @pytest.mark.parametrize("device_type", ["sensor", "timer", "vacuum", 7, None])
+    def test_a_device_type_the_table_does_not_know_is_refused(self, monkeypatch, device_type):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [{"action": "turn_on", "target": {"device_type": device_type, "room": "hall"}, "parameters": {}}]
+        assert rig.plan(steps, "turn on the hall lights") == shc.NO_DEVICE_TEXT
+
+    def test_turn_on_the_lights_then_set_the_thermostat_works(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_room_step("turn_on"), _typed_step("climate", "set_temperature", temperature=70)]
+        assert self._plan_from(rig, steps, "turn on the lights then set the thermostat to 70") is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+        assert steps[1]["target"]["decided_entity"] == "climate.thermostat"
+
+    def test_close_the_blinds_in_five_minutes_works_from_the_speaker_room(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "close")]
+        steps[0]["at_time"] = None
+        assert self._plan_from(rig, steps, "close the blinds in 5 minutes") is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_a_media_step_named_by_its_word_works(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("media_player", "turn_on", room="hall")]
+        assert rig.plan(steps, "turn on the tv in the hall") is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_a_device_word_only_in_another_clause_does_not_back_a_step(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70), _typed_step("climate", "set_temperature")]
+        assert rig.plan(steps, "set the thermostat to 70 then turn on the hall lights") == shc.NO_DEVICE_TEXT
+
+    def test_a_referent_clause_is_backed_by_the_utterance(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70), _typed_step("climate", "set_temperature", temperature=72)]
+        assert rig.plan(steps, "set the thermostat to 70 then raise it to 72") is None
+
+    def test_an_entity_named_by_a_friendly_name_without_a_table_word_is_backed(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("switch", "turn_on", "switch.coffee")]
+        assert rig.plan(steps, "turn on the coffee maker") is None
+        assert steps[0]["target"]["decided_entity"] == "switch.coffee"
+
+    def test_a_door_type_step_for_a_light_carrying_a_lock_is_left_to_the_door_planner(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "light", "entity_id": "lock.front_door"})]
+        assert rig.plan(steps, "unlock the front door") == shc.ONE_DOOR_REFUSAL
+
+    def test_device_backed_table(self):
+        backed = access_target.device_backed
+        assert backed("light", "dim the study", "dim the study") is True
+        assert backed("light", "unlock the front door", "x") is False
+        assert backed("light", "make it red", "x", "set_color") is True
+        assert backed("climate", "turn on the lights", "turn on the lights") is False
+        assert backed("climate", "set the study to 70", "x") is True
+        assert backed("climate", "set the lights to 70", "x") is False
+        assert backed("cover", "open the garage", "x") is True
+        assert backed("fan", "then do it", "turn on the fan then do it") is True
+        assert backed("fan", "then do it", "turn on the lights then do it") is False
+        assert backed("media", "play some music", "x") is True
+        assert backed("scene", "movie mode", "x") is False
+        assert backed("climate", "set the study to 100", "x") is False
+        assert backed("climate", "set the study to 40", "x") is False
+        assert backed("media", "play it in the hall", "x") is True
+        assert backed("cover", "open the garage", "x") is True
+        assert backed("cover", "open the gate", "x") is True
+
+    def test_an_invented_lock_step_for_turn_on_the_lights_locks_nothing(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("lock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.plan(steps, "turn on the lights") == shc.NO_DEVICE_TEXT
+        assert rig.run_plan(steps, "turn on the lights") == shc.NO_DEVICE_TEXT
+        assert rig.calls == []
