@@ -199,6 +199,19 @@ SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name
 # SmartHomeController._motion_control_rooms). Not an HA domain: the pseudo
 # domain _decide_intent_room uses for the device type.
 MOTION_CONTROL_DOMAIN = "motion_control"
+MOTION_ACTIONS = frozenset({
+    "leave_lights_on", "leave_lights_off", "disable_motion", "enable_motion", "set_brightness_override",
+    "keep_current_brightness",
+})
+# Words that agree with each motion action in a retried answer.
+_MOTION_ACTION_WORDS = {
+    "leave_lights_on": frozenset({"on", "leave", "keep", "stay", "stop"}),
+    "leave_lights_off": frozenset({"off", "keep", "nap", "dark", "don", "dont", "stay"}),
+    "disable_motion": frozenset({"disable", "off", "stop", "kill"}),
+    "enable_motion": frozenset({"enable", "on", "back", "resume", "start"}),
+    "set_brightness_override": frozenset({"brightness", "percent", "level", "set", "dim", "bright"}),
+    "keep_current_brightness": frozenset({"brightness", "keep", "lock", "hold", "this", "current"}),
+}
 MOTION_DISABLE_SUFFIX = "_motion_disable"
 _INPUT_BOOLEAN = "input_boolean."
 
@@ -227,7 +240,7 @@ _DECIDED_DOMAINS = {
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
 SKIPPED_STEP_NOTE = "I couldn't check that one."
-NO_WRITE_CUE_TEXT = "I'm not sure what you'd like me to change. Say what to turn on or off, for example 'turn on the lights'."
+NO_WRITE_CUE_TEXT = "I'm not sure what you'd like me to change. Tell me what to turn on, off, up or down."
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -246,6 +259,9 @@ SCHEDULED_OPENING_REFUSAL = "I can't schedule an unlock or a door opening, so as
 _SEQUENCE_TARGET_KEYS = ("device_type", "room", "rooms", "entity_id", "target_scope", "excluded_rooms")
 ONE_DOOR_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 _wall_clock = time.time
+
+
+is_refusal_text = room_context.is_refusal_text
 
 
 # The phrases the fast path maps to a scene or routine. The server's own
@@ -328,6 +344,13 @@ _LOCK_CLAUSE_WORDS = frozenset({
 # Anything else after it is the object of the opposite verb.
 _CLOSING_FILLER = frozenset({"please", "pls", "now", "thanks", "thx", "thank", "you", "for", "me"})
 VERB_UNCLEAR_TEXT = "I'm not sure what to do with the door. Say 'unlock' or 'open' and the door's name."
+# Every fixed answer that means "nothing was changed, and this was not a
+# command to remember" (see ``is_refusal_text``).
+room_context.set_no_write_cue_text(NO_WRITE_CUE_TEXT)
+room_context.register_refusals(
+    NO_WRITE_CUE_TEXT, NO_DEVICE_TEXT, VERB_UNCLEAR_TEXT, ONE_DOOR_REFUSAL, SCHEDULED_OPENING_REFUSAL,
+    UNKNOWN_SCENE_TEXT, SEVERAL_ROOMS_UNSUPPORTED, room_context.UNPROCESSABLE_TEXT,
+)
 
 
 def _door_verb(
@@ -2316,7 +2339,10 @@ Return ONLY valid JSON."""
 
         return None
 
-    async def execute_intent(self, intent: Dict, ha_client, original_query: str = None, device_room: str = None) -> str:
+    async def execute_intent(
+        self, intent: Dict, ha_client, original_query: str = None, device_room: str = None,
+        cue_query: str = None,
+    ) -> str:
         """Execute the extracted intent
 
         Args:
@@ -2324,6 +2350,8 @@ Return ONLY valid JSON."""
             ha_client: Home Assistant client
             original_query: The original user query
             device_room: The room the user is speaking from (fallback if room not in intent)
+            cue_query: The words that carry the write cue, when they differ from
+                ``original_query`` (a follow-up that continues an earlier command)
 
         ATHENA-69: wraps ha_client with the permission-enforcing guard (D1),
         opens a system-mode scope when none is already open (D3 -- the
@@ -2429,7 +2457,12 @@ Return ONLY valid JSON."""
             # A command changes a device only when the words ask for it: a
             # room the words mention, the speaker's room or a model's guess
             # never makes a write on its own.
-            if access_target.lacks_write_cue(device_type, action, original_query):
+            # ``cue_query`` carries the earlier turn's words for a follow-up of
+            # the same caller, audience and device; the room and the fan-out
+            # gate still read ``original_query``.
+            if access_target.lacks_write_cue(
+                device_type, action, cue_query if cue_query is not None else original_query, parameters,
+            ):
                 import logging
                 logging.getLogger(__name__).info("write_without_cue_refused")
                 return NO_WRITE_CUE_TEXT
@@ -2994,6 +3027,24 @@ Return ONLY valid JSON."""
                 notes.append(SKIPPED_STEP_NOTE)
             if not steps:
                 return SKIPPED_STEP_NOTE
+        # Every write step carries a cue in its own clause (the whole utterance
+        # when the clauses do not line up): "in 5 minutes please" with a model
+        # light step asks for nothing.
+        for index, step in enumerate(steps):
+            target = step.get('target') or {}
+            entity_id = target.get('entity_id')
+            if target.get('device_type') == 'scene' or (
+                isinstance(entity_id, str) and entity_id.startswith(('scene.', 'script.'))
+            ):
+                continue
+            parameters = step.get('parameters') if isinstance(step.get('parameters'), dict) else None
+            # A step carrying a door's id is judged by the door rules.
+            kind = access_target.entity_domain(entity_id)
+            if access_target.lacks_write_cue(
+                kind if kind in ('lock', 'cover') else target.get('device_type', 'light'), step.get('action'),
+                clauses[index] if aligned else query, parameters,
+            ):
+                return NO_WRITE_CUE_TEXT
         door_text = await self._plan_sequence_doors(steps, query)
         if door_text is not None:
             return door_text
@@ -6455,14 +6506,11 @@ Do NOT mention rooms that have no current or recent motion."""
         if _over_query_cap(query, logger):
             return room_context.unprocessable_intent("too_long")
 
-        # Build room context
-        device_location = ""
-        if device_room and device_room not in ["unknown", "guest"]:
-            device_location = f"\nDevice location: The user is speaking from the {device_room}. If no room is specified, use \"{device_room}\" as the room."
-
+        # The room comes from the words, else the speaker's room by the room
+        # decision: the model is not told where the speaker is.
         motion_prompt = f"""Extract the motion control intent from this query. Return ONLY valid JSON.
 
-Query: "{query}"{device_location}
+Query: "{query}"
 
 CONTEXT: This controls smart lighting automation. Motion sensors detect presence and automatically turn lights on/off.
 Users may want to override this behavior temporarily.
@@ -6540,10 +6588,17 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = _model_object(text)
-            if not whole_prompt_guaranteed and classify_utterance(query).kind != UtteranceKind.IMPERATIVE:
+            if not whole_prompt_guaranteed and not self._retried_motion_matches_words(intent, query):
                 logger.info("smart_home_retried_motion_unverified query_len=%d", len(query))
                 return room_context.unprocessable_intent("unverified")
-            logger.info("motion_control_intent_extracted action=%s has_room=%s", intent.get("action"), bool(intent.get("room")))
+            # The model's room stands only where the words name it; with none,
+            # the room decision supplies the speaker's room.
+            self._ground_intent_rooms(intent, query)
+            action = intent.get("action")
+            logger.info(
+                "motion_control_intent_extracted action=%s has_room=%s",
+                action if action in MOTION_ACTIONS else "other", bool(intent.get("room")),
+            )
             return intent
 
         except ModelOutputNotObject:
@@ -6553,6 +6608,16 @@ Return ONLY the JSON, no other text."""
             # to switch from the words alone; nothing here writes without an answer.
             logger.error(f"Failed to parse motion control intent: {e}")
             return room_context.unprocessable_intent("unparseable")
+
+    @staticmethod
+    def _retried_motion_matches_words(intent: Dict, query: str) -> bool:
+        """A retried motion answer (the backend couldn't promise it read the
+        whole prompt) writes only what the words say: an IMPERATIVE utterance
+        whose words agree with the action (on/off/enable/disable...)."""
+        if classify_utterance(query).kind != UtteranceKind.IMPERATIVE:
+            return False
+        accepted = _MOTION_ACTION_WORDS.get(intent.get("action"))
+        return accepted is not None and bool(frozenset(_words(query)) & accepted)
 
     async def _motion_control_rooms(self) -> Dict[str, str]:
         """The rooms that have motion control, from the states Home

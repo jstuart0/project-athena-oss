@@ -404,7 +404,7 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         state.answer = result
         state.retrieved_data = {"intent": intent}
         ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="confirmed").inc()
-        if state.session_id and "couldn't" not in result.lower():
+        if state.session_id and "couldn't" not in result.lower() and not room_context.is_refusal_text(result):
             await _store_context(
                 session_id=state.session_id,
                 intent="control",
@@ -538,6 +538,23 @@ def _carry_decision(
     intent["referent_followup"] = earlier["decided_room"] == "whole_house"
 
 
+def _carried_cue_query(prev_params: Any, intent: Dict[str, Any], state: OrchestratorState) -> Optional[str]:
+    """The earlier command's words plus this turn's, when this turn continues
+    that command and may count its cue: the same caller and audience, the same
+    device type, and the action is the earlier turn's (not a new one). The room
+    decision and the fan-out gate still read only this turn's words."""
+    cue = prev_params.get("write_cue") if isinstance(prev_params, dict) else None
+    if not isinstance(cue, dict) or not state.caller_fingerprint:
+        return None
+    if (
+        cue.get("fp") != state.caller_fingerprint or cue.get("aud") != _audience_class(state)
+        or cue.get("device_type") != intent.get("device_type") or cue.get("action") != intent.get("action")
+        or not isinstance(cue.get("query"), str)
+    ):
+        return None
+    return f"{cue['query']} {state.query}"
+
+
 def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
     return bool(
         state.supports_followup and state.session_id and state.caller_fingerprint and not foreign_pending
@@ -566,7 +583,7 @@ def _answer_unprocessable(state: OrchestratorState, result: Any) -> bool:
 
 async def _execute_and_record(
     state: OrchestratorState, scope, intent: Dict[str, Any], *, original_query: str,
-    uk: UtteranceClassification, foreign_pending: bool, store_query: str,
+    uk: UtteranceClassification, foreign_pending: bool, store_query: str, cue_query: Optional[str] = None,
 ) -> None:
     """Run an extracted (or replayed) control intent under the open scope and
     record what happened: a refusal, a "which room?" question, a fan-out
@@ -595,8 +612,9 @@ async def _execute_and_record(
     # fan-out block (or a room question) may become a stored pending.
     carry_pending = _carry_pending(state, foreign_pending)
     with write_fanout.pending_carrier(scope, enabled=carry_pending):
+        extra = {"cue_query": cue_query} if cue_query is not None else {}
         result = await smart_controller.execute_intent(
-            intent, ha_client, original_query=original_query, device_room=state.room
+            intent, ha_client, original_query=original_query, device_room=state.room, **extra,
         )
     blk = write_fanout.take_block()
     choice = room_choice.take()
@@ -632,6 +650,11 @@ async def _execute_and_record(
         # 5.2: the answer is the gate's prompt or rewording, not a completed
         # action -- no normal success store.
         await _store_pending_write_confirmation(state, intent, result, blk, query=store_query)
+    elif room_context.is_refusal_text(result):
+        # A fixed refusal changed nothing and is not a command to remember: no
+        # context is stored, so "turn them on" has nothing to continue.
+        state.answer = result
+        state.error = "no_write_cue" if result == room_context.NO_WRITE_CUE_MARK else "refused"
     else:
         state.answer = result
         state.retrieved_data = {"intent": intent}
@@ -640,12 +663,21 @@ async def _execute_and_record(
 
         # Store context for future reference using new context system
         if state.session_id and not foreign_pending and "couldn't" not in result.lower():
+            stored = _storable_intent(intent)
+            stored.pop("write_cue", None)
+            if state.caller_fingerprint:
+                # What a follow-up may count as its cue: these words, for this
+                # caller and audience, this device and this action.
+                stored["write_cue"] = {
+                    "fp": state.caller_fingerprint, "aud": _audience_class(state), "device_type": device_type,
+                    "action": intent.get("action"), "query": (cue_query or store_query or "")[:room_context.SMART_HOME_MAX_QUERY_BYTES],
+                }
             await _store_context(
                 session_id=state.session_id,
                 intent="control",
                 query=store_query,
                 entities={"room": room, "device_type": device_type},
-                parameters=_storable_intent(intent),
+                parameters=stored,
                 response=result,
                 ttl=300  # 5 minutes
             )
@@ -1095,7 +1127,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         state_question_routed_total.labels(
                             device_type=uk.device_type or "unknown", path="get_status_dispatch"
                         ).inc()
-                        if state.session_id and not foreign_pending and "couldn't" not in sq_result.lower():
+                        if state.session_id and not foreign_pending and "couldn't" not in sq_result.lower() and not room_context.is_refusal_text(sq_result):
                             await _store_context(
                                 session_id=state.session_id,
                                 intent="control",
@@ -1251,6 +1283,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
+                cue_query = None
                 if has_context and ref_info.get("has_context_ref"):
                     # Use previous context to resolve the command
                     prev = state.prev_context
@@ -1308,6 +1341,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # earlier unlock or open.
                         intent['action'] = 'get_status'
                     follow_up = {"fingerprint": state.caller_fingerprint, "audience": _audience_class(state)}
+                    cue_query = _carried_cue_query(prev_params, intent, state)
 
                     # If a new room is named, the earlier decision is dropped and
                     # the command decides afresh; otherwise ("turn them off") it
@@ -1407,7 +1441,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # command names none and the directory knows it)
                 await _execute_and_record(
                     state, scope, intent, original_query=state.query, uk=uk,
-                    foreign_pending=foreign_pending, store_query=state.query,
+                    foreign_pending=foreign_pending, store_query=state.query, cue_query=cue_query,
                 )
 
         else:

@@ -276,35 +276,149 @@ def _says_a_temperature(toks: Sequence[str]) -> bool:
 
 # A command that changes a device must carry a cue in the user's words (the
 # server never infers a write from a room, a speaker position or a model's
-# guess alone): a device word for its kind, an on/off word, or a colour or
-# brightness action. Doors keep their own rules (opening verb plus a name).
+# guess alone). Every device kind is judged except reads, locks and scenes (a
+# door has its own rules: an opening verb plus a name) and the read-only
+# appliance kinds; a kind with no table is refused (fail closed).
 WRITE_CUE_ACTIONS: FrozenSet[str] = frozenset({"set_color", "set_brightness", "set_level", "increase", "decrease"})
-_WRITE_CUE_WORDS = frozenset({
+_ON_OFF_WORDS = frozenset({
     "on", "off", "lit", "kill", "dim", "dimmer", "brighten", "brighter", "dark", "darker", "darken",
 })
-_MEDIA_CUE_WORDS = frozenset({"pause", "resume", "stop", "skip", "next", "previous", "louder", "quieter", "unmute"})
-_CUE_CHECKED_KINDS = frozenset({"light", "fan", "switch", "media", "climate"})
+# Evidence in the words for a colour or brightness action: the action's name
+# alone is a model's guess.
+COLOR_WORDS = frozenset({
+    "red", "orange", "yellow", "green", "blue", "white", "purple", "pink", "violet", "cyan", "teal", "magenta",
+    "gold", "amber", "warm", "cool", "rainbow", "sunset", "sunrise", "random", "christmas", "color", "colors",
+    "colour", "colours", "ravens", "orioles", "steelers", "team",
+    "ocean", "vibe", "vibes", "mood", "theme", "party", "disco", "gradient", "pastel", "neon", "candle", "fire",
+    "forest", "sky", "sea", "lava", "romantic", "relax", "cozy", "calm", "wolverines", "maize",
+})
+BRIGHTNESS_WORDS = frozenset({
+    "bright", "brighter", "brightness", "brighten", "dim", "dimmer", "dimmed", "dark", "darker", "darken",
+    "level", "percent", "max", "maximum", "full", "half", "low", "lower", "high", "higher", "more", "less",
+    "up", "down", "warmer", "cooler", "softer", "louder", "quieter",
+})
+_CLIMATE_CUE_WORDS = frozenset({
+    "warm", "cool", "hot", "hotter", "colder", "cold", "chilly", "freezing", "toasty", "temp", "crank",
+})
+_MEDIA_CUE_WORDS = frozenset({
+    "pause", "resume", "stop", "skip", "next", "previous", "louder", "quieter", "unmute", "mute",
+    "watch", "channel", "volume", "up", "down",
+})
+_CUE_WORDS = {
+    "light": DEVICE_WORDS["light"],
+    "fan": DEVICE_WORDS["fan"],
+    "switch": DEVICE_WORDS["switch"],
+    "media": DEVICE_WORDS["media"] | _MEDIA_CUE_WORDS,
+    "climate": DEVICE_WORDS["climate"] | _CLIMATE_CUE_WORDS,
+    "cover": DEVICE_WORDS["cover"] | frozenset({"close", "shut", "lower", "raise"}),
+    "bed": frozenset({"bed", "mattress", "warmer", "pad", "blanket"}),
+    "motion": frozenset({
+        "motion", "sensor", "sensors", "auto", "automatic", "leave", "keep", "light", "lights", "nap",
+        "override", "brightness",
+    }),
+}
+_CUE_KINDS = {
+    "light": "light", "fan": "fan", "switch": "switch", "climate": "climate", "cover": "cover",
+    "media": "media", "media_player": "media", "tv": "media", "speaker": "media",
+    "bed_warmer": "bed", "motion_control": "motion", "motion": "motion",
+}
+# Kinds a cue is not asked of: doors (own rules), scenes (grounded), and the
+# kinds whose handlers only read.
+_CUE_EXEMPT_TYPES = frozenset({"lock", "scene", "script", "oven", "fridge", "freezer", "appliance", "sensor"})
+# A clause that starts with one of these is a command about a device.
+_CONTROL_CUE_VERBS = frozenset({
+    "turn", "switch", "dim", "brighten", "start", "stop", "play", "pause", "resume", "kill", "cut", "raise",
+    "lower", "activate", "deactivate", "enable", "disable", "warm", "heat", "cool", "run",
+})
+_CONTROL_CUE_VERBS_BY_KIND = {"media": frozenset({"watch", "change"})}
+_LEADING_FILLER = frozenset({
+    "please", "hey", "ok", "okay", "can", "could", "would", "will", "you", "just", "go", "ahead", "lets", "let",
+    "us", "me", "i", "want", "need", "like", "to", "now", "then", "also",
+})
+_NEGATORS = frozenset({
+    "not", "never", "dont", "wont", "cant", "without", "don", "doesn", "didn", "won", "couldn", "shouldn",
+    "wouldn", "isn", "aren",
+})
+_CUE_CLAUSE_SPLIT = re.compile(r"[,;.!?]|\b(?:and|then|also|plus)\b")
+_TEMPERATURE_VERBS = frozenset({"set", "make", "put", "keep", "bring", "need", "want", "turn"})
+_TEMPERATURE_UNITS = frozenset({"degrees", "degree", "celsius", "fahrenheit", "c", "f", "in"})
 
 
-def lacks_write_cue(device_type: Any, action: Any, query: Optional[str]) -> bool:
-    """Whether a device-changing command has no cue in the user's words. Only
-    the kinds in ``_CUE_CHECKED_KINDS`` are judged; a read never lacks one, and
-    a command with no words (an internal caller, planned elsewhere) is not
-    judged."""
-    kind = device_kind(device_type)
-    if kind not in _CUE_CHECKED_KINDS or query is None:
+def _positive_clauses(query: str, *, negation: bool) -> List[List[str]]:
+    """The query's clauses as token lists, each cut at its first negator
+    ("don't turn on the lights" leaves nothing to count)."""
+    out: List[List[str]] = []
+    for clause in _CUE_CLAUSE_SPLIT.split((query or "").lower()):
+        toks = list(tokens(clause))
+        if negation:
+            for i, tok in enumerate(toks):
+                if tok in _NEGATORS or (tok == "can" and tuple(toks[i + 1:i + 2]) == ("t",)):
+                    toks = toks[:i]
+                    break
+        if toks:
+            out.append(toks)
+    return out
+
+
+def _temperature_in(toks: Sequence[str]) -> bool:
+    """A plausible indoor temperature (50-90 Fahrenheit or 10-32 Celsius) said
+    as a setting: "to 70", "make it 72", "72 degrees", "72 in the study", or a
+    number beside set/make/put/keep/bring."""
+    for i, tok in enumerate(toks):
+        if not tok.isdigit() or not (50 <= int(tok) <= 90 or 10 <= int(tok) <= 32):
+            continue
+        before = toks[i - 1] if i else ""
+        after = toks[i + 1] if i + 1 < len(toks) else ""
+        if before == "to" or after in _TEMPERATURE_UNITS or any(v in toks for v in _TEMPERATURE_VERBS):
+            return True
+    return False
+
+
+def _has_brightness_parameter(parameters: Any) -> bool:
+    return isinstance(parameters, Mapping) and any(
+        parameters.get(k) is not None for k in ("brightness", "brightness_percent", "level")
+    )
+
+
+def lacks_write_cue(device_type: Any, action: Any, query: Optional[str], parameters: Any = None) -> bool:
+    """Whether a device-changing command has no cue in the user's words: a
+    device word for its kind, an on/off word, a control verb that starts a
+    clause, whole-house wording (lights), a temperature (climate), or, for a
+    colour or brightness action, a colour or brightness word. A cue that
+    follows a negator in its clause does not count. A read never lacks one, a
+    lock or scene is judged elsewhere, a cover's opening by the door rules,
+    and a command with no words (a sequence step, planned and checked per
+    clause) is not judged."""
+    if query is None:
         return False
-    if isinstance(action, str) and action.strip().lower() in (READ_ONLY_ACTIONS | WRITE_CUE_ACTIONS):
+    act = action.strip().lower() if isinstance(action, str) else ""
+    if act in READ_ONLY_ACTIONS:
         return False
-    toks = tokens(query)
-    spoken = frozenset(toks)
-    if spoken & _WRITE_CUE_WORDS or spoken & DEVICE_WORDS[kind]:
+    dtype = device_type.strip().lower() if isinstance(device_type, str) else None
+    if dtype in _CUE_EXEMPT_TYPES:
         return False
-    if kind == "light" and room_context.is_explicit_whole_house(query):
-        return False  # "get everything dark": the whole-house wording is the scope of a light command
-    if kind == "media" and spoken & _MEDIA_CUE_WORDS:
+    kind = _CUE_KINDS.get(dtype or "")
+    if kind is None:
+        return True
+    if kind == "cover" and is_opening_action("cover", act):
         return False
-    if kind == "climate" and _says_a_temperature(toks):
+    clauses = _positive_clauses(query, negation=kind != "motion")
+    spoken = frozenset(t for toks in clauses for t in toks)
+    evidence = bool(spoken & (COLOR_WORDS | BRIGHTNESS_WORDS)) or "%" in query
+    if act in WRITE_CUE_ACTIONS:
+        return not evidence
+    if _has_brightness_parameter(parameters) and evidence:
+        return False
+    if spoken & _ON_OFF_WORDS or spoken & _CUE_WORDS[kind]:
+        return False
+    verbs = _CONTROL_CUE_VERBS | _CONTROL_CUE_VERBS_BY_KIND.get(kind, frozenset())
+    for toks in clauses:
+        lead = [t for t in toks if t not in _LEADING_FILLER]
+        if lead and lead[0] in verbs:
+            return False
+    if kind == "light" and room_context.is_explicit_whole_house(" ".join(" ".join(t) for t in clauses)):
+        return False
+    if kind == "climate" and any(_temperature_in(toks) for toks in clauses):
         return False
     return True
 

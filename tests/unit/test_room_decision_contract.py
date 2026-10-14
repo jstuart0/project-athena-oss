@@ -157,7 +157,7 @@ def test_the_executor_hands_the_decision_to_execute_intent():
 
 def test_the_speaker_room_default_is_applied_in_one_place():
     text = SOURCE.read_text()
-    assert len(re.findall(r"device_room not in", text)) == 1, "only the out-of-scope motion prompt remains"
+    assert len(re.findall(r"device_room not in", text)) == 0, "no prompt tells a model where the speaker is (motion included)"
 
 
 def test_the_scope_cue_compares_whole_words_not_substrings():

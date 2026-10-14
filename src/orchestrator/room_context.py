@@ -104,7 +104,7 @@ SERVER_DECISION_KEYS: Tuple[str, ...] = (
     "decided_room", "decided_rooms", "decided_excluded", "room_label", "referent_followup",
     "decided_access", "decided_access_fp", "decided_access_aud", "decided_access_src", "decided_access_at",
     "unprocessable", "unprocessable_reason",
-    "decided_entity",
+    "decided_entity", "write_cue",
 )
 
 # A smart-home command longer than this many UTF-8 bytes is refused before any
@@ -142,6 +142,27 @@ def unprocessable_text(intent: object) -> Optional[str]:
     if not isinstance(intent, dict) or not intent.get("unprocessable"):
         return None
     return QUERY_TOO_LONG_TEXT if intent.get("unprocessable_reason") == "too_long" else UNPROCESSABLE_TEXT
+
+
+_REFUSALS: set = set()
+NO_WRITE_CUE_MARK: str = ""  # set by the controller to its no-cue phrase
+
+
+def register_refusals(*texts: str) -> None:
+    """The controller registers each fixed answer that means "nothing was
+    changed and this was not a command to remember"."""
+    _REFUSALS.update(t for t in texts if isinstance(t, str))
+
+
+def set_no_write_cue_text(text: str) -> None:
+    global NO_WRITE_CUE_MARK
+    NO_WRITE_CUE_MARK = text
+
+
+def is_refusal_text(text: object) -> bool:
+    """Whether an answer is one of the registered fixed refusals. Matched
+    exactly, never by a word in the text."""
+    return isinstance(text, str) and text in _REFUSALS
 
 
 def strip_server_keys(obj: object) -> Optional[dict]:
