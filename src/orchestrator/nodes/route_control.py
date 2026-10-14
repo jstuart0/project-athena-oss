@@ -593,6 +593,8 @@ async def _execute_and_record(
     decision read; ``store_query`` is what a stored context remembers."""
     if _answer_unprocessable(state, intent):
         return
+    if isinstance(intent.get('device_type'), str):
+        intent['device_type'] = access_target.canonical_device_type(intent['device_type'])
     device_type = intent.get('device_type', 'light')
 
     # Coarse domain pre-check (D14): refuse before execute_intent when the

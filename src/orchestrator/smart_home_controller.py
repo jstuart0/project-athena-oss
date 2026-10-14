@@ -2318,6 +2318,10 @@ Return ONLY valid JSON."""
                     return refusal_message(scope.denials[n0:], scope, partial=scope.allowed_writes > w0)
                 return result
 
+            # One name per device type from here on: dispatch, the room
+            # decision and the cue check all read the canonical value.
+            if isinstance(intent.get('device_type'), str):
+                intent['device_type'] = access_target.canonical_device_type(intent['device_type'])
             device_type = intent.get('device_type', 'light')
             room = intent.get('room')
             action = intent.get('action', 'turn_on')
@@ -2946,6 +2950,8 @@ Return ONLY valid JSON."""
                 k: v for k, v in (step.get('target') if isinstance(step.get('target'), dict) else {}).items()
                 if k in _SEQUENCE_TARGET_KEYS
             }
+            if isinstance(step['target'].get('device_type'), str):
+                step['target']['device_type'] = access_target.canonical_device_type(step['target']['device_type'])
         scene_text = await self._plan_sequence_scenes(steps, query)
         if scene_text is not None:
             return scene_text
@@ -6549,8 +6555,9 @@ Return ONLY the JSON, no other text."""
     async def _words_name_a_device(self, device_type, words: str) -> bool:
         """Whether the words call one of the house's devices of this kind by
         its friendly name ("coffee maker" for a switch named that)."""
+        canonical = access_target.canonical_device_type(device_type)
         domains = _CUE_ENTITY_DOMAINS.get(access_target._CUE_KINDS.get(
-            device_type.strip().lower() if isinstance(device_type, str) else "", ""), ())
+            canonical.strip().lower() if isinstance(canonical, str) else "", ""), ())
         if not domains:
             return False
         try:

@@ -261,7 +261,7 @@ def device_kind(device_type: Any) -> Optional[str]:
     does not know (a scene is grounded separately)."""
     if not isinstance(device_type, str):
         return None
-    kind = device_type.strip().lower()
+    kind = canonical_device_type(device_type).strip().lower()
     kind = _DEVICE_KIND_ALIASES.get(kind, kind)
     return kind if kind in DEVICE_WORDS else None
 
@@ -556,6 +556,34 @@ _CUE_KINDS = {
     "speakers": "media",
     "bed_warmer": "bed", "motion_control": "motion", "motion": "motion",
 }
+# The one name for each device type the dispatch, the planner and the write
+# precheck understand. A model may write any alias; everything downstream sees
+# only these.
+_CANONICAL_TYPES = {
+    "light": "light", "lights": "light", "lamp": "light", "lamps": "light", "light_group": "light",
+    "fan": "fan", "fans": "fan",
+    "switch": "switch", "switches": "switch", "plug": "switch", "plugs": "switch", "outlet": "switch",
+    "outlets": "switch",
+    "climate": "climate", "thermostat": "climate", "hvac": "climate", "ac": "climate",
+    "cover": "cover", "covers": "cover", "blind": "cover", "blinds": "cover", "shades": "cover",
+    "curtains": "cover",
+    "media": "media_player", "media_player": "media_player", "tv": "media_player", "television": "media_player",
+    "speaker": "media_player", "speakers": "media_player",
+    "bed_warmer": "bed_warmer", "motion_control": "motion_control", "motion": "motion_control",
+    "lock": "lock", "scene": "scene", "script": "script", "oven": "oven", "fridge": "fridge",
+    "freezer": "freezer", "appliance": "appliance", "sensor": "sensor",
+}
+
+
+def canonical_device_type(device_type: Any) -> Any:
+    """The canonical name of a device type ("television" is ``media_player``,
+    "thermostat" is ``climate``), or the value unchanged when it is not a type
+    this module knows (the cue check refuses an unknown type)."""
+    if not isinstance(device_type, str):
+        return device_type
+    return _CANONICAL_TYPES.get(device_type.strip().lower(), device_type)
+
+
 # Kinds a cue is not asked of: doors (own rules), scenes (grounded), and the
 # kinds whose handlers only read.
 _CUE_EXEMPT_TYPES = frozenset({"lock", "scene", "script", "oven", "fridge", "freezer", "appliance", "sensor"})
@@ -710,7 +738,8 @@ def write_cue_problem(
     act = action.strip().lower() if isinstance(action, str) else ""
     if act in READ_ONLY_ACTIONS:
         return None
-    dtype = device_type.strip().lower() if isinstance(device_type, str) else None
+    canonical = canonical_device_type(device_type)
+    dtype = canonical.strip().lower() if isinstance(canonical, str) else None
     if dtype in _CUE_EXEMPT_TYPES:
         return None
     kind = _CUE_KINDS.get(dtype or "")
@@ -721,19 +750,27 @@ def write_cue_problem(
     if kind == "motion":
         lower = query.lower()
         return None if any(p in lower for p in MOTION_CONTROL_PATTERNS) else NO_CUE
+    clauses = _positive_clauses(query, negation=True)
+    spoken = frozenset(t for toks in clauses for t in toks)
+    # The words name another kind of device and none of this kind's: wrong
+    # device, whatever else they say ("make the tv brighter" for a light).
+    # Words that are also colour or brightness words ("warmer") name no device,
+    # and whole-house wording is the scope of a light command.
+    own_named = bool(spoken & DEVICE_WORDS.get(kind, _CUE_WORDS.get(kind, frozenset()))) or (
+        kind == "light" and room_context.is_explicit_whole_house(" ".join(" ".join(t) for t in clauses))
+    )
+    if not own_named and any(
+        spoken & (DEVICE_WORDS[k] - COLOR_WORDS - BRIGHTNESS_WORDS) for k in DEVICE_WORDS if k != kind
+    ):
+        return WRONG_DEVICE
     if kind == "light" and _builtin_phrase(query):
         return None
-    clauses = _positive_clauses(query, negation=True)
     if not clauses:
         return NO_CUE  # everything said was negated
-    spoken = frozenset(t for toks in clauses for t in toks)
     if spoken & _CUE_WORDS[kind]:
         return None
-    if kind == "light" and room_context.is_explicit_whole_house(" ".join(" ".join(t) for t in clauses)):
-        return None  # "turn on everything but play music in the kitchen": the scope is the lights'
-    # Words that are also colour or brightness words ("warmer") name no device.
-    if any(spoken & (DEVICE_WORDS[k] - COLOR_WORDS - BRIGHTNESS_WORDS) for k in DEVICE_WORDS if k != kind):
-        return WRONG_DEVICE
+    if kind == "light" and own_named:
+        return None
     colour_evidence = bool(spoken & (COLOR_WORDS | BRIGHTNESS_WORDS | TEAM_WORDS)) or "%" in query
     verbs = _CONTROL_CUE_VERBS | _CONTROL_CUE_VERBS_BY_KIND.get(kind, frozenset())
     if act in WRITE_CUE_ACTIONS:
@@ -757,9 +794,10 @@ def lacks_write_cue(
 
 
 def names_device(text: Optional[str]) -> bool:
-    """Whether the words name a device of any kind in the table."""
+    """Whether the words name a device of any kind in the table. Words that
+    are also colour or brightness words ("warmer") name no device."""
     spoken = frozenset(tokens(text or ""))
-    return any(spoken & words for words in DEVICE_WORDS.values())
+    return any(spoken & (words - COLOR_WORDS - BRIGHTNESS_WORDS) for words in DEVICE_WORDS.values())
 
 
 def device_backed(
@@ -784,10 +822,16 @@ def device_backed(
         return frozenset(tokens(text or ""))
 
     clause_words = words(clause)
-    if clause_words & DEVICE_WORDS[kind]:
+    own = bool(clause_words & DEVICE_WORDS[kind])
+    # A clause that names another kind of device and none of this kind's does
+    # not back the step, whatever the action ("make the tv brighter" is not a
+    # light step). Words that are also colour or brightness words name no device.
+    if not own and any(
+        clause_words & (DEVICE_WORDS[k] - COLOR_WORDS - BRIGHTNESS_WORDS) for k in DEVICE_WORDS if k != kind
+    ):
+        return False
+    if own:
         return True
-    if names_device(clause):
-        return kind == "light" and isinstance(action, str) and action in _LIGHT_ACTIONS
     if kind == "climate" and _says_a_temperature(tokens(clause or "")):
         return True
     if antecedent is not None:

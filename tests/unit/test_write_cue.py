@@ -692,3 +692,157 @@ def test_the_carried_cue_is_computed_from_the_final_intent_right_before_executio
     assert source.index("Ensure we have required fields") < call < source.index("await _execute_and_record(", call)
     assert source.count("_carried_cue_query(") == 2  # the definition and the one call
     assert source.index("forced after the whole merge") < call
+
+
+class TestOneDeviceTypeEverywhere:
+    canonical = staticmethod(access_target.canonical_device_type)
+
+    @pytest.mark.parametrize("alias,expected", [
+        ("lights", "light"), ("Lamp", "light"), ("fans", "fan"), ("plug", "switch"), ("outlet", "switch"),
+        ("thermostat", "climate"), ("HVAC", "climate"), ("ac", "climate"), ("blinds", "cover"), ("shades", "cover"),
+        ("television", "media_player"), ("tv", "media_player"), ("speaker", "media_player"), ("media", "media_player"),
+        ("motion", "motion_control"), ("lock", "lock"), ("scene", "scene"),
+    ])
+    def test_each_alias_has_one_canonical_name(self, alias, expected):
+        assert self.canonical(alias) == expected
+
+    @pytest.mark.parametrize("value", ["vacuum", "robot", "", None, 3])
+    def test_an_unknown_type_is_returned_unchanged_and_refused(self, value):
+        assert self.canonical(value) == value
+        assert access_target.lacks_write_cue(value, "turn_on", "turn on the lights") is True
+
+    @pytest.mark.parametrize("alias,action,query,handler", [
+        ("television", "turn_on", "turn on the television", "_handle_media_intent"),
+        ("tv", "turn_off", "turn off the tv", "_handle_media_intent"),
+        ("speakers", "pause", "pause the speakers", "_handle_media_intent"),
+        ("thermostat", "set_temperature", "set the study to 70", "_handle_climate_intent"),
+        ("hvac", "set_temperature", "make the hvac warmer", "_handle_climate_intent"),
+        ("blinds", "close", "close the blinds", "_handle_cover_intent"),
+        ("shades", "close", "close the shades", "_handle_cover_intent"),
+        ("fans", "turn_on", "turn on the fans", "_handle_fan_intent"),
+    ])
+    def test_each_alias_reaches_its_own_handler_and_never_the_light_tail(self, monkeypatch, alias, action, query, handler):
+        from unittest.mock import AsyncMock
+        rig = make_rig(monkeypatch)
+        for name in ("_handle_media_intent", "_handle_climate_intent", "_handle_cover_intent", "_handle_fan_intent",
+                     "_dispatch_light_or_room_command"):
+            monkeypatch.setattr(rig.controller, name, AsyncMock(return_value="handled"))
+        intent = {"device_type": alias, "action": action, "room": "study", "target_scope": "group", "parameters": {}}
+        assert run(rig, intent, query) == "handled"
+        getattr(rig.controller, handler).assert_awaited_once()
+        rig.controller._dispatch_light_or_room_command.assert_not_awaited()
+        assert intent["device_type"] == access_target.canonical_device_type(alias)
+
+    @pytest.mark.parametrize("alias", ["lamp", "lights"])
+    def test_a_light_alias_reaches_the_light_handler(self, monkeypatch, alias):
+        rig = make_rig(monkeypatch)
+        run(rig, {"device_type": alias, "action": "turn_on", "room": "guest_room", "target_scope": "group", "parameters": {}},
+            "turn on the guest lights")
+        assert rig.written == ["light.guest_lamp"]
+
+    def test_a_plug_is_a_switch_not_a_light(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        answer = run(rig, {"device_type": "plug", "action": "turn_on", "room": "guest_room", "target_scope": "group",
+                           "parameters": {}}, "turn on the plug")
+        assert rig.written == [], answer
+
+    def test_the_sequence_planner_canonicalises_each_step(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        steps = [{"action": "turn_on", "target": {"device_type": "lamp", "room": "guest_room"}, "parameters": {},
+                  "delay_after": 0, "at_time": None}]
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, "turn on the guest lamp", None)
+
+        assert asyncio.run(go()) is None
+        assert steps[0]["target"]["device_type"] == "light"
+
+    def test_the_write_precheck_sees_the_canonical_type(self, monkeypatch):
+        from ._room_chat_harness import Chat
+        from orchestrator.nodes import route_control as rc
+        chat = Chat(monkeypatch)
+        perms = {"mode": "guest", "allowed_intents": ["control"], "allowed_domains": ["light"], "restricted_entities": []}
+        reached = []
+        real = chat.rig.controller.execute_intent
+
+        async def spy(*a, **kw):
+            reached.append(1)
+            return await real(*a, **kw)
+
+        chat.rig.controller.execute_intent = spy
+        query = "make the study 70 degrees"
+        intent = {"device_type": "thermostat", "room": "study", "action": "set_temperature",
+                  "target_scope": "group", "parameters": {"temperature": 70}}
+
+        async def go():
+            with chat.patched(), mp.ha_permission_scope(perms, mode="guest", trusted_voice=True) as scope:
+                state = chat.state(query, mode="guest", perms=perms)
+                await rc._execute_and_record(
+                    state, scope, intent, original_query=query, uk=classify_utterance(query),
+                    foreign_pending=False, store_query=query,
+                )
+                return state
+
+        state = asyncio.run(go())
+        assert state.error == "permission_denied", (state.error, state.answer)
+        assert chat.written == [] and reached == [], "refused by the coarse precheck, before the controller"
+
+
+class TestTheWrongDeviceCheckComesFirst:
+    problem = staticmethod(access_target.write_cue_problem)
+
+    @pytest.mark.parametrize("device_type,action,query", [
+        ("light", "increase", "make the tv brighter"), ("light", "set_brightness", "make the fan brighter"),
+        ("media", "decrease", "turn the lights down"), ("light", "set_color", "make the tv red"),
+        ("light", "turn_on", "I can't see the tv"), ("media_player", "turn_on", "too much light on the fan"),
+    ])
+    def test_another_kinds_device_word_beats_every_other_cue(self, device_type, action, query):
+        assert self.problem(device_type, action, query) == access_target.WRONG_DEVICE, (device_type, query)
+
+    @pytest.mark.parametrize("device_type,action,query", [
+        ("light", "increase", "make it brighter"), ("light", "decrease", "turn the lights down"),
+        ("light", "turn_on", "I can't see"), ("media", "decrease", "turn the tv down"),
+        ("light", "turn_on", "turn on everything but play music in the kitchen"),
+        ("light", "increase", "make the lights and the tv brighter"),
+    ])
+    def test_these_still_pass(self, device_type, action, query):
+        assert self.problem(device_type, action, query) is None, (device_type, query)
+
+    def test_a_negated_other_kind_does_not_make_it_wrong(self):
+        assert self.problem("light", "turn_on", "turn on the lights, don't touch the tv") is None
+
+    def test_end_to_end_the_tv_brighter_for_a_light_writes_nothing(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        answer = run(rig, post_guard(room="guest_room", action="set_brightness"), "make the tv brighter")
+        assert answer == shc.NO_DEVICE_TEXT and rig.written == []
+
+
+class TestSequenceBackingChecksTheOtherKindFirst:
+    backed = staticmethod(access_target.device_backed)
+
+    def test_a_light_brightness_or_colour_step_whose_clause_names_another_device_is_not_backed(self):
+        assert self.backed("light", "make the tv brighter", "x", "set_brightness") is False
+        assert self.backed("light", "make the fan red", "x", "set_color") is False
+
+    def test_still_backed(self):
+        assert self.backed("light", "make it brighter", "make it brighter", "set_brightness") is True
+        assert self.backed("light", "dim the lights", "x", "set_brightness") is True
+        assert self.backed("media", "turn the tv down", "x") is True
+        assert self.backed("light", "make it warmer", "make it warmer", "set_color") is True
+
+    def test_a_sequence_with_a_tv_brighter_clause_and_a_light_step_is_refused(self, monkeypatch):
+        rig = make_rig(monkeypatch)
+        steps = [
+            {"action": "set_brightness", "target": {"device_type": "light", "room": "guest_room"}, "parameters": {},
+             "delay_after": 0, "at_time": None},
+            {"action": "turn_off", "target": {"device_type": "light", "room": "guest_room"}, "parameters": {},
+             "delay_after": 0, "at_time": None},
+        ]
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, "make the tv brighter then turn off the guest lights", None)
+
+        assert asyncio.run(go()) == shc.NO_DEVICE_TEXT
+        assert rig.written == []
