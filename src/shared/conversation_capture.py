@@ -189,8 +189,6 @@ ANSWER_MAX_CHARS = 32000
 ERROR_MAX_CHARS = 300
 DETAIL_STRING_MAX_CHARS = 200
 _MAX_TOOL_NAMES = 20
-_MAX_TIMING_KEYS = 40
-_JSON_KEY_MAX_CHARS = 64
 
 # VARCHAR widths of every column a client-influenced label can reach, so one
 # long label can't turn a turn into a DataError drop.
@@ -450,19 +448,81 @@ def _clean_detail(detail: Optional[Mapping[str, Any]], extra: Mapping[str, Any])
     return merged or None
 
 
+# Closed vocabularies for the fields that are no longer behind the debug flag:
+# anything else (a payload key, a free-form data source) is dropped, so these
+# columns can never carry text. tests/unit/test_conversation_capture_contract.py
+# pins CAPTURE_TOOL_NAMES to rag_tools.py and CAPTURE_NODE_NAMES to the graph.
+CAPTURE_RETRIEVE_SERVICES = frozenset({"weather", "onecall", "airports", "events", "sports", "websearch"})
+CAPTURE_RAG_TOOL_NAMES = frozenset(
+    {
+        "get_weather",
+        "get_sports_scores",
+        "get_sports_standings",
+        "get_airport_info",
+        "search_flights",
+        "search_events",
+        "search_streaming",
+        "get_news",
+        "get_stock_info",
+        "search_web",
+        "search_restaurants",
+        "search_recipes",
+        "search_transit",
+        "get_directions",
+        "get_train_schedule",
+        "scrape_website",
+        "scrape_webpage_bright",
+        "compare_prices",
+        "get_tesla_metrics",
+        "request_media",
+    }
+)
+CAPTURE_TOOL_NAMES = CAPTURE_RAG_TOOL_NAMES | CAPTURE_RETRIEVE_SERVICES
+CAPTURE_GRAPH_NODE_NAMES = frozenset(
+    {
+        "classify",
+        "route_control",
+        "route_music",
+        "route_tv",
+        "route_info",
+        "retrieve",
+        "synthesize",
+        "validate",
+        "tool_call",
+        "send_sms",
+        "notification_pref",
+        "intent_refused",
+        "finalize",
+    }
+)
+CAPTURE_NODE_NAMES = CAPTURE_GRAPH_NODE_NAMES | {"tool_selection", "post_synthesis_fallback"}
+_MODEL_NAME_RE = re.compile(r"^[\w.:/@-]{1,100}$")
+
+
+def _clean_model(model: Optional[str]) -> Optional[str]:
+    if not isinstance(model, str):
+        return None
+    model = _strip_nul(model).strip()
+    return model if _MODEL_NAME_RE.fullmatch(model) else None
+
+
 def _clean_tools(tools: Optional[List[str]]) -> Optional[List[str]]:
     if not tools:
         return None
-    return [_clamp(t, _JSON_KEY_MAX_CHARS) for t in list(tools)[:_MAX_TOOL_NAMES] if isinstance(t, str)] or None
+    kept = [t for t in list(tools) if isinstance(t, str) and t in CAPTURE_TOOL_NAMES]
+    return list(dict.fromkeys(kept))[:_MAX_TOOL_NAMES] or None
 
 
 def _clean_timings(timings: Optional[Mapping[str, Any]]) -> Optional[Dict[str, float]]:
     if not timings:
         return None
     cleaned = {
-        _clamp(k, _JSON_KEY_MAX_CHARS): float(v)
-        for k, v in list(timings.items())[:_MAX_TIMING_KEYS]
-        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+        k: float(v)
+        for k, v in timings.items()
+        if isinstance(k, str)
+        and k in CAPTURE_NODE_NAMES
+        and isinstance(v, (int, float))
+        and not isinstance(v, bool)
     }
     return cleaned or None
 
@@ -479,7 +539,7 @@ def sanitize_record(record: CaptureRecord, *, owner_command: Optional[Callable[[
     * Every VARCHAR-bound label is clamped to its column width; NUL bytes
       (which Postgres text rejects) are removed.
     """
-    labels = {name: _clamp(getattr(record, name), width) for name, width in FIELD_WIDTHS.items()}
+    labels = {name: _clamp(getattr(record, name), width) for name, width in FIELD_WIDTHS.items() if name != "model_used"}
     reason = None if record.text_withheld else withhold_reason(record.query_text, owner_command)
     if record.text_withheld or reason is not None:
         labels.pop("outcome")
@@ -492,6 +552,7 @@ def sanitize_record(record: CaptureRecord, *, owner_command: Optional[Callable[[
             text_withheld=True,
             error_message=None,
             debug_detail=None,
+            model_used=None,
             rag_tools_used=None,
             node_timings_ms=None,
         )
@@ -505,6 +566,7 @@ def sanitize_record(record: CaptureRecord, *, owner_command: Optional[Callable[[
         query_text=_clean_text(query, QUERY_MAX_CHARS) or "",
         response_text=_clean_text(answer, ANSWER_MAX_CHARS),
         error_message=_clean_text(record.error_message, ERROR_MAX_CHARS),
+        model_used=_clean_model(record.model_used),
         rag_tools_used=_clean_tools(record.rag_tools_used),
         node_timings_ms=_clean_timings(record.node_timings_ms),
         debug_detail=_clean_detail(record.debug_detail, {"answer_truncated": True} if truncated else {}),
@@ -604,8 +666,8 @@ t AS (
         CASE WHEN w.withheld THEN NULL ELSE $14::text END,
         $15::varchar,
         $16::double precision::numeric,
-        CASE WHEN d.on_ THEN $17::varchar END,
-        CASE WHEN d.on_ THEN $18::jsonb END,
+        CASE WHEN NOT w.withheld THEN $17::varchar END,
+        CASE WHEN NOT w.withheld THEN $18::jsonb END,
         $19::integer,
         CASE WHEN d.on_ THEN $9::integer END,
         CASE WHEN d.on_ THEN $20::double precision::numeric END,
@@ -615,7 +677,7 @@ t AS (
         CASE WHEN d.on_ THEN $23::varchar END,
         $24::boolean,
         CASE WHEN d.on_ THEN $25::boolean END,
-        CASE WHEN d.on_ THEN $26::jsonb END,
+        CASE WHEN NOT w.withheld THEN $26::jsonb END,
         $27::varchar, $28::varchar, $29::varchar,
         CASE WHEN w.withheld THEN 'withheld' ELSE $30::varchar END,
         w.withheld,

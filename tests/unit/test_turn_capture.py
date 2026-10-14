@@ -136,10 +136,25 @@ def test_session_class_comes_from_the_session_id_prefix_only():
 def test_observe_takes_a_graph_dict_too():
     recording = RecordingSink()
     capture = bound(tc.TurnCapture("query", recording))
-    capture.observe({"answer": "from dict", "intent": "weather", "confidence": 0.5, "retrieved_data": {"a": 1}})
+    capture.observe({"answer": "from dict", "intent": "weather", "confidence": 0.5, "retrieved_data": {"weather": 1, "payload_key": 2}})
     capture.submit()
     rec = recording.records[0]
-    assert rec.response_text == "from dict" and rec.intent == "weather" and rec.rag_tools_used == ["a"]
+    assert rec.response_text == "from dict" and rec.intent == "weather" and rec.rag_tools_used == ["weather"]
+
+
+def test_observe_takes_tool_names_from_emitted_calls_and_drops_data_source_and_off_list_keys():
+    recording = RecordingSink()
+    capture = bound(tc.TurnCapture("query", recording))
+    capture.observe(State(
+        tool_calls_emitted=[{"name": "search_restaurants", "arguments": {"term": "call 5551234"}}, {"name": "get_weather"}],
+        retrieved_data={"tool_calls": ["x"], "tool_results": {}, "synthesis_model": "m"},
+        data_source="Tool Calling (ollama/qwen3)", model_used="qwen3:4b", node_timings={"tool_call": 1.5, "mystery": 2.0},
+    ))
+    capture.answered("ok")
+    capture.submit()
+    rec = cc.sanitize_record(recording.records[0])
+    assert rec.rag_tools_used == ["search_restaurants", "get_weather"]
+    assert rec.model_used == "qwen3:4b" and rec.node_timings_ms == {"tool_call": 1.5}
 
 
 def test_pin_shaped_and_long_digit_queries_are_withheld_and_the_digits_never_reach_the_record():

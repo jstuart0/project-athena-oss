@@ -233,10 +233,9 @@ class TurnCapture:
         if self._withheld_marker:
             return
         try:
-            tools = [k for k in (_field(state, "retrieved_data") or {}) if isinstance(k, str)]
-            data_source = _field(state, "data_source")
-            if isinstance(data_source, str) and data_source not in tools:
-                tools.append(data_source)
+            emitted = [c.get("name") for c in (_field(state, "tool_calls_emitted") or []) if isinstance(c, dict)]
+            retrieved = list(_field(state, "retrieved_data") or {})
+            tools = [t for t in dict.fromkeys(n for n in emitted + retrieved if isinstance(n, str)) if t in contract.CAPTURE_TOOL_NAMES]
             error = _field(state, "error")
             if error == "permission_denied":
                 self._refused = True
