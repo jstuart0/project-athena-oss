@@ -62,6 +62,15 @@ def _music_command_hint(action) -> "str | None":
     return f"To do that, say: {command}." if command else None
 
 
+_FAILURE_MARKERS = ("sorry", "didn't start", "not available", "i don't know how", "are in use", "no music player")
+
+
+def _playback_failed(answer: str) -> bool:
+    """The handler's own failure wording: the request was understood, nothing played."""
+    lowered = answer.lower()
+    return any(marker in lowered for marker in _FAILURE_MARKERS)
+
+
 def _write_refusal(uk, query, names) -> "str | None":
     # Called at dispatch time: smart_home_controller imports the sequence executor and
     # is not loaded by the nodes package.
@@ -283,16 +292,20 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                     room=intent_data.get("room")
                 )
 
-            # Store context for potential follow-up commands
+            # Store context for potential follow-up commands, under the turn's own
+            # intent and a failed play too ("try again" needs what was asked).
             # Never over another caller's pending write confirmation.
-            if (state.session_id and state.answer and "sorry" not in state.answer.lower()
+            if (state.session_id and state.answer
                     and not holds_foreign_pending(state.prev_context, state.caller_fingerprint)):
+                parameters = dict(state.retrieved_data.get("music_intent", {}))
+                if _playback_failed(state.answer):
+                    parameters["outcome"] = "failed"
                 await store_conversation_context(
                     session_id=state.session_id,
-                    intent="music",
+                    intent=(state.intent or IntentCategory.MUSIC_CONTROL).value,
                     query=state.query,
                     entities={"room": state.room},
-                    parameters=state.retrieved_data.get("music_intent", {}),
+                    parameters=parameters,
                     response=state.answer,
                     ttl=300  # 5 minutes
                 )

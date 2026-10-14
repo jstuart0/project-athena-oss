@@ -16,6 +16,7 @@ The routes the two paths used to disagree on, and the side chosen:
     streamed synthesis). Equivalent; kept.
 (c) a referential question about the conversation, asked of a data intent:
     answered from history in both paths (the intent becomes ``GENERAL_INFO``).
+    Never for a continuation word or a resumed task (``resolved_request``).
 (d) ``GENERAL_INFO`` or ``UNKNOWN`` that asks for a local business: the tool
     node in both (the streaming runner used to skip it).
 (e) a preset answer (``skip_synthesis`` with an answer): ``FINALIZE``, the
@@ -115,12 +116,14 @@ def handler_route(state: OrchestratorState) -> Route | None:
 
 
 def _asks_about_the_conversation(state: OrchestratorState) -> bool:
-    if not has_conversation(state):
-        return False
+    if not has_conversation(state) or state.resolved_request:
+        return False  # a resumed task is a search, not a question about the talk
     ref_info = state.context_ref_info or {}
+    # A continuation word ("yes please") points at the last question, which is
+    # the task's to resume, not a request to answer from history.
     return bool(
         is_conversational_reference(state.query, True)
-        or ref_info.get("has_context_ref", False)
+        or (ref_info.get("has_context_ref", False) and not ref_info.get("is_continuation", False))
     )
 
 
@@ -149,7 +152,7 @@ def decide(state: OrchestratorState, *, tool_trigger: bool, ambient: bool) -> Ro
 
     if intent == IntentCategory.UNKNOWN:
         continuing = bool((state.context_ref_info or {}).get("is_continuation", False))
-        if continuing and state.conversation_history:
+        if continuing and has_conversation(state):
             return Route.SYNTHESIZE
         return Route.FINALIZE
 

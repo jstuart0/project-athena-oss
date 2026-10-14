@@ -135,6 +135,7 @@ from shared.admin_url import get_admin_url, path_segment
 from shared.service_key import note_admin_refusal, service_key_headers
 
 # Modular context imports
+from orchestrator.context.detector import MUSIC_CONTROL_FAST_PATTERNS, MUSIC_SINGLE_WORDS
 from orchestrator.context import (
     detect_context_reference,
     detect_strong_intent,
@@ -171,6 +172,8 @@ from orchestrator.self_building_tools import (
 from orchestrator.nodes import _runtime
 from orchestrator import answer_route, turn_capture
 from orchestrator.answer_route import Route
+from orchestrator import followup
+from orchestrator.followup import last_exchange_from_session
 from orchestrator.grounding import (
     DECLINE_TEXT,
     forced_tool_calls,
@@ -2087,6 +2090,53 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
 # Node Implementations
 # ============================================================================
 
+def _resume_open_task(state: OrchestratorState, prev_context: Any, ref_info: Dict[str, Any]) -> bool:
+    """Apply `followup.resolve` to the turn. True when it decided the turn:
+    a decline ends it with "Okay."; an affirmation or a slot answer pins the
+    stored intent and carries the original request in `resolved_request`, with
+    its complexity judged on that request (a follow-up isn't a simple turn)."""
+    task = followup.open_task(
+        state.last_exchange, prev_context.intent, prev_context.query,
+        session_class=id_class(state.session_id),
+    )
+    if task is None:
+        return False
+    resolution = followup.resolve(state.query, task, classify_utterance(state.query), state.prev_context)
+    if isinstance(resolution, followup.Slot):
+        # A short fresh topic ("weather in Denver") is not an answer to the blank.
+        fresh_intent, fresh_confidence = _pattern_based_classification(state.query, return_confidence=True)
+        names_new_topic = detect_strong_intent(state.query, prev_context.intent)["should_override_context"] or (
+            fresh_confidence >= 0.85 and fresh_intent not in (None, IntentCategory.GENERAL_INFO.value, prev_context.intent)
+        )
+        if names_new_topic:
+            return False
+    if resolution is None:
+        return False
+
+    state.intent = IntentCategory.GENERAL_INFO if isinstance(resolution, followup.Decline) else IntentCategory(prev_context.intent)
+    state.confidence = 0.95
+    state.context_ref_info = context_ref_view(ref_info, "continued")
+    if isinstance(resolution, followup.Decline):
+        state.answer = "Okay."
+        state.skip_synthesis = True
+        state.complexity = "simple"
+        state.continuation_decision = {"decision": "continued", "reason": "open_task_declined"}
+        logger.info("open_task_declined", intent=prev_context.intent)
+        return True
+
+    state.resolved_request = resolution.resolved_request
+    state.complexity = get_complexity_with_override(
+        state.resolved_request, intent=prev_context.intent, is_followup=False
+    )
+    merged = merge_with_context(
+        new_query=state.query, new_entities=state.entities, context=prev_context, ref_info=ref_info
+    )
+    state.entities = merged["entities"]
+    state.continuation_decision = {"decision": "continued", "reason": "open_task"}
+    logger.info("open_task_resumed", kind=type(resolution).__name__.lower(), intent=prev_context.intent)
+    return True
+
+
 async def classify_node(state: OrchestratorState) -> OrchestratorState:
     """
     Classify user intent using LLM with Redis caching.
@@ -2447,6 +2497,14 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 state.node_timings["classify"] = time.time() - start
                 return state
 
+            # A bare reply to a question or offer the last exchange left open
+            # ("Yes.", "no thanks", "in the north district") resumes that task:
+            # it is not a new topic, and not a thin follow-up on the last intent.
+            resumed = _resume_open_task(state, prev_context, ref_info)
+            if resumed:
+                state.node_timings["classify"] = time.time() - start
+                return state
+
             # Check for strong intent indicators BEFORE doing context continuation
             # This prevents "restaurant recommendations" from routing to weather
             # just because the previous query was about weather
@@ -2565,7 +2623,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     state.query, return_confidence=True
                 )
                 should_continue, decision_reason = decide_context_continuation(
-                    ref_info, prev_context.intent, fresh_intent, fresh_confidence
+                    ref_info, prev_context.intent, fresh_intent, fresh_confidence, state.query
                 )
 
                 if not should_continue:
@@ -2856,28 +2914,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Music control commands (pause, skip, volume, shuffle, repeat)
     # These should bypass LLM to avoid misclassification as CONTROL
-    music_control_fast_patterns = [
-        'pause', 'resume', 'stop music', 'stop the music',
-        'next song', 'next track', 'skip', 'skip this', 'skip song',
-        'previous song', 'previous track', 'go back',
-        'play the next one', 'next one', 'play the next',  # Round 11
-        'go back one song', 'back one song', 'one song back', 'play the last one',  # Round 11
-        'louder', 'quieter', 'volume up', 'volume down', 'turn it up', 'turn it down',
-        'shuffle', 'repeat', 'mute music', 'unmute',
-        # Additional volume patterns
-        'crank up', 'crank it up', 'pump up', 'pump it up', 'blast it',
-        'quiet down', 'turn down', 'softer', 'too loud', 'not so loud',
-        'turn up the music', 'cant hear it', "can't hear it", 'cant hear',
-        "can't hear", 'i cant hear', "i can't hear", 'volume way up',
-        'turn the volume way up', 'turn it way up',
-        # Now playing patterns
-        'song called', 'song name', 'whats that song', 'whats the song',
-        'what is that song', 'whats this song', 'what is this song'
-    ]
     # Single-word exact matches for music control
-    single_word_music = ['next', 'stop', 'previous', 'play']
-    is_music_fast_path = any(p in query_lower for p in music_control_fast_patterns)
-    is_single_word_music = query_lower.strip() in single_word_music
+    is_music_fast_path = any(p in query_lower for p in MUSIC_CONTROL_FAST_PATTERNS)
+    is_single_word_music = query_lower.strip() in MUSIC_SINGLE_WORDS
     if is_music_fast_path or is_single_word_music:
         logger.info(f"Fast path: music control detected in query_len={len(state.query)} - classifying as MUSIC_CONTROL")
         state.intent = IntentCategory.MUSIC_CONTROL
@@ -4974,7 +5013,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             tomorrow_api = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
             # Extract specific date from query if present
-            extracted_date = extract_date_from_query(state.query)
+            extracted_date = extract_date_from_query(request_text(state))
             specific_date_instruction = ""
             if extracted_date:
                 date_display, date_api = extracted_date
@@ -5072,7 +5111,7 @@ DIRECTIONS: When using get_directions:
             },
             {
                 "role": "user",
-                "content": state.query
+                "content": request_text(state)
             }
         ]
 
@@ -5284,7 +5323,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
         # This prevents the LLM from giving generic directions from training data
         if not tool_calls and state.intent and state.intent.value == "directions":
             # Extract destination from query
-            query_lower = state.query.lower()
+            query_lower = request_text(state).lower()
             dest_patterns = [
                 r'(?:directions?\s+to|how\s+(?:do\s+i\s+)?get\s+to|route\s+to|navigate\s+to|drive\s+to|driving\s+to|way\s+to|trip\s+to|going\s+to)\s+(.+?)(?:\?|$|from)',
                 r'(?:how\s+far\s+(?:is\s+)?(?:it\s+)?to|how\s+long\s+to\s+(?:get\s+)?to)\s+(.+?)(?:\?|$|from)',
@@ -5449,7 +5488,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                         await store_conversation_context(
                             session_id=state.session_id,
                             intent=state.intent.value if state.intent else "general_info",
-                            query=state.query,
+                            query=request_text(state),
                             entities=state.entities or {},
                             parameters={"direct_answer": True, "model": llm_model},
                             response=state.answer or "",  # Store full response for conversation continuity
@@ -5487,7 +5526,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                             synthesis_prompt = f"""Answer the user's question using the search results below.
 Be helpful and conversational. If the information is limited, acknowledge that.
 
-User Question: {state.query}
+User Question: {request_text(state)}
 
 Search Results:
 {context}
@@ -5647,7 +5686,7 @@ Provide a helpful answer:"""
                     continue
 
                 # Build a search query based on the original query and tool type
-                search_query = enhance_query_with_year(state.query)
+                search_query = enhance_query_with_year(request_text(state))
 
                 # Add context based on tool type for better search results
                 tool_search_context = {
@@ -5790,9 +5829,9 @@ Provide a helpful answer:"""
 
                     if function_name in location_sensitive_tools:
                         # Include location in query for local results
-                        enhanced_query = f"{enhance_query_with_year(state.query)} {context} {user_location}"
+                        enhanced_query = f"{enhance_query_with_year(request_text(state))} {context} {user_location}"
                     else:
-                        enhanced_query = f"{enhance_query_with_year(state.query)} {context}"
+                        enhanced_query = f"{enhance_query_with_year(request_text(state))} {context}"
 
                     logger.info(f"Web search fallback for empty '{function_name}' results: enhanced_query_len={len(enhanced_query)}")
 
@@ -5882,7 +5921,7 @@ Provide a helpful answer:"""
             # Add synthesis instruction to guide the LLM
             # Include the target date in synthesis instruction
             # First try to extract specific date from query
-            extracted_date = extract_date_from_query(state.query)
+            extracted_date = extract_date_from_query(request_text(state))
             if extracted_date:
                 target_date_str = extracted_date[0]  # Use display format
             elif "saturday" in query_lower:
@@ -6075,7 +6114,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
                 await store_conversation_context(
                     session_id=state.session_id,
                     intent=context_intent,
-                    query=state.query,
+                    query=request_text(state),
                     entities=context_entities,
                     parameters={"tool_calls": tool_names, "grounded": grounded(state)},
                     response=state.answer or "",  # Store full response for conversation continuity
@@ -6833,6 +6872,7 @@ async def process_query(
             temperature=request.temperature,
             request_location=request.location or None,
             session_id=session.session_id,
+            last_exchange=last_exchange_from_session(session),
             conversation_history=conversation_history,
             history_summary=history_summary,  # Summarized context for summarized mode
             permissions=permissions,  # Phase 2: Include permissions for entity checks
@@ -6906,8 +6946,15 @@ async def process_query(
                     get_admin_client(), audience=authz.knowledge_audience
                 )
             # A bare "yes" or "go on" means the last exchange, which the key
-            # doesn't hold: it never reads the cache.
-            if cache_blocked or cache_knowledge_digest is None or is_bare_reply(request.query):
+            # doesn't hold: it never reads the cache. Neither does a short
+            # answer to a question just asked ("in the north district").
+            if (
+                cache_blocked or cache_knowledge_digest is None or is_bare_reply(request.query)
+                or followup.slot_candidate(
+                    request.query, initial_state.last_exchange, classify_utterance(request.query),
+                    session_class=id_class(session.session_id),
+                )
+            ):
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -7682,6 +7729,7 @@ async def process_query_stream(
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
+                last_exchange=last_exchange_from_session(session),
                 request_id=request_id,
                 start_time=start_time,
                 context=query_context,
@@ -8012,6 +8060,7 @@ async def process_query_stream_v2(
                 room=request.room,
                 temperature=request.temperature,
                 session_id=session.session_id,
+                last_exchange=last_exchange_from_session(session),
                 conversation_history=[],
                 history_summary="",
                 permissions=authz.permissions,
@@ -8259,13 +8308,13 @@ async def build_synthesis_prompt_for_streaming(state: OrchestratorState) -> tupl
     """
     # Build synthesis prompt based on context (same logic as synthesize_node)
     ref_info = state.context_ref_info or {}
-    is_continuation = ref_info.get("is_continuation", False)
+    is_continuation = ref_info.get("is_continuation", False) and not state.resolved_request
 
     if state.retrieved_data:
         context = json.dumps(state.retrieved_data, indent=2)
         synthesis_prompt = f"""Answer the following question using ONLY the provided context.
 
-Question: {state.query}
+Question: {request_text(state)}
 
 Context Data:
 {context}
@@ -8285,7 +8334,7 @@ CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
 6. If context contains errors or no results, acknowledge that honestly{sports_status_rule(state)}
 
 Response:"""
-    elif is_continuation and state.conversation_history:
+    elif is_continuation and (state.conversation_history or state.history_summary):
         synthesis_prompt = f"""The user is continuing a conversation with you. Their response: "{state.query}"
 
 Based on the conversation history above, understand what the user means and respond appropriately.
@@ -8299,7 +8348,7 @@ INSTRUCTIONS:
 
 Your response:"""
     elif state.intent == IntentCategory.GENERAL_INFO:
-        synthesis_prompt = f"""Question: {state.query}
+        synthesis_prompt = f"""Question: {request_text(state)}
 
 Respond naturally as a helpful assistant.
 
@@ -8318,7 +8367,7 @@ Response:"""
         # No RAG data retrieved — use conversation context and general knowledge
         has_conversation_context = bool(state.conversation_history or state.history_summary)
         if has_conversation_context and not tool_owned_without_data(state):
-            synthesis_prompt = f"""Question: {state.query}
+            synthesis_prompt = f"""Question: {request_text(state)}
 
 Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
 
@@ -8333,7 +8382,7 @@ INSTRUCTIONS:
 
 Response:"""
         else:
-            synthesis_prompt = no_data_prompt(state.query)
+            synthesis_prompt = no_data_prompt(request_text(state))
 
     addressee = await resolve_addressee(state, get_admin_client())
     visible_knowledge = (
@@ -8706,6 +8755,7 @@ async def chat_completions(
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,
+                    last_exchange=last_exchange_from_session(session),
                     request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8],
                     start_time=start_time,
                     interface_type=interface_type,

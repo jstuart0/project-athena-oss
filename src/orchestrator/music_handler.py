@@ -17,7 +17,7 @@ import os
 import re
 import time
 import structlog
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, Iterable, List, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -369,6 +369,8 @@ def get_room_display_names(room_configs: Dict[str, Dict[str, Any]]) -> List[str]
 # Each genre has multiple artists for variety
 import random
 
+GENRE_PLAY_ATTEMPTS = 2
+
 GENRE_TO_ARTISTS = {
     "jazz": ["Miles Davis", "John Coltrane", "Thelonious Monk", "Charlie Parker", "Duke Ellington", "Herbie Hancock", "Bill Evans", "Chet Baker"],
     "rock": ["Led Zeppelin", "The Rolling Stones", "Pink Floyd", "Queen", "AC/DC", "The Beatles", "Nirvana", "Guns N' Roses"],
@@ -393,10 +395,10 @@ GENRE_TO_ARTISTS = {
 }
 
 
-def get_genre_artist(genre: str) -> str:
-    """Get a random artist for a genre to seed radio mode."""
-    genre_lower = genre.lower()
-    artists = GENRE_TO_ARTISTS.get(genre_lower, [])
+def get_genre_artist(genre: str, exclude: Iterable[str] = ()) -> Optional[str]:
+    """Get a random artist for a genre to seed radio mode, other than `exclude`."""
+    skip = set(exclude)
+    artists = [a for a in GENRE_TO_ARTISTS.get(genre.lower(), []) if a not in skip]
     if artists:
         return random.choice(artists)
     return None
@@ -1110,82 +1112,118 @@ class MusicHandler:
             )
 
         # Handle genre -> artist conversion for radio mode (random selection)
-        if media_type == "genre":
-            artist = get_genre_artist(media_id)
+        genre = media_id if media_type == "genre" else None
+        requested = media_id
+        tried_seeds: List[str] = []
+        if genre:
+            artist = get_genre_artist(genre)
             if artist:
                 media_type = "artist"
                 media_id = artist
                 radio_mode = True
+                tried_seeds.append(artist)
             else:
                 return f"I don't have a good radio seed for {media_id} genre. Try asking for a specific artist."
 
-        try:
-            # Check for secondary entity (e.g., stereo HomePod pair)
-            secondary_entity = get_room_secondary_entity(target_room, room_configs)
+        # A genre gets one more try with another seed: a seed the service can't
+        # resolve says nothing about the genre.
+        for attempt in range(GENRE_PLAY_ATTEMPTS if genre else 1):
+            try:
+                return await self._play_once(
+                    media_type, media_id, radio_mode, target_room, entity_id, room_configs
+                )
+            except Exception as e:
+                from orchestrator.mode_permission import HAWritePermissionDenied
 
-            if secondary_entity:
-                # Try to join secondary to primary for stereo playback (HomePod pairs)
-                # Non-fatal if join fails - will still play to primary speaker
-                try:
-                    logger.info(
-                        "joining_stereo_pair",
-                        primary=entity_id,
-                        secondary=secondary_entity,
-                        room=target_room
-                    )
-                    await self.ha.call_service(
-                        domain="media_player",
-                        service="join",
-                        service_data={
-                            "entity_id": secondary_entity,
-                            "group_members": [entity_id]
-                        }
-                    )
-                except Exception as join_error:
-                    logger.warning(
-                        "stereo_join_failed",
-                        primary=entity_id,
-                        secondary=secondary_entity,
-                        error=str(join_error)
-                    )
-                    # Continue with single speaker playback
+                logger.error(
+                    "music_play_failed",
+                    error=str(e),
+                    media_id=media_id,
+                    room=target_room,
+                    attempt=attempt + 1,
+                )
+                if isinstance(e, HAWritePermissionDenied) or not genre:
+                    break
+                next_seed = get_genre_artist(genre, exclude=tried_seeds)
+                if not next_seed:
+                    break
+                media_id = next_seed
+                tried_seeds.append(next_seed)
 
-            # Call Music Assistant play_media service
-            await self.ha.call_service(
-                domain="music_assistant",
-                service="play_media",
-                service_data={
-                    "entity_id": entity_id,
-                    "media_id": media_id,
-                    "media_type": media_type,
-                    "radio_mode": radio_mode
-                }
-            )
+        # Release the account on failure
+        self.account_pool.release_room(target_room)
+        # No question: a bare "yes" has no reader for a failed play, so the line
+        # says what to say instead.
+        return (
+            f"The music service didn't start that in the {target_room.replace('_', ' ')}. "
+            f"Say 'play {requested}' to try again."
+        )
 
-            # Update playback manager so follow-me audio knows music is playing
-            self.playback_manager.set_playing(target_room, entity_id, media_id)
+    async def _play_once(
+        self,
+        media_type: str,
+        media_id: str,
+        radio_mode: bool,
+        target_room: str,
+        entity_id: str,
+        room_configs: Dict[str, Any],
+    ) -> str:
+        """One play_media attempt in a resolved room; raises on any failure."""
+        # Check for secondary entity (e.g., stereo HomePod pair)
+        secondary_entity = get_room_secondary_entity(target_room, room_configs)
 
-            room_name = target_room.replace("_", " ")
-            logger.info(
-                "music_play_success",
-                media_id=media_id,
-                media_type=media_type,
-                room=target_room,
-                entity_id=entity_id,
-                secondary_entity=secondary_entity
-            )
-            return f"Playing {media_id} in the {room_name}."
+        if secondary_entity:
+            # Try to join secondary to primary for stereo playback (HomePod pairs)
+            # Non-fatal if join fails - will still play to primary speaker
+            try:
+                logger.info(
+                    "joining_stereo_pair",
+                    primary=entity_id,
+                    secondary=secondary_entity,
+                    room=target_room
+                )
+                await self.ha.call_service(
+                    domain="media_player",
+                    service="join",
+                    service_data={
+                        "entity_id": secondary_entity,
+                        "group_members": [entity_id]
+                    }
+                )
+            except Exception as join_error:
+                logger.warning(
+                    "stereo_join_failed",
+                    primary=entity_id,
+                    secondary=secondary_entity,
+                    error=str(join_error)
+                )
+                # Continue with single speaker playback
 
-        except Exception as e:
-            logger.error(
-                "music_play_failed",
-                error=str(e),
-                media_id=media_id,
-                room=target_room
-            )
-            # Release the account on failure
-            self.account_pool.release_room(target_room)
-            return "Sorry, I couldn't play that."
+        # Call Music Assistant play_media service
+        await self.ha.call_service(
+            domain="music_assistant",
+            service="play_media",
+            service_data={
+                "entity_id": entity_id,
+                "media_id": media_id,
+                "media_type": media_type,
+                "radio_mode": radio_mode
+            }
+        )
+
+        # Update playback manager so follow-me audio knows music is playing
+        self.playback_manager.set_playing(target_room, entity_id, media_id)
+
+        room_name = target_room.replace("_", " ")
+        logger.info(
+            "music_play_success",
+            media_id=media_id,
+            media_type=media_type,
+            room=target_room,
+            entity_id=entity_id,
+            secondary_entity=secondary_entity
+        )
+        return f"Playing {media_id} in the {room_name}."
 
     async def handle_control(
         self,

@@ -77,6 +77,7 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
             state.skip_synthesis = False
             state.tool_call_attempted = False
             state.identity_answer = False
+            state.resolved_request = None  # last_exchange is the session's, kept
             logger.info(f"Preparing next intent ({state.current_intent_index + 1}/{len(state.intent_parts)}): query_len={len(state.query)}")
             finalize_duration = time.time() - start
             state.node_timings["finalize"] = finalize_duration

@@ -10,7 +10,7 @@ from typing import Optional
 
 import structlog
 
-from orchestrator.grounding import grounded, no_data_prompt, sports_status_rule, tool_owned_without_data
+from orchestrator.grounding import grounded, no_data_prompt, request_text, sports_status_rule, tool_owned_without_data
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
@@ -144,7 +144,7 @@ async def save_synthesis_context(state: OrchestratorState, answer: Optional[str]
             await store_conversation_context(
                 session_id=state.session_id,
                 intent=state.intent.value,
-                query=state.query,
+                query=request_text(state),
                 entities=context_entities,
                 parameters=context_params,
                 response=answer,  # Store full response for conversation continuity
@@ -189,14 +189,15 @@ async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
 
         # Check if this is a continuation response (user answering a question from Athena)
         ref_info = state.context_ref_info or {}
-        is_continuation = ref_info.get("is_continuation", False)
+        # A resumed task carries its own request; the reply alone is no continuation prompt.
+        is_continuation = ref_info.get("is_continuation", False) and not state.resolved_request
 
         # Build synthesis prompt based on context
         if state.retrieved_data:
             context = json.dumps(state.retrieved_data, indent=2)
             synthesis_prompt = f"""Answer the following question using ONLY the provided context.
 
-Question: {state.query}
+Question: {request_text(state)}
 
 Context Data:
 {context}
@@ -216,7 +217,7 @@ CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
 6. If context contains errors or no results, acknowledge that honestly{sports_status_rule(state)}
 
 Response:"""
-        elif is_continuation and state.conversation_history:
+        elif is_continuation and (state.conversation_history or state.history_summary):
             # Continuation response - user is answering Athena's question or continuing conversation
             synthesis_prompt = f"""The user is continuing a conversation with you. Their response: "{state.query}"
 
@@ -232,7 +233,7 @@ INSTRUCTIONS:
 Your response:"""
             logger.info(f"Using continuation prompt for query_len={len(state.query)} with {len(state.conversation_history)} history messages")
         elif state.intent == IntentCategory.GENERAL_INFO:
-            synthesis_prompt = f"""Question: {state.query}
+            synthesis_prompt = f"""Question: {request_text(state)}
 
 Respond naturally as a helpful assistant.
 
@@ -255,7 +256,7 @@ Response:"""
             # external data.
             has_conversation_context = bool(state.conversation_history or state.history_summary)
             if has_conversation_context and not tool_owned_without_data(state):
-                synthesis_prompt = f"""Question: {state.query}
+                synthesis_prompt = f"""Question: {request_text(state)}
 
 Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
 
@@ -270,7 +271,7 @@ INSTRUCTIONS:
 
 Response:"""
             else:
-                synthesis_prompt = no_data_prompt(state.query)
+                synthesis_prompt = no_data_prompt(request_text(state))
 
         addressee = await resolve_addressee(state, get_admin_client())
         visible_knowledge = (

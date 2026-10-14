@@ -142,3 +142,36 @@ def test_incident_transcript_decision_chain():
     turn3_result = detect_strong_intent(turn3, prev_intent="dining")
     assert turn3_result["has_strong_intent"] is False
     assert turn3_result["detected_intent"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9. Phase 9: a reply is the same reply with or without its punctuation
+# ---------------------------------------------------------------------------
+
+REPLY_PAIRS = [
+    ("yes", "Yes."), ("yes", "YES!"), ("yeah, sure", "yeah, sure."), ("no thanks", "No thanks."),
+    ("okay", "Okay."), ("nope", "Nope!"),
+]
+
+
+@pytest.mark.parametrize("plain,spoken", REPLY_PAIRS, ids=[spoken for _, spoken in REPLY_PAIRS])
+def test_a_reply_and_its_punctuated_form_give_identical_flags(plain, spoken):
+    assert detect_context_reference(plain) == detect_context_reference(spoken)
+    assert detect_context_reference(spoken)["is_continuation"] is True
+
+
+def test_the_reply_pairs_have_a_floor_and_a_named_member():
+    assert len(REPLY_PAIRS) >= 5 and ("yes", "Yes.") in REPLY_PAIRS
+
+
+def test_the_continuation_list_carries_the_shared_confirmation_vocabulary():
+    from orchestrator.context.detector import CONTEXT_REF_PATTERNS
+    from shared.fast_path_vocab import AFFIRMATION_WORDS, NEGATION_WORDS
+
+    assert set(AFFIRMATION_WORDS + NEGATION_WORDS) <= set(CONTEXT_REF_PATTERNS["continuations"])
+
+
+def test_a_command_that_starts_with_a_yes_word_is_not_a_continuation():
+    assert detect_context_reference("Okay, turn off the lights")["is_continuation"] is False
+    assert detect_context_reference("yes, turn on the porch light")["is_continuation"] is False
+    assert detect_context_reference("Okay, thanks")["is_continuation"] is True  # positive control

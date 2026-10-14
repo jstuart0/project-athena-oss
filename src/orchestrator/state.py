@@ -91,6 +91,12 @@ class OrchestratorState(BaseModel):
     # "not_consulted", "reason": str}. See context.detector.context_ref_view.
     continuation_decision: Dict[str, Any] = Field(default_factory=dict, description="Routed context-continuation decision (decision, reason)")
     prev_context: Optional[Dict[str, Any]] = Field(None, description="Previous conversation context from Redis")
+    # Follow-up handling (followup.py): the session's last user and assistant
+    # messages as the entry point loaded them, and the request a bare reply
+    # ("Yes.", "in the north district") resumes. Model-facing readers use
+    # grounding.request_text; `query` stays the user's own words.
+    last_exchange: Optional[Dict[str, Any]] = Field(None, description="Server-set: the session's last exchange (user, assistant, at, session_class)")
+    resolved_request: Optional[str] = Field(None, description="The open task a bare reply resumes; None for a turn that stands alone")
 
     # Phase 2: Guest Mode permissions
     permissions: Dict[str, Any] = Field(default_factory=dict, description="User permissions from mode service")
