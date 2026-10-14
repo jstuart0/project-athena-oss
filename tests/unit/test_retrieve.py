@@ -452,10 +452,69 @@ class TestSportsIntent:
         assert result.retrieved_data["has_live_game"] is True
         assert result.data_source == "TheSportsDB"
 
+    def test_sports_without_a_team_entity_makes_no_search_and_leaves_data_empty(self):
+        rc = MagicMock()
+        rc.update_service_url = MagicMock()
+        rc.get = AsyncMock()
+        _runtime.set_rag_client(rc)
+        state = _make_state(query="who's winning?", intent=IntentCategory.SPORTS, entities={})
+        mock_fallback = AsyncMock()
+        with (
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
+            patch("orchestrator.nodes.retrieve._fallback_to_web_search", mock_fallback),
+        ):
+            result = _run(retrieve_node(state))
+        rc.get.assert_not_awaited()
+        mock_fallback.assert_not_awaited()
+        assert not result.retrieved_data
+        assert "retrieve" in result.node_timings
+
+    def test_sports_without_a_team_falls_through_to_the_shared_tail_history_reroute(self):
+        rc = MagicMock()
+        rc.update_service_url = MagicMock()
+        rc.get = AsyncMock()
+        _runtime.set_rag_client(rc)
+        state = _make_state(
+            query="and who's winning?", intent=IntentCategory.SPORTS, entities={},
+            conversation_history=[{"role": "user", "content": "hi"}],
+        )
+        with patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"):
+            result = _run(retrieve_node(state))
+        assert result.intent == IntentCategory.GENERAL_INFO
+        assert "retrieve" in result.node_timings
+
+    def test_a_configured_default_team_is_used_when_the_query_names_none(self):
+        rc = self._make_sports_rc()
+        _runtime.set_rag_client(rc)
+        v = _make_validator(ValidationResult.VALID)
+        state = _make_state(query="how are they doing?", intent=IntentCategory.SPORTS, entities={})
+        cfg = MagicMock(sports_default_team="Ravens")
+        with (
+            patch("orchestrator.nodes.retrieve.get_config", return_value=cfg),
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
+            patch("orchestrator.nodes.retrieve.validator", v),
+        ):
+            result = _run(retrieve_node(state))
+        assert rc.get.call_args_list[0].kwargs["params"] == {"query": "Ravens"}
+        assert result.retrieved_data["team"] == "Ravens"
+
+    def test_a_named_team_beats_the_configured_default(self):
+        rc = self._make_sports_rc()
+        _runtime.set_rag_client(rc)
+        state = _make_state(query="Ravens?", intent=IntentCategory.SPORTS, entities={"team": "Ravens"})
+        cfg = MagicMock(sports_default_team="Giants")
+        with (
+            patch("orchestrator.nodes.retrieve.get_config", return_value=cfg),
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
+            patch("orchestrator.nodes.retrieve.validator", _make_validator(ValidationResult.VALID)),
+        ):
+            _run(retrieve_node(state))
+        assert rc.get.call_args_list[0].kwargs["params"] == {"query": "Ravens"}
+
     def test_sports_service_url_not_configured_triggers_fallback(self):
         rc = _make_rag_client()
         _runtime.set_rag_client(rc)
-        state = _make_state(query="Ravens score?", intent=IntentCategory.SPORTS)
+        state = _make_state(query="Ravens score?", intent=IntentCategory.SPORTS, entities={"team": "Ravens"})
         mock_fallback = AsyncMock()
         with (
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value=None),

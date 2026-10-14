@@ -52,6 +52,7 @@ every addition.
 | `SERVICE_API_KEY` | `service_api_key` | `""` |
 | `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
 | `DEFAULT_CITY` | `default_city` | `""` |
+| `SPORTS_DEFAULT_TEAM` | `sports_default_team` | `""` (no default). The team a sports question is about when the query names none. Stripped, at most 64 characters of letters, digits, spaces and `. - '`; anything else is ignored with an error log. Empty: a sports question with no team goes to tool calling |
 | `OIDC_ISSUER` | `oidc_issuer` | `""` |
 | `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
 | `DEMO_MODE` | `demo_mode` | `false` |

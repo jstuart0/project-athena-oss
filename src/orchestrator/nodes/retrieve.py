@@ -17,6 +17,8 @@ import time
 
 import structlog
 
+from shared.config import get_config
+
 from orchestrator.nodes._runtime import (
     get_rag_client,
     get_parallel_search_engine,
@@ -24,6 +26,7 @@ from orchestrator.nodes._runtime import (
 )
 from orchestrator.model_safe_errors import RAGToolError, model_safe_error
 from orchestrator.rag_validator import validator, ValidationResult
+from orchestrator.sports_status import team_events
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.urls import WEBSEARCH_SERVICE_URL
 from orchestrator.utils.constants import DEFAULT_LOCATION
@@ -36,6 +39,11 @@ from orchestrator.helpers import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _sports_team(state: OrchestratorState) -> str:
+    """The team the query names, else the install's configured default (empty: none)."""
+    return state.entities.get("team") or get_config().sports_default_team
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +329,15 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # RAG service failed - fall back to web search
                     await _fallback_to_web_search(state, "Airports", str(e))
 
+        elif state.intent == IntentCategory.SPORTS and not _sports_team(state):
+            # No team named and no configured default: nothing to search. Empty
+            # data sends the turn to tool calling (by league) through the
+            # empty-RAG trigger.
+            state.retrieved_data = {}
+
         elif state.intent == IntentCategory.SPORTS:
+            team = _sports_team(state)
+
             # Get dynamic RAG service URL and update client if needed
             service_url = await get_rag_service_url("sports")
             if not service_url:
@@ -332,10 +348,6 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # Update RAG client URL if different from default
                     rag_client.update_service_url("sports", service_url)
 
-                    # Call sports service with unified RAG client
-                    team = state.entities.get("team", "Ravens")
-
-                    # Search for team
                     search_response = await rag_client.get(
                         "sports",
                         "/sports/teams/search",
@@ -347,87 +359,8 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     search_data = search_response.data
 
                     if search_data.get("teams"):
-                        team_info = search_data["teams"][0]
-                        team_id = team_info["idTeam"]
-                        team_full_name = team_info.get("strTeam", team)
-                        team_league = team_info.get("strLeague", "")
-
-                        # Determine league for live scores
-                        league_code_map = {
-                            "soccer/eng.1": "premier-league",
-                            "soccer/esp.1": "la-liga",
-                            "football/nfl": "nfl",
-                            "basketball/nba": "nba",
-                            "baseball/mlb": "mlb",
-                            "hockey/nhl": "nhl",
-                        }
-                        live_league = league_code_map.get(team_league, "nfl")
-
-                        # Fetch last events, next events, AND live scores in parallel
-                        # This provides comprehensive data for any sports query
-                        last_response, next_response, live_response = await asyncio.gather(
-                            rag_client.get("sports", f"/sports/events/{team_id}/last"),
-                            rag_client.get("sports", f"/sports/events/{team_id}/next"),
-                            rag_client.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
-                            return_exceptions=True
-                        )
-
-                        # Build combined response with past, upcoming, and live games
-                        events_data = {
-                            "team": team_full_name,
-                            "team_id": team_id,
-                            "league": team_league
-                        }
-
-                        # Process last games
-                        if isinstance(last_response, Exception) or not last_response.success:
-                            events_data["last_games"] = []
-                            logger.debug(f"Last events fetch failed: {last_response}")
-                        else:
-                            events_data["last_games"] = last_response.data.get("events", [])
-
-                        # Process next games (may include season_status if season ended)
-                        if isinstance(next_response, Exception) or not next_response.success:
-                            events_data["upcoming_games"] = []
-                            logger.debug(f"Next events fetch failed: {next_response}")
-                        else:
-                            next_events = next_response.data.get("events", [])
-                            events_data["upcoming_games"] = next_events
-                            # Check if season has ended
-                            if next_events and next_events[0].get("season_status") == "ended":
-                                events_data["season_status"] = "ended"
-                                events_data["team_record"] = next_events[0].get("team_record")
-                                events_data["team_standing"] = next_events[0].get("team_standing")
-                                events_data["season_message"] = next_events[0].get("message")
-
-                        # Process live scores
-                        if isinstance(live_response, Exception) or not live_response.success:
-                            events_data["live_games"] = []
-                        else:
-                            live_data = live_response.data
-                            live_games = live_data.get("games", [])
-                            # Filter to only games with this team
-                            team_lower = team_full_name.lower()
-                            matching_live = [
-                                g for g in live_games
-                                if team_lower in g.get("home_team", "").lower()
-                                or team_lower in g.get("away_team", "").lower()
-                            ]
-                            events_data["live_games"] = matching_live
-                            if matching_live:
-                                events_data["has_live_game"] = True
-                                game = matching_live[0]
-                                events_data["live_score_summary"] = (
-                                    f"{game['away_team']} {game['away_score']} - "
-                                    f"{game['home_score']} {game['home_team']} ({game['status']})"
-                                )
-
-                        logger.info(
-                            f"Sports data fetched for {team_full_name}",
-                            last_games=len(events_data.get("last_games", [])),
-                            upcoming_games=len(events_data.get("upcoming_games", [])),
-                            live_games=len(events_data.get("live_games", [])),
-                            season_ended=events_data.get("season_status") == "ended"
+                        events_data = await team_events(
+                            rag_client, search_data["teams"][0], team_name=team
                         )
 
                         # Validate Sports RAG response quality
