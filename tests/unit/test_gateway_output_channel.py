@@ -393,7 +393,7 @@ def test_a_failed_orchestrator_stream_returns_a_generic_error(client, orchestrat
     assert resp.status_code == 200
     assert "secret-internal-detail" not in resp.text
     assert gw.STREAM_ERROR_MESSAGE in resp.text
-    assert [c for c in log.error.call_args_list if c.kwargs.get("error") == "RuntimeError"], "class logged server-side"
+    assert [c for c in log.error.call_args_list if c.kwargs.get("error_type") == "RuntimeError"], "class logged server-side"
 
 
 def test_the_responses_stream_error_event_is_generic_and_well_formed(client, orchestrator, monkeypatch):

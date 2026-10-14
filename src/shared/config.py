@@ -131,6 +131,13 @@ class AthenaConfig(BaseSettings):
     # ------------------------------------------------------------------
     ollama_url: str = Field(default="http://localhost:11434")
     llm_service_url: str = Field(default="")
+    # athena_default_model: the model every component uses unless one is
+    #   configured for it (env ATHENA_DEFAULT_MODEL).
+    athena_default_model: str = Field(default="qwen3:4b-instruct-2507-q4_K_M")
+    # gateway_fallback_model: the Ollama model the gateway answers with when
+    #   the orchestrator can't, and the one an OpenAI "gpt-*" model name
+    #   resolves to. Empty (default) means use athena_default_model.
+    gateway_fallback_model: str = Field(default="")
 
     @computed_field  # type: ignore[prop-decorator]
     @property

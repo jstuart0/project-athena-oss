@@ -66,6 +66,8 @@ GLOBS = (
     "tests/unit/test_semantic_cache_audience.py",
     "tests/unit/test_bench_observability.py",
     "tests/unit/test_gateway_nonstream_continuity.py",
+    "tests/unit/test_gateway_spoken_failure.py",
+    "tests/unit/test_model_literal_drift.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
@@ -136,6 +138,8 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_semantic_cache_audience.py",
     "tests/unit/test_bench_observability.py",
     "tests/unit/test_gateway_nonstream_continuity.py",
+    "tests/unit/test_gateway_spoken_failure.py",
+    "tests/unit/test_model_literal_drift.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.
@@ -156,6 +160,7 @@ PREEXISTING_SHARED_STATE: Dict[str, str] = {
     "tests/unit/test_ha_permission_guard.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_ha_permission_wiring.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_gateway_speaker_room.py": "stubs prometheus_client only when absent",
+    "tests/unit/test_gateway_output_channel.py": "setdefault for SERVICE_API_KEY and ADMIN_API_URL, and a prometheus_client stub only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_gateway_simple_commands_routing.py": "setdefault for SERVICE_API_KEY and ADMIN_API_URL, and a prometheus_client stub only when absent; shared a step at the base",
     "tests/unit/test_room_light_area_tier.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_room_light_dispatch.py": "stubs langgraph and prometheus_client only when absent",

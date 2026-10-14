@@ -243,7 +243,7 @@ def test_G5_G9_maps_content_and_word_count_usage(monkeypatch):
     assert result.usage["completion_tokens"] == len("hi there friend".split())
 
 
-def test_G7_http_status_error_502_records_failure(monkeypatch):
+def _run_status_error(monkeypatch, status):
     breaker = mock.MagicMock()
     breaker.can_execute = mock.AsyncMock(return_value=True)
     breaker.record_failure = mock.AsyncMock()
@@ -251,14 +251,28 @@ def test_G7_http_status_error_502_records_failure(monkeypatch):
     monkeypatch.setattr(gw, "gateway_config", {"circuit_breaker_enabled": True})
 
     fake_client = _CapturingClient(
-        exc=httpx.HTTPStatusError("bad", request=mock.MagicMock(), response=mock.MagicMock(status_code=500))
+        exc=httpx.HTTPStatusError("bad", request=mock.MagicMock(), response=mock.MagicMock(status_code=status))
     )
     monkeypatch.setattr(gw, "orchestrator_client", fake_client)
+    ollama_mock = mock.AsyncMock()
+    monkeypatch.setattr(gw, "route_to_ollama", ollama_mock)
 
-    with pytest.raises(gw.HTTPException) as exc_info:
-        asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), room="kitchen", channel=OutputChannel.TEXT))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), room="kitchen", channel=OutputChannel.TEXT))
+    ollama_mock.assert_not_awaited()
+    return result, breaker
 
-    assert exc_info.value.status_code == 502
+
+def test_G7_deterministic_500_is_spoken_and_never_opens_the_breaker(monkeypatch):
+    result, breaker = _run_status_error(monkeypatch, 500)
+
+    assert result.choices[0].message.content == gw.SPOKEN_FAILURE_TEXT
+    breaker.record_failure.assert_not_awaited()
+
+
+def test_G7_503_is_spoken_and_records_failure(monkeypatch):
+    result, breaker = _run_status_error(monkeypatch, 503)
+
+    assert result.choices[0].message.content == gw.SPOKEN_FAILURE_TEXT
     breaker.record_failure.assert_awaited_once()
 
 
