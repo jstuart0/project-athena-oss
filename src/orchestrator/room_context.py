@@ -117,8 +117,9 @@ UNPROCESSABLE_TEXT = "Sorry, I couldn't work out that command."
 # Why a model call gave nothing to act on: the query was over the cap, the
 # context budget could not hold the whole prompt, the answer hit its token
 # limit, the JSON was not an object, or (a backend that can't promise the whole
-# prompt was read) it did not parse.
-UNPROCESSABLE_REASONS = ("too_long", "budget", "length", "not_object", "unparseable", "unverified")
+# prompt was read) it did not parse, or a command came back as a status read
+# or without an explicit on/off.
+UNPROCESSABLE_REASONS = ("too_long", "budget", "length", "not_object", "unparseable", "unverified", "imperative_unresolved")
 
 
 def utf8_len(text: object) -> int:

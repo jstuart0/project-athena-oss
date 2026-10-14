@@ -657,16 +657,18 @@ class TestUnparseableAnswers:
         chat.turn(LIGHT_QUERY)
         assert ("light", "turn_on") in writes(chat)
 
-    def test_an_imperative_without_one_asks_for_a_status_instead_of_guessing(self, monkeypatch):
-        """No explicit on/off in the words: the old substring legs are gone."""
+    def test_an_imperative_without_one_is_unresolved_and_never_answered_as_a_read(self, monkeypatch):
+        """No explicit on/off in the words: the old substring legs are gone, and a
+        command is not answered with a status read either (T3): nothing is done."""
         llm = Scripted(("reply", GARBLED, "stop"))
         chat = light_chat(monkeypatch, llm)
         controller = chat.rig.controller
         from orchestrator.utterance_kind import classify_utterance
         assert classify_utterance(CALMER_QUERY).kind.name == "IMPERATIVE" and classify_utterance(CALMER_QUERY).target_state is None
         intent = asyncio.run(controller.extract_intent(CALMER_QUERY))
-        assert llm.calls and intent["action"] == "get_status"
-        chat.turn(CALMER_QUERY)
+        assert llm.calls and intent == room_context.unprocessable_intent("imperative_unresolved")
+        out = chat.turn(CALMER_QUERY)
+        assert out.answer == room_context.UNPROCESSABLE_TEXT
         assert writes(chat) == []
 
     def test_a_substring_that_looks_like_on_does_not_turn_anything_on(self, monkeypatch):

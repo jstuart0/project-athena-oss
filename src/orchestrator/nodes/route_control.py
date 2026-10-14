@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 from uuid import uuid4
 
 import structlog
@@ -63,6 +63,8 @@ from orchestrator.utterance_kind import (
     UtteranceClassification,
     UtteranceKind,
     classify_utterance,
+    command_query,
+    has_narration,
 )
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 from orchestrator.context.detector import context_ref_view
@@ -538,11 +540,15 @@ def _carry_decision(
     intent["referent_followup"] = earlier["decided_room"] == "whole_house"
 
 
-def _carried_cue_query(prev_params: Any, intent: Dict[str, Any], state: OrchestratorState) -> Optional[str]:
-    """The earlier command's words plus this turn's, when this turn continues
-    that command and may count its cue: the same caller and audience, the same
-    device type, and the action is the earlier turn's (not a new one). The room
-    decision and the fan-out gate still read only this turn's words."""
+def _carried_cue_query(
+    prev_params: Any, intent: Dict[str, Any], state: OrchestratorState, command: Optional[str] = None,
+    assistant_names: Sequence[str] = (),
+) -> Optional[str]:
+    """The earlier command's words plus this turn's command words, when this
+    turn continues that command and may count its cue: the same caller and
+    audience, the same device type, and the action is the earlier turn's (not
+    a new one). Only command words are joined: narration never carries over.
+    The room decision and the fan-out gate still read only this turn's words."""
     cue = prev_params.get("write_cue") if isinstance(prev_params, dict) else None
     if not isinstance(cue, dict) or not state.caller_fingerprint:
         return None
@@ -554,7 +560,12 @@ def _carried_cue_query(prev_params: Any, intent: Dict[str, Any], state: Orchestr
         return None
     if access_target.has_negator(state.query):
         return None  # "no, not that one": a negated turn does not borrow a cue
-    return f"{cue['query']}. {state.query}"
+    this_turn = classify_utterance(state.query, assistant_names=assistant_names)
+    if this_turn.kind != UtteranceKind.IMPERATIVE and has_narration(state.query, assistant_names):
+        return None  # narration borrows no cue ("they turn them off at night")
+    if command is None:
+        command = command_query(this_turn, state.query)
+    return f"{cue['query']}. {command}"
 
 
 def _carry_pending(state: OrchestratorState, foreign_pending: bool) -> bool:
@@ -934,7 +945,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         # UNKNOWN when the kill switch is enabled (legacy behaviour).
         kill_switch_config = await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)
         state_question_kill_switch = kill_switch_config.get("enabled", False)
-        real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names(state.knowledge_audience))
+        assistant_names = await _configured_assistant_names(state.knowledge_audience)
+        real_uk = classify_utterance(state.query, assistant_names=assistant_names)
         extraction_query = state.query
         clarification = _clarification_reply(state, real_uk)
         if clarification is not None:
@@ -944,6 +956,11 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
             state.prev_context = None
             state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
         uk = _KILL_SWITCH_CLASSIFICATION if state_question_kill_switch else real_uk
+        # The words to extract from and to execute: the command clauses only,
+        # so narration around a command (colours, rooms, "everywhere") never
+        # reaches the extractor, the room decision or the write cue. The
+        # kill switch reverts question routing, not this.
+        cmd = command_query(real_uk, extraction_query)
 
         # HA STATUS QUERY OPTIMIZATION (2026-01-12)
         # Detect status queries and use optimized bulk HA state queries
@@ -1075,7 +1092,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # about. Still under the read-only scope, and only a
                         # get_status is ever dispatched.
                         extracted = await smart_controller.extract_intent(
-                            extraction_query, device_room=state.room, utterance=uk
+                            cmd, device_room=state.room, utterance=uk
                         )
                         if _answer_unprocessable(state, extracted):
                             state.node_timings["route_control"] = time.time() - start
@@ -1148,7 +1165,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 automation_mode = await get_automation_system_mode()
 
                 # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
-                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
+                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query, assistant_names):
                     logger.info(f"Dynamic agent mode - routing to automation agent: query_len={len(state.query)}")
 
                     # Build context for automation agent
@@ -1304,7 +1321,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     # Extract intent with conversation context for corrections/follow-ups
                     # e.g., "no, just my side" after "Warming bed on both sides at level 3"
                     new_intent = await smart_controller.extract_intent(
-                        state.query,
+                        cmd,
                         device_room=state.room,
                         prev_query=prev_query,
                         prev_response=prev_response,
@@ -1387,7 +1404,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         elif "different color" in query_lower or "another color" in query_lower:
                             # Re-extract to get new colors with context
                             intent = await smart_controller.extract_intent(
-                                state.query + " different colors",
+                                cmd + " different colors",
                                 device_room=state.room,
                                 prev_query=prev_query,
                                 prev_response=prev_response,
@@ -1419,7 +1436,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 else:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
-                    intent = await smart_controller.extract_intent(state.query, device_room=state.room, utterance=uk)
+                    intent = await smart_controller.extract_intent(cmd, device_room=state.room, utterance=uk)
                     if _answer_unprocessable(state, intent):
                         state.node_timings["route_control"] = time.time() - start
                         return state
@@ -1445,12 +1462,12 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # the same caller, audience, device and action, judged on the
                 # final intent (after every override above).
                 cue_query = (
-                    _carried_cue_query(state.prev_context.get("parameters"), intent, state)
+                    _carried_cue_query(state.prev_context.get("parameters"), intent, state, cmd, assistant_names)
                     if has_context and ref_info.get("has_context_ref") and state.prev_context else None
                 )
                 await _execute_and_record(
-                    state, scope, intent, original_query=state.query, uk=uk,
-                    foreign_pending=foreign_pending, store_query=state.query, cue_query=cue_query,
+                    state, scope, intent, original_query=cmd, uk=uk,
+                    foreign_pending=foreign_pending, store_query=cmd, cue_query=cue_query,
                 )
 
         else:

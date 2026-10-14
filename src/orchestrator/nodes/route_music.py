@@ -33,6 +33,7 @@ from orchestrator.utterance_kind import (
     STATE_QUESTION_KILL_SWITCH_FLAG,
     UtteranceKind,
     classify_utterance,
+    command_query,
 )
 
 logger = structlog.get_logger(__name__)
@@ -59,6 +60,22 @@ def _music_command_hint(action) -> "str | None":
     command."""
     command = _MUSIC_COMMANDS.get(action or "")
     return f"To do that, say: {command}." if command else None
+
+
+def _write_refusal(uk, query, names) -> "str | None":
+    # Called at dispatch time: smart_home_controller imports the sequence executor and
+    # is not loaded by the nodes package.
+    from orchestrator.smart_home_controller import media_write_refusal
+
+    return media_write_refusal(uk.kind, query, names)
+
+
+def _refused(state: OrchestratorState, text: str, start: float) -> OrchestratorState:
+    """Nothing was asked of the music: say so, change nothing, store nothing."""
+    state.answer = text
+    state.error = "no_write_cue"
+    state.node_timings["route_music"] = time.time() - start
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +133,9 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
         # ATHENA-128: a state question ("is music playing") runs under a
         # read-only scope here too -- defence in depth, since its parse
         # already yields a read (now_playing). The kill switch reverts it.
-        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names(state.knowledge_audience))
+        names = await configured_assistant_names(state.knowledge_audience)
+        uk = classify_utterance(state.query, assistant_names=names)
+        cmd = command_query(uk, state.query)
         kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
@@ -157,9 +176,13 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                 state.retrieved_data = {"music_intent": {**intent_data, "action": "now_playing"}}
 
             elif state.intent == IntentCategory.MUSIC_PLAY:
+                # Every play is a write: a request must back it.
+                refusal = _write_refusal(uk, state.query, names)
+                if refusal:
+                    return _refused(state, refusal, start)
                 # Parse the play intent, passing interface_type for browser detection
                 intent_data = await music_handler.parse_music_play_intent(
-                    state.query,
+                    cmd,
                     room=state.room,
                     interface_type=getattr(state, 'interface_type', None)
                 )
@@ -235,9 +258,15 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
             elif state.intent == IntentCategory.MUSIC_CONTROL:
                 # Parse the control intent
                 intent_data = await music_handler.parse_music_control_intent(
-                    state.query,
+                    cmd,
                     room=state.room
                 )
+
+                # A control that changes playback is a write: a request must
+                # back it. Asking what is playing is a read.
+                refusal = None if intent_data.get("action") == "now_playing" else _write_refusal(uk, state.query, names)
+                if refusal:
+                    return _refused(state, refusal, start)
 
                 result = await music_handler.handle_control(
                     action=intent_data.get("action"),

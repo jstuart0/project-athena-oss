@@ -27,11 +27,70 @@ from shared.output_channel import render_sink_text
 from orchestrator import access_target
 from orchestrator.model_safe_errors import make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance, command_query, has_narration, is_narration
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
 # in sequence_executor.py.
 
 logger = structlog.get_logger()
+
+
+# The device kind a service domain changes, for the write cue. Lock, cover
+# and script act on the house in ways narration must never reach: they need a
+# command, not just words that mention them.
+_SERVICE_KINDS = {
+    "light": "light", "switch": "switch", "fan": "fan", "media_player": "media_player", "climate": "climate",
+    "cover": "cover", "lock": "lock", "script": "script",
+}
+_COMMAND_ONLY_KINDS = frozenset({"cover", "lock"})
+
+
+async def _assistant_names() -> tuple:
+    from orchestrator.helpers import configured_assistant_names  # lazy: helpers imports the nodes package
+    try:
+        return tuple(await configured_assistant_names())
+    except Exception:
+        return ()
+
+
+def _narration_refusal(context: Any, names: tuple = ()) -> Optional[str]:
+    """The no-request answer when any clause of the words the agent was given
+    is narration ("they turn the lights off at night"): none of its write
+    tools acts on them. None when the words hold only requests, conditions or
+    an automation."""
+    query = context.get("query") if isinstance(context, dict) else None
+    if isinstance(query, str) and (has_narration(query, names) or is_narration(query, names)):
+        from orchestrator.smart_home_controller import NO_WRITE_CUE_TEXT  # lazy, like mode_permission (see above)
+        return NO_WRITE_CUE_TEXT
+    return None
+
+
+def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple = ()) -> Optional[str]:
+    """An immediate service call needs a cue in the words, judged by the same
+    rule the controller applies to a spoken command. A domain with no device
+    kind of its own (an input boolean, an automation, an alarm panel) needs a
+    command."""
+    query = context.get("query") if isinstance(context, dict) else None
+    if not isinstance(query, str):
+        return None
+    domain_key = str(domain).lower()
+    kind = _SERVICE_KINDS.get(domain_key, domain_key)
+    from orchestrator.smart_home_controller import (  # lazy, like mode_permission (see above)
+        NO_DEVICE_TEXT, NO_WRITE_CUE_TEXT, scene_request_allowed,
+    )
+    uk = classify_utterance(query, assistant_names=names)
+    if uk.kind == UtteranceKind.STATE_QUESTION:
+        return None  # a question's write is stopped by the read-only scope or the fan-out gate
+    if kind in ("scene", "script"):
+        return None if scene_request_allowed(uk) else NO_WRITE_CUE_TEXT
+    if kind in _COMMAND_ONLY_KINDS or kind not in _SERVICE_KINDS.values():
+        return None if uk.kind == UtteranceKind.IMPERATIVE else NO_WRITE_CUE_TEXT
+    problem = access_target.write_cue_problem(
+        kind, service, command_query(uk, query), kind_hint=uk.kind, assistant_names=names,
+    )
+    if problem is None:
+        return None
+    return NO_DEVICE_TEXT if problem == access_target.WRONG_DEVICE else NO_WRITE_CUE_TEXT
 
 
 # Tool definitions for the LLM
@@ -901,6 +960,10 @@ class AutomationAgent:
         refusal = write_fanout.question_refusal(domain, service, (entity_id,) if entity_id else ())
         if refusal:
             return refusal
+        names = await _assistant_names()
+        refusal = _narration_refusal(context, names) or _service_cue_refusal(domain, service, context, names)
+        if refusal:
+            return refusal
 
         from orchestrator.mode_permission import HADenial, HAWritePermissionDenied, current_ha_scope, refusal_message
         try:
@@ -927,6 +990,9 @@ class AutomationAgent:
             return NO_CALLER_REFUSAL
         from orchestrator import write_fanout  # lazy, like mode_permission (see above)
         refusal = write_fanout.question_refusal("automation", "create", (args.get("name") or "automation",))
+        if refusal:
+            return refusal
+        refusal = _narration_refusal(context, await _assistant_names())
         if refusal:
             return refusal
 
@@ -1405,6 +1471,9 @@ class AutomationAgent:
         )
         if refusal:
             return refusal
+        refusal = _narration_refusal(context, await _assistant_names())
+        if refusal:
+            return refusal
 
         automation_id = args.get("automation_id")
 
@@ -1468,6 +1537,9 @@ class AutomationAgent:
         """Send a notification via TTS, mobile push, or flashing lights."""
         from orchestrator import write_fanout  # lazy, like mode_permission (see above)
         refusal = write_fanout.question_refusal("notify", "notify", (args.get("target", "tts"),))
+        if refusal:
+            return refusal
+        refusal = _narration_refusal(context, await _assistant_names())
         if refusal:
             return refusal
 
@@ -1569,7 +1641,16 @@ class AutomationAgent:
             await self.ha_client.call_service("light", "turn_on", restore_data)
 
 
-def should_use_automation_agent(query: str) -> bool:
+_SCHEDULE_LED_RE = re.compile(
+    r"^\s*(?:(?:in|after)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)"
+    r"\s*(?:seconds?|secs?|minutes?|mins?|hours?)\s+"
+    r"|at\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?|noon|midnight|sunset|sunrise)\s+"
+    r"|if\s+[^,]{3,80},\s*)"
+    r"(?:please\s+)?(?:turn|switch|lock|unlock|open|close|dim|set|start|stop|play|pause|activate|run)\b"
+)
+
+
+def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     """
     Determine if a query should be handled by the automation agent.
 
@@ -1586,6 +1667,10 @@ def should_use_automation_agent(query: str) -> bool:
     - Information queries
     """
     query_lower = query.lower()
+
+    # Words that only describe what someone does or says ask for nothing.
+    if is_narration(query, assistant_names):
+        return False
 
     # EXCLUSIONS FIRST - these should NEVER go to automation agent
     # Simple brightness commands - immediate, not scheduled
@@ -1723,6 +1808,12 @@ def should_use_automation_agent(query: str) -> bool:
     has_event = any(p in query_lower for p in event_patterns)
     has_time_pattern = any(p in query_lower for p in time_pattern_patterns)
     has_automation_mgmt = any(p in query_lower for p in automation_management_patterns)
+
+    # A command led by a time or a condition ("in 5 minutes lock the door", "at 11 turn
+    # off the lights", "if it gets dark, turn on the porch light") is never for now:
+    # the agent sets it up.
+    if has_home_device and _SCHEDULE_LED_RE.search(query_lower):
+        return True
 
     # Only return True if we have clear home automation intent
     if has_automation_mgmt:
