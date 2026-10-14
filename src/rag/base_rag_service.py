@@ -4,6 +4,7 @@ Loads configuration from PostgreSQL and provides caching
 """
 
 import json
+import os
 import httpx
 import asyncio
 import hashlib

@@ -984,7 +984,6 @@ class SmartHomeController:
 
         # Additional safety check: exclude "bedroom" from matching "bed"
         # "bedroom" should NOT trigger bed warming - only standalone "bed" should
-        import re
         has_bed_keyword = bool(re.search(r'\bbed\b(?!room)', query_lower))  # Match "bed" but not "bedroom"
         has_mattress_keyword = 'mattress' in query_lower
         has_side_keyword = any(kw in query_lower for kw in ['my side', 'left side', 'right side'])

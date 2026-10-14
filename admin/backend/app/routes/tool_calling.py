@@ -1196,9 +1196,6 @@ async def list_tools_with_api_keys(
     return result
 
 
-from sqlalchemy.types import Integer as IntegerType
-# Fix import for Integer type casting
-Integer = IntegerType
 
 
 # ============================================================================
@@ -1249,7 +1246,6 @@ async def discover_mcp_tools(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     import httpx
-    import os
     from app.models import FeatureFlag
 
     # H-3 fix: read N8N_MCP_URL exactly once to avoid a read-then-classify mismatch
@@ -1439,7 +1435,6 @@ async def get_mcp_status(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    import os
     from app.models import FeatureFlag, MCPSecurity
 
     # Get feature flags
@@ -1501,7 +1496,6 @@ async def refresh_tool_registry(
 
     import httpx
     import time
-    import os
 
     orchestrator_url = service_urls.orchestrator_url()
 

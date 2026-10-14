@@ -1095,7 +1095,6 @@ async def get_ollama_url_internal(
 
     Returns just the URL string for easy consumption. Requires the service key, or a signed-in user with read permission.
     """
-    import os
 
     try:
         setting = db.query(SystemSetting).filter(

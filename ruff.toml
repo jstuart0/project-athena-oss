@@ -1,0 +1,13 @@
+# Correctness-only lint: undefined names (F821/F822/F823), redefinitions that
+# shadow a live definition (F811) and syntax errors (E9). Style rules are not
+# enforced here. Run by .github/workflows/lint.yml and pinned by
+# tests/unit/test_lint_gate.py.
+target-version = "py311"
+
+# src/jetson/athena_lite_llm.py is excluded because it does not parse (a syntax error at line 139) and Jetson is
+# documentation-only in this repo (D6: Jetson is not made runnable). Remove the exclude
+# when that file is fixed or deleted.
+extend-exclude = ["src/jetson/athena_lite_llm.py"]
+
+[lint]
+select = ["F821", "F822", "F823", "F811", "E9"]

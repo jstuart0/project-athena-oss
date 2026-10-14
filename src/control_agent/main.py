@@ -1588,7 +1588,6 @@ async def hf_delete_downloaded(file_path: str):
 # Serve debug logs from the control-agent host filesystem
 
 import re
-import json
 from datetime import timedelta
 
 # Primary structured debug log directory (written when ATHENA_DEBUG_MODE=true)

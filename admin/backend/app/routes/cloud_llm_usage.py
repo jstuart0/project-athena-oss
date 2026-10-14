@@ -529,7 +529,7 @@ async def purge_old_usage(
 # =============================================================================
 
 @router.get("/cost-alerts")
-async def get_cost_alerts(
+async def get_cost_alerts(  # noqa: F811  same function name, distinct routes (/alerts and /cost-alerts); both are served
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

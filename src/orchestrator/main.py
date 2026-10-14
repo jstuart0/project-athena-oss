@@ -57,7 +57,6 @@ from shared.assistant_profile import build_core_assistant_prompt
 from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
-from shared.config import get_config
 import shared.config as _shared_config  # alias to survive the orchestrator.config_loader rebinding below
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.metrics import record_tool_execution, get_metrics_text, record_timing_metrics
@@ -267,7 +266,7 @@ if not EVENTS_AVAILABLE:
     logger.warning("Event system not available - Admin Jarvis monitoring disabled")
 
 # Service API key for service-to-service auth (admin backend internal endpoints)
-# Use _shared_config alias because orchestrator.config_loader.get_config (line 64)
+# Use _shared_config alias because the `from orchestrator.config_loader import get_config` import
 # shadowed shared.config.get_config in this module's namespace.
 _SERVICE_API_KEY = _shared_config.get_config().service_api_key
 if not _SERVICE_API_KEY:

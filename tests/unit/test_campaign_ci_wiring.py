@@ -59,6 +59,13 @@ GLOBS = (
     "tests/unit/test_llm_direct_ollama_drift.py",
     "tests/unit/test_model_json_strip.py",
     "tests/unit/test_access_target_drift.py",
+    "tests/unit/test_lint_gate.py",
+    "tests/unit/test_validate.py",
+    "tests/unit/test_retrieve.py",
+    "tests/unit/test_context_detector_dining.py",
+    "tests/unit/test_semantic_cache_audience.py",
+    "tests/unit/test_bench_observability.py",
+    "tests/unit/test_gateway_nonstream_continuity.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
     "admin/backend/tests/test_room_tv_audio_*.py",
@@ -122,6 +129,13 @@ CAMPAIGN_TESTS = (
     "admin/backend/tests/test_oss_profiles_context.py",
     "tests/unit/test_motion_control_rooms.py",
     "tests/unit/test_media_rag_seerr.py",
+    "tests/unit/test_lint_gate.py",
+    "tests/unit/test_validate.py",
+    "tests/unit/test_retrieve.py",
+    "tests/unit/test_context_detector_dining.py",
+    "tests/unit/test_semantic_cache_audience.py",
+    "tests/unit/test_bench_observability.py",
+    "tests/unit/test_gateway_nonstream_continuity.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

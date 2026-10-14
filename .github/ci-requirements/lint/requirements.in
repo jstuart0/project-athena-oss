@@ -1,0 +1,8 @@
+# The lint job (.github/workflows/lint.yml): ruff itself, and the minimum to run
+# tests/unit/test_lint_gate.py (pytest, structlog for tests/unit/conftest.py,
+# pyyaml to parse the workflow). Compiled with
+# `pip-compile --generate-hashes --allow-unsafe`.
+ruff==0.17.0
+pytest==9.1.1
+structlog==23.2.0
+pyyaml

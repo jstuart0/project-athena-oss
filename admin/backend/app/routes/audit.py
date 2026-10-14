@@ -199,7 +199,7 @@ async def get_audit_stats(
 
 
 @router.get("/recent")
-async def get_recent_audit_logs(
+async def get_recent_audit_logs(  # noqa: F811  duplicate route path, both registered; the first registration serves requests. Left so the route table is unchanged
     limit: int = Query(20, ge=1, le=100, description="Number of recent logs to return"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
