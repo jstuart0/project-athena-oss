@@ -200,6 +200,8 @@ _DECIDED_DOMAINS = {
 }
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
+SKIPPED_STEP_NOTE = "I couldn't check that one."
+READ_ONLY_ACTIONS = frozenset({"get_status", "check_status", "status", "check", "read"})
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -2819,7 +2821,7 @@ Return ONLY valid JSON."""
         target['decided_access_at'] = _wall_clock()
 
     async def decide_sequence_rooms(
-        self, steps: Sequence[Dict], query: str, device_room: Optional[str],
+        self, steps: List[Dict], query: str, device_room: Optional[str], notes: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Decide every sequence step's room before anything is scheduled.
 
@@ -2842,16 +2844,28 @@ Return ONLY valid JSON."""
         scene_text = await self._plan_sequence_scenes(steps, query)
         if scene_text is not None:
             return scene_text
-        unbacked = await self._first_unbacked_step(steps, query)
-        if unbacked:
+        clauses = room_context.step_clauses(query, self._directory())
+        aligned = len(clauses) == len(steps)
+        unbacked = await self._unbacked_steps(steps, query, clauses)
+        if any(not self._reads_only(steps[i]) for i in unbacked):
             return NO_DEVICE_TEXT
+        if unbacked:
+            # A status check nothing backs is skipped with a note; the rest
+            # of the plan runs. A write nothing backs refused the plan above.
+            steps[:] = [st for i, st in enumerate(steps) if i not in unbacked]
+            if aligned:
+                clauses = [c for i, c in enumerate(clauses) if i not in unbacked]
+            if notes is not None:
+                notes.append(SKIPPED_STEP_NOTE)
+            if not steps:
+                return SKIPPED_STEP_NOTE
         door_text = await self._plan_sequence_doors(steps, query)
         if door_text is not None:
             return door_text
         whole_houses = None
         whole_house_index = 0
+        unresolved: set = set()
         directory = self._directory()
-        clauses = room_context.step_clauses(query, directory)
         for index, step in enumerate(steps):
             target = step.get('target') or {}
             device_type = target.get('device_type', 'light')
@@ -2876,6 +2890,9 @@ Return ONLY valid JSON."""
             if not domain:
                 refusal = await self._plan_other_step(target, device_type, clause, query, device_room, directory, dropped)
                 if refusal is not None:
+                    if self._reads_only(step):
+                        unresolved.add(index)
+                        continue
                     return refusal
                 continue
             if target.get('entity_id'):
@@ -2911,36 +2928,59 @@ Return ONLY valid JSON."""
                 intent, clause, device_room, step.get('action', 'turn_on'), domain, record=False,
             )
             if outcome is not None:
+                if self._reads_only(step):
+                    unresolved.add(index)
+                    continue
                 return outcome
             target.update({k: v for k, v in intent.items() if k in (
                 'room', 'rooms', 'excluded_rooms', 'decided_room', 'decided_rooms', 'decided_excluded', 'room_label')})
+        if unresolved:
+            steps[:] = [st for i, st in enumerate(steps) if i not in unresolved]
+            if notes is not None:
+                notes.append(SKIPPED_STEP_NOTE)
+            if not steps:
+                return SKIPPED_STEP_NOTE
         return None
 
-    async def _first_unbacked_step(self, steps: Sequence[Dict], query: str) -> bool:
-        """Whether some step's device type is not asked for by its own words
-        (``access_target.device_backed``), or by the friendly name of the
-        entity it carries. A model-invented step ("set the temperature" for
-        "turn on the lights") writes nothing. Scenes are grounded apart, and
-        a step carrying a door's id is judged by the door's kind."""
+    async def _unbacked_steps(self, steps: Sequence[Dict], query: str, clauses: Sequence[str]) -> List[int]:
+        """The indexes of steps whose device type is not asked for by their
+        own words (``access_target.device_backed``), or by the friendly name
+        of the entity they carry. A model-invented step ("set the
+        temperature" for "turn on the lights") is one. A clause naming no
+        device takes the device of the nearest earlier clause that names one.
+        Scenes are grounded apart, and a step carrying a door's id is judged
+        by the door's kind."""
         directory = self._directory()
-        clauses = room_context.step_clauses(query, directory)
+        aligned = len(clauses) == len(steps)
+        found: List[int] = []
         for index, step in enumerate(steps):
             target = step.get('target') or {}
             device_type = target.get('device_type', 'light')
             entity_id = target.get('entity_id')
             if device_type == 'scene' or (isinstance(entity_id, str) and entity_id.startswith(('scene.', 'script.'))):
                 continue
-            clause = clauses[index] if len(clauses) == len(steps) else query
+            clause = clauses[index] if aligned else query
+            antecedent = None
+            if aligned:
+                antecedent = next(
+                    (c for c in reversed(clauses[:index]) if access_target.names_device(c)), None,
+                )
             action = step.get('action')
-            if access_target.device_backed(device_type, clause, query, action):
+            if access_target.device_backed(device_type, clause, query, action, antecedent):
                 continue
             door = access_target.entity_domain(entity_id)
-            if door in ('lock', 'cover') and access_target.device_backed(door, clause, query, action):
+            if door in ('lock', 'cover') and access_target.device_backed(door, clause, query, action, antecedent):
                 continue
             if entity_id and await self._entity_named_in(entity_id, clause, query, directory):
                 continue
-            return True
-        return False
+            found.append(index)
+        return found
+
+    @staticmethod
+    def _reads_only(step: Dict) -> bool:
+        """Whether a step's action never writes (a status check)."""
+        action = step.get('action')
+        return isinstance(action, str) and action.strip().lower() in READ_ONLY_ACTIONS
 
     async def _entity_named_in(self, entity_id, clause: str, query: str, directory) -> bool:
         """Whether a model's entity id is one the step's own words call by

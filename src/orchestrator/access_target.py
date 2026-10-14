@@ -271,32 +271,44 @@ def _says_a_temperature(toks: Sequence[str]) -> bool:
     )
 
 
-def device_backed(device_type: Any, clause: Optional[str], query: Optional[str], action: Any = None) -> bool:
-    """Whether the step's own words ask for this kind of device: a word of the
-    type's table in the clause. A clause that names no device of any kind
-    ("then dim it") is a referent, and the utterance may back it. A light is
-    also the default for a clause that names no other device, and for a colour
-    or brightness action. A type the table does not know is not backed."""
+def names_device(text: Optional[str]) -> bool:
+    """Whether the words name a device of any kind in the table."""
+    spoken = frozenset(tokens(text or ""))
+    return any(spoken & words for words in DEVICE_WORDS.values())
+
+
+def device_backed(
+    device_type: Any, clause: Optional[str], query: Optional[str], action: Any = None,
+    antecedent: Optional[str] = None,
+) -> bool:
+    """Whether the step's own words ask for this kind of device.
+
+    A word of the type's table in the clause backs it. A clause that names
+    another device does not (a colour or brightness action on a light
+    excepted). A clause that names no device at all ("then raise it") is a
+    referent and takes its antecedent's device: ``antecedent`` is the nearest
+    earlier clause that names one, and the step's type must be one of its
+    kinds. With no antecedent, the utterance backs it, and a light is the
+    default only when the utterance names no device anywhere. A type the table
+    does not know is not backed."""
     kind = device_kind(device_type)
     if kind is None:
         return False
+
     def words(text: Optional[str]) -> frozenset:
         return frozenset(tokens(text or ""))
 
     clause_words = words(clause)
     if clause_words & DEVICE_WORDS[kind]:
         return True
-    others = [k for k in DEVICE_WORDS if k != kind and k != "light"]
-    names_other = any(clause_words & DEVICE_WORDS[k] for k in others) or (
-        kind != "light" and bool(clause_words & DEVICE_WORDS["light"])
-    )
-    if kind == "light":
-        return not names_other or (isinstance(action, str) and action in _LIGHT_ACTIONS)
-    if names_other:
-        return False
+    if names_device(clause):
+        return kind == "light" and isinstance(action, str) and action in _LIGHT_ACTIONS
     if kind == "climate" and _says_a_temperature(tokens(clause or "")):
         return True
-    # A referent clause: the utterance backs it.
+    if antecedent is not None:
+        return bool(words(antecedent) & DEVICE_WORDS[kind])
+    if not names_device(query):
+        return kind == "light"
     return bool(words(query) & DEVICE_WORDS[kind])
 
 

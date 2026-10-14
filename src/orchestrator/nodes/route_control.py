@@ -1178,8 +1178,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # is scheduled. A step that needs a question gets the
                         # question and nothing is scheduled or stored: a
                         # sequence never carries a pending (ATHENA-128).
+                        skipped_notes: list = []
                         step_question = await smart_controller.decide_sequence_rooms(
-                            steps, state.query, state.room
+                            steps, state.query, state.room, skipped_notes
                         )
                         if step_question is not None:
                             state.answer = step_question
@@ -1199,6 +1200,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             state.error = "permission_denied"
                             state.node_timings["route_control"] = time.time() - start
                             return state
+
+                        if skipped_notes:
+                            acknowledge = f"{acknowledge} {' '.join(skipped_notes)}"
 
                         logger.info(f"Executing sequence with {len(steps)} steps")
 

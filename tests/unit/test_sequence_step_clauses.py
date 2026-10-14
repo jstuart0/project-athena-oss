@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import pytest  # noqa: E402
+from unittest.mock import AsyncMock  # noqa: E402
 
 import orchestrator.smart_home_controller as shc  # noqa: E402
 from orchestrator import access_target, room_context  # noqa: E402
@@ -1202,3 +1203,163 @@ class TestAStepNeedsItsOwnDeviceWord:
         assert rig.plan(steps, "turn on the lights") == shc.NO_DEVICE_TEXT
         assert rig.run_plan(steps, "turn on the lights") == shc.NO_DEVICE_TEXT
         assert rig.calls == []
+
+
+class TestAReferentStepTakesItsAntecedentsDevice:
+    def _calls(self, rig):
+        return [(c.args[0], c.args[1], (c.args[2] or {}).get("entity_id")) for c in rig.raw.call_service.await_args_list]
+
+    QUERY = "set the thermostat in the hall to 70 then raise it to 72"
+
+    def test_codexs_invented_light_step_for_raise_it_writes_nothing(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70),
+                 _room_step("set_brightness", "hall")]
+        assert rig.run(steps, self.QUERY) == shc.NO_DEVICE_TEXT
+        assert rig.raw.call_service.await_count == 0
+
+    def test_a_climate_second_step_is_the_thermostat(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70),
+                 _typed_step("climate", "set_temperature", temperature=72)]
+        assert rig.run(steps, self.QUERY) is None
+        assert [c[2] for c in self._calls(rig)] == ["climate.thermostat", "climate.thermostat"]
+
+    def test_turn_on_the_hall_light_then_dim_it_still_works(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "hall"), _room_step("set_brightness", "hall")]
+        assert rig.plan(steps, "turn on the hall light then dim it") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["hall", "hall"]
+
+    def test_turn_on_the_lights_with_no_other_device_defaults_to_light(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_on", "hall")]
+        assert rig.plan(steps, "turn on the lights in the hall") is None
+
+    def test_the_antecedent_is_the_nearest_earlier_device_clause(self):
+        backed = access_target.device_backed
+        assert backed("light", "dim it", "x", None, antecedent="turn on the hall light") is True
+        assert backed("light", "dim it", "x", None, antecedent="set the thermostat to 70") is False
+        assert backed("climate", "raise it", "x", None, antecedent="set the thermostat to 70") is True
+
+    def test_a_light_is_the_default_only_when_the_utterance_names_no_device(self):
+        backed = access_target.device_backed
+        assert backed("light", "dim it", "dim it") is True
+        assert backed("light", "dim it", "dim it then turn on the tv") is False
+        assert backed("climate", "raise it", "raise it") is False
+
+    def test_the_nearest_earlier_clause_wins_over_a_farther_one(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_room_step("turn_on", "hall"), _typed_step("climate", "set_temperature", temperature=70),
+                 _room_step("set_brightness", "hall")]
+        query = "turn on the hall light then set the thermostat to 70 then dim it"
+        assert rig.plan(steps, query) == shc.NO_DEVICE_TEXT
+
+
+class TestAStatusStepNothingBacksIsSkippedNotThePlan:
+    def _plan(self, rig, steps, query):
+        notes = []
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                return await rig.controller.decide_sequence_rooms(steps, query, None, notes)
+
+        return asyncio.run(go()), notes
+
+    def test_sq10s_shape_schedules_the_lights_off_step_and_skips_the_status(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "get_status", room="hall"), _room_step("turn_off", "hall")]
+        query = "tell me if the hall fan is running and turn the hall lights off in two minutes"
+        text, notes = self._plan(rig, steps, query)
+        assert text is None and notes == [shc.SKIPPED_STEP_NOTE]
+        assert len(steps) == 1 and steps[0]["action"] == "turn_off"
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_the_remaining_steps_keep_their_own_clauses(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "get_status", room="hall"), _room_step("turn_off", "galley")]
+        query = "tell me if the hall fan is running and turn the galley lights off in two minutes"
+        text, _ = self._plan(rig, steps, query)
+        assert text is None and steps[0]["target"]["decided_room"] == "galley"
+
+    def test_an_unbacked_write_beside_a_valid_step_still_refuses_the_plan(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "set_temperature", temperature=70), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "turn the hall lights off in two minutes")
+        assert text == shc.NO_DEVICE_TEXT and notes == [] and len(steps) == 2
+
+    def test_a_plan_of_only_unbacked_status_steps_answers_with_the_note(self, monkeypatch):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", "get_status")]
+        text, notes = self._plan(rig, steps, "is the hall fan running")
+        assert text == shc.SKIPPED_STEP_NOTE and steps == []
+
+    @pytest.mark.parametrize("action", ["get_status", "check_status", "status", "check", "read"])
+    def test_every_read_only_action_is_skippable(self, monkeypatch, action):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", action, room="hall"), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "tell me if the hall fan is running and turn the hall lights off")
+        assert text is None and len(steps) == 1
+
+    def test_an_unresolvable_status_step_is_skipped_too(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "get_status"), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "check the blinds then turn off the hall lights")
+        assert text is None and notes == [shc.SKIPPED_STEP_NOTE] and len(steps) == 1
+
+    def test_an_unresolvable_write_step_still_refuses(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open"), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "open the blinds then turn off the hall lights")
+        assert text == shc.NO_DEVICE_TEXT and notes == []
+
+    @pytest.mark.parametrize("action", ["turn_on", "turn_off", "set_temperature", "toggle", "set_brightness", "lock"])
+    def test_an_unbacked_write_of_any_action_refuses_the_plan(self, monkeypatch, action):
+        rig = _devices(SequenceLightRig(monkeypatch))
+        steps = [_typed_step("climate", action, room="hall"), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "turn the hall lights off in two minutes")
+        assert text == shc.NO_DEVICE_TEXT and notes == []
+
+    def test_a_status_step_that_would_need_a_question_is_skipped_not_asked(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("get_status", "bathroom"), _room_step("turn_off", "hall")]
+        text, notes = self._plan(rig, steps, "is the bathroom light on and turn off the hall lights")
+        assert text is None and notes == [shc.SKIPPED_STEP_NOTE] and len(steps) == 1
+
+
+class TestTheRouteAppendsTheSkippedStepNote:
+    def test_a_skipped_status_step_is_noted_in_the_acknowledgement(self):
+        from unittest.mock import MagicMock, patch
+        from orchestrator.nodes import _runtime
+        from orchestrator.nodes.route_control import route_control_node
+        from .test_route_control import _make_smart_controller, _make_state, _run
+
+        _runtime.reset_for_test()
+        sc = _make_smart_controller()
+        sc.detect_sequence_intent.return_value = True
+        sc.extract_sequence_intent = AsyncMock(return_value={
+            "steps": [{"action": "turn_off", "entity": "light.kitchen"}], "acknowledge": "On it!",
+        })
+
+        async def decide(steps, query, room, notes=None):
+            notes.append("I couldn't check that one.")
+
+        sc.decide_sequence_rooms = AsyncMock(side_effect=decide)
+        se = MagicMock()
+        se.execute_sequence = AsyncMock(return_value="done")
+        _runtime.set_smart_controller(sc)
+        _runtime.set_sequence_executor(se)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(query="check the fan and turn off the lights in 2 minutes", permissions={"mode": "owner"})
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=False),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        _runtime.reset_for_test()
+        assert result.answer == "On it! I couldn't check that one."
