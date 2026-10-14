@@ -487,7 +487,7 @@ class TestSequenceStepFanoutRefusal:
     def test_sequence_step_over_hard_limit_refused_synchronous(self, monkeypatch):
         monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=10))
         executor, client = self._make_executor()
-        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office"}}]
+        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office", "decided_room": "office"}}]
 
         async def _drive():
             with mp.ha_permission_scope(
@@ -516,7 +516,7 @@ class TestSequenceStepFanoutRefusal:
     def test_sequence_step_over_hard_limit_refused_background(self, monkeypatch):
         monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=10))
         executor, client = self._make_executor()
-        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office"}}]
+        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office", "decided_room": "office"}}]
 
         async def _drive():
             with mp.ha_permission_scope(
@@ -1612,7 +1612,7 @@ class TestSequenceImperativeStepUnderHardLimit:
         controller = shc.SmartHomeController(entity_manager=em, llm_router=MagicMock())
         client = _raw_ha_client_seq()
         executor = SequenceExecutor(controller, client)
-        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office"}}]
+        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office", "decided_room": "office"}}]
 
         async def _drive():
             with mp.ha_permission_scope(

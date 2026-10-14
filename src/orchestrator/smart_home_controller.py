@@ -2807,6 +2807,8 @@ Return ONLY valid JSON."""
         id; a lock or close step is aimed at exactly the resolved entity."""
         target = step['target']
         target['device_type'] = domain
+        target.pop('room', None)
+        target.pop('rooms', None)
         if not opening:
             target['entity_id'] = entity_id
             target['decided_entity'] = entity_id
@@ -2869,8 +2871,9 @@ Return ONLY valid JSON."""
                     target.pop('entity_id', None)
                     dropped = True
             if not domain:
-                if dropped and not target.get('room'):
-                    return NO_DEVICE_TEXT
+                refusal = await self._plan_other_step(target, device_type, clause, query, device_room, directory, dropped)
+                if refusal is not None:
+                    return refusal
                 continue
             if target.get('entity_id'):
                 continue
@@ -2930,6 +2933,66 @@ Return ONLY valid JSON."""
             room_context.find_room_mention(clause, directory).kind == "none"
             and room_context.names_entity(entity_id, name, query)
         )
+
+    async def _plan_other_step(
+        self, target: Dict, device_type, clause: str, query: str, device_room: Optional[str], directory,
+        entity_dropped: bool,
+    ) -> Optional[str]:
+        """Settle the room of a step whose device type has no room decision of
+        its own (climate, a plain cover, anything else), so the executor
+        never forwards a model's room.
+
+        A device the words named (a kept entity, a planned door) needs no
+        room, and a lock's room is never used. Otherwise the room is the
+        model's, only where the clause names it, else the room the clause
+        names, else (for blinds) the speaker's room; it comes out as
+        ``decided_room``. A thermostat with no room is fine when the house
+        has just one. Anything else with no room is refused (the text to
+        answer with), with nothing scheduled."""
+        if target.get('entity_id') or target.get('decided_access') or device_type == 'lock':
+            target.pop('room', None)
+            target.pop('rooms', None)
+            return None
+        intent = {k: target[k] for k in ('room', 'rooms') if k in target}
+        self._ground_step_room(intent, clause, query, directory)
+        room = intent.get('room')
+        if entity_dropped and not room:
+            # The model aimed this step at a device the words don't call and
+            # gave no room the words support: nothing is left to act on.
+            return NO_DEVICE_TEXT
+        if room == 'multi_room' or intent.get('rooms'):
+            room = None
+            ambiguous = True
+        else:
+            ambiguous = False
+        if not room and not ambiguous:
+            mention = room_context.find_room_mention(clause, directory)
+            if mention.kind != "none" and not mention.in_exclusion and len(mention.candidates) == 1:
+                room = mention.candidates[0].key
+        if not room and not ambiguous and device_type == 'cover':
+            speaker = (directory.resolves(device_room) if directory is not None else None)
+            room = speaker.key if speaker is not None else None
+        target.pop('rooms', None)
+        if room and room != 'whole_house':
+            target['room'] = room
+            target['decided_room'] = room
+            return None
+        target.pop('room', None)
+        if ambiguous or entity_dropped or device_type == 'cover':
+            return NO_DEVICE_TEXT
+        if device_type == 'climate':
+            try:
+                entities = await self.entity_manager.get_entities()
+            except Exception:
+                return NO_DEVICE_TEXT
+            thermostats = [e for e in entities if isinstance(e, str) and e.startswith('climate.')]
+            if len(thermostats) != 1:
+                return NO_DEVICE_TEXT
+            # One thermostat in the house: there is no room to choose, and
+            # the planner names it.
+            target['entity_id'] = thermostats[0]
+            target['decided_entity'] = thermostats[0]
+        return None
 
     @staticmethod
     def _ground_step_room(intent: Dict, clause: str, query: str, directory) -> None:

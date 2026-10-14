@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _READ_ACTIONS = frozenset({"get_status", "status", "check", "read"})
 UNGROUNDED_ENTITY_STEP_REFUSAL = "I didn't run that step because I couldn't tell which device you meant."
+UNGROUNDED_ROOM_STEP_REFUSAL = "I didn't run that step because I couldn't tell which room you meant."
 ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 
 # ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
@@ -380,9 +381,14 @@ class SequenceExecutor:
             # Use smart controller for room-based control. ATHENA-128 4.7:
             # the result (a gate rewording, on a fan-out block) is
             # returned instead of discarded.
+            if room and target.get('decided_room') != room:
+                # The room is the server's decision (decided_room); a model's
+                # room alone never aims a write.
+                logger.warning("sequence_room_refused", extra={"reason": "room_not_decided"})
+                return UNGROUNDED_ROOM_STEP_REFUSAL
             intent = {
                 'device_type': device_type,
-                'room': room,
+                'room': target.get('decided_room') or None,
                 'action': action,
                 'target_scope': target.get('target_scope', 'group'),
                 'parameters': parameters,

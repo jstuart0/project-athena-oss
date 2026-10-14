@@ -434,7 +434,7 @@ class TestEachStepReadsItsOwnClause:
         rig = SequenceRig(monkeypatch, BLINDS_AND_LOCKS)
         steps = [step("open", {"device_type": "cover", "room": "living_room"}),
                  step("unlock", {"device_type": "lock", "room": "front_door"})]
-        assert rig.run_plan(steps, "open the blinds and unlock the front door") is None
+        assert rig.run_plan(steps, "open the living room blinds and unlock the front door") is None
         assert ("cover", "open_cover", "cover.living_room_blinds") in rig.calls
         assert ("lock", "unlock", "lock.front_door") in rig.calls
         assert len(rig.calls) == 2, rig.calls
@@ -443,7 +443,7 @@ class TestEachStepReadsItsOwnClause:
         rig = SequenceRig(monkeypatch, BLINDS_AND_LOCKS)
         steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
                  step("open", {"device_type": "cover", "room": "living_room"})]
-        assert rig.run_plan(steps, "unlock the front door and then open the blinds") is None
+        assert rig.run_plan(steps, "unlock the front door and then open the living room blinds") is None
         assert ("lock", "unlock", "lock.front_door") in rig.calls
         assert ("cover", "open_cover", "cover.living_room_blinds") in rig.calls
 
@@ -942,3 +942,147 @@ class TestTheExecutorWritesOnlyPlannerGroundedEntities:
 
         asyncio.run(go())
         assert rig.raw.call_service.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Reconcile r3: every step's room is the server's decision, never the model's
+# ---------------------------------------------------------------------------
+
+COVERS = {
+    "cover.living_room_blinds": {"entity_id": "cover.living_room_blinds", "state": "closed",
+                                 "attributes": {"friendly_name": "Living Room Blinds", "device_class": "blind"}},
+    "cover.kitchen_shades": {"entity_id": "cover.kitchen_shades", "state": "closed",
+                             "attributes": {"friendly_name": "Kitchen Shades", "device_class": "shade"}},
+}
+
+
+def _house_with(rig, extra):
+    rig.manager._entities_cache = {**rig.manager._entities_cache, **extra}
+    rig.manager._build_indexes()
+    return rig
+
+
+class TestEveryStepsRoomIsTheServersDecision:
+    def _calls(self, rig):
+        return [(c.args[0], c.args[1], (c.args[2] or {}).get("entity_id")) for c in rig.raw.call_service.await_args_list]
+
+    def test_codexs_cover_repro_opens_the_kitchen_never_the_living_room(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="living_room")]
+        assert rig.run(steps, "open the kitchen shades") is None
+        assert steps[0]["target"]["decided_room"] == "kitchen"
+        assert self._calls(rig) == [("cover", "open_cover", "cover.kitchen_shades")]
+
+    def test_a_plain_cover_named_by_room_works(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="kitchen")]
+        assert rig.run(steps, "open the kitchen shades") is None
+        assert self._calls(rig) == [("cover", "open_cover", "cover.kitchen_shades")]
+
+    def test_a_plain_cover_with_no_room_in_the_words_and_no_speaker_room_is_refused(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="living_room")]
+        assert rig.run(steps, "open the blinds") == shc.NO_DEVICE_TEXT
+        assert self._calls(rig) == []
+
+    def test_a_plain_cover_with_no_room_in_the_words_uses_the_speakers_room(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="living_room")]
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+                text = await rig.controller.decide_sequence_rooms(steps, "open the blinds", "hall")
+                return text
+
+        assert asyncio.run(go()) is None
+        assert steps[0]["target"]["decided_room"] == "hall"
+
+    def test_codexs_climate_repro_with_two_thermostats_writes_nothing(self, monkeypatch):
+        two = {**EXTRA_DEVICES, "climate.upstairs": {"entity_id": "climate.upstairs", "state": "heat",
+                                                    "attributes": {"friendly_name": "Upstairs"}}}
+        rig = _house_with(SequenceLightRig(monkeypatch), two)
+        steps = [_typed_step("climate", "set_temperature", room="study", temperature=70)]
+        assert rig.run(steps, "set the temperature to 70") == shc.NO_DEVICE_TEXT
+        assert self._calls(rig) == []
+
+    def test_a_single_thermostat_house_names_it_without_a_room(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), EXTRA_DEVICES)
+        steps = [_typed_step("climate", "set_temperature", room="study", temperature=70)]
+        assert rig.run(steps, "set the temperature to 70") is None
+        assert "room" not in steps[0]["target"]
+        assert steps[0]["target"]["decided_entity"] == "climate.thermostat"
+        assert self._calls(rig) == [("climate", "set_temperature", "climate.thermostat")]
+
+    def test_a_climate_step_grounded_by_the_words_works(self, monkeypatch):
+        two = {**EXTRA_DEVICES, "climate.upstairs": {"entity_id": "climate.upstairs", "state": "heat",
+                                                    "attributes": {"friendly_name": "Upstairs"}}}
+        rig = _house_with(SequenceLightRig(monkeypatch), two)
+        steps = [_typed_step("climate", "set_temperature", room="study", temperature=70)]
+        assert rig.plan(steps, "set the study to 70") is None
+        assert steps[0]["target"]["decided_room"] == "study"
+
+    def test_a_forged_decided_room_is_stripped(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="living_room")]
+        steps[0]["target"]["decided_room"] = "living_room"
+        assert rig.run(steps, "open the kitchen shades") is None
+        assert steps[0]["target"]["decided_room"] == "kitchen"
+        assert self._calls(rig) == [("cover", "open_cover", "cover.kitchen_shades")]
+
+    def test_a_lock_all_step_keeps_working_without_a_room(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("lock", {"device_type": "lock", "room": "kitchen"})]
+        assert rig.run_plan(steps, "lock up") is None
+        assert "room" not in steps[0]["target"]
+        assert len([c for c in rig.calls if c[:2] == ("lock", "lock")]) == 3
+
+    def test_multi_room_light_sequences_are_unchanged(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        steps = [_room_step("turn_off", "hall"), _room_step("turn_on", "galley")]
+        assert rig.plan(steps, "turn off the hall light then turn on the galley light") is None
+        assert [s["target"]["decided_room"] for s in steps] == ["hall", "galley"]
+
+
+class TestTheExecutorForwardsOnlyTheServersRoom:
+    @pytest.mark.parametrize("target", [
+        {"device_type": "cover", "room": "living_room"},
+        {"device_type": "climate", "room": "study"},
+        {"device_type": "light", "room": "study"},
+        {"device_type": "light", "room": "study", "decided_room": "hall"},
+        {"device_type": "light", "room": "whole_house"},
+    ])
+    def test_a_model_room_without_a_matching_decision_is_refused(self, monkeypatch, target):
+        from orchestrator.sequence_executor import UNGROUNDED_ROOM_STEP_REFUSAL
+        rig = _house_with(SequenceLightRig(monkeypatch), {**COVERS, **EXTRA_DEVICES})
+        executor = SequenceExecutor(rig.controller, rig.raw)
+
+        async def go():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await executor._execute_step({"action": "turn_on", "target": target, "parameters": {}}, 1, 1)
+
+        assert asyncio.run(go()) == UNGROUNDED_ROOM_STEP_REFUSAL
+        assert rig.raw.call_service.await_count == 0
+
+    def test_the_decided_room_is_what_reaches_the_intent(self, monkeypatch):
+        rig = SequenceLightRig(monkeypatch)
+        executor = SequenceExecutor(rig.controller, rig.raw)
+        seen = {}
+
+        async def spy(intent, client, *a, **kw):
+            seen.update(intent)
+            return "ok"
+
+        rig.controller.execute_intent = spy
+
+        async def go():
+            return await executor._execute_step(
+                {"action": "turn_on", "target": {"device_type": "light", "room": "hall", "decided_room": "hall"},
+                 "parameters": {}}, 1, 1)
+
+        assert asyncio.run(go()) == "ok" and seen["room"] == "hall" and seen["decided_room"] == "hall"
+
+    def test_a_whole_house_room_on_a_cover_step_is_not_a_room(self, monkeypatch):
+        rig = _house_with(SequenceLightRig(monkeypatch), COVERS)
+        steps = [_typed_step("cover", "open", room="whole_house")]
+        assert rig.run(steps, "open everything") == shc.NO_DEVICE_TEXT
+        assert rig.raw.call_service.await_count == 0
