@@ -89,7 +89,7 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
 
     # D6 write rule: only a command (or an explicit first-person desire)
     # with exactly one direction changes a setting. A question never writes.
-    kind = classify_utterance(state.query, assistant_names=await configured_assistant_names()).kind
+    kind = classify_utterance(state.query, assistant_names=await configured_assistant_names(state.knowledge_audience)).kind
     if kind == UtteranceKind.STATE_QUESTION:
         state.answer = STATE_QUESTION_REPLY
         return _finish(state, start)

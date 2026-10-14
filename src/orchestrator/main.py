@@ -46,15 +46,18 @@ from shared import ha_auth, ha_link
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
-from orchestrator import room_choice, room_context
+from orchestrator import identity_answer, room_choice, room_context
 from orchestrator.utterance_kind import is_indoor_temperature_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
-from shared.assistant_profile import build_core_assistant_prompt
-from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge
+from shared.assistant_profile import build_core_assistant_prompt, resolve_assistant_name
+from shared.base_knowledge_utils import (
+    assistant_name_from, build_knowledge_context, drop_identity_rows, extract_home_address, extract_owner_name,
+    extract_property_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge,
+)
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
 import shared.config as _shared_config  # alias to survive the orchestrator.config_loader rebinding below
@@ -229,6 +232,8 @@ from orchestrator.helpers import (
     build_query_context,
     web_search_allowed,
     addressee_kind,
+    configured_assistant_names,
+    identity_reply_for,
     resolve_addressee,
     NAMED_ADDRESSEE_KINDS,
 )
@@ -2087,6 +2092,19 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     ]
     original_query = state.query
     query_lower = state.query.lower()
+
+    # Speaker unknown: "what's my name" / "where do I live" get the fixed
+    # reply, never a model call that could read out the owner's rows.
+    identity_reply = await identity_reply_for(state)
+    if identity_reply:
+        state.answer = identity_reply
+        state.intent = IntentCategory.GENERAL_INFO
+        state.confidence = 1.0
+        state.skip_synthesis = True
+        state.identity_answer = True
+        state.node_timings["classify"] = time.time() - start
+        logger.info("identity_answer_unknown_speaker", route="classify")
+        return state
 
     # -----------------------------------------------------------------------
     # SAFETY PRE-SCREEN: Before intent classification, detect jailbreak
@@ -4889,24 +4907,29 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         # Identity fast-path: answer "what is my name" deterministically for
         # the owner (owner_name) or a signed-in household member (first name)
-        if addressee.kind in ("owner", "household") and addressee.name:
-            _ql = state.query.lower().strip("?. ")
-            _identity_patterns = [
-                "what is my name", "what's my name", "whats my name",
-                "who am i", "do you know my name", "do you know who i am",
-                "what do you call me", "what do people call me",
-            ]
-            if any(_ql == p or _ql.startswith(p) for p in _identity_patterns):
+        if (
+            addressee.kind in ("owner", "household") and addressee.name
+            and identity_answer.may_be_identity_question(state.query)
+        ):
+            _names = await configured_assistant_names(state.knowledge_audience)
+            if identity_answer.identity_question(state.query, _names) == identity_answer.NAME:
                 state.answer = f"Your name is {addressee.name}."
                 state.skip_synthesis = True
                 state.node_timings["tool_call"] = time.time() - start
                 logger.info("identity_fast_path", kind=addressee.kind)
                 return state
 
+        visible_knowledge = (
+            [] if is_public_audience(state.permissions)
+            else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
+        )
+
+        assistant_name = await resolve_assistant_name(assistant_name_from(visible_knowledge))
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
             interface_type="voice" if channel_for_interface_type(getattr(state, "interface_type", None)) is OutputChannel.SPEECH else None,
             long_form=is_long_form_turn(state.intent, state.query),
+            assistant_name=assistant_name,
             **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
@@ -4919,10 +4942,16 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = _tool_user_mode
-                visible_knowledge = await load_visible_knowledge(admin_client, audience=state.knowledge_audience)
+                # A turn that asks who the speaker is or where they live carries
+                # neither the owner-name rows nor the address row in its prompt.
+                prompt_knowledge = (
+                    drop_identity_rows(visible_knowledge)
+                    if addressee.kind is None and identity_answer.mentions_identity(state.query)
+                    else visible_knowledge
+                )
                 knowledge_context = (
-                    build_knowledge_context(visible_knowledge, audience=state.knowledge_audience)
-                    if visible_knowledge else ""
+                    build_knowledge_context(prompt_knowledge, audience=state.knowledge_audience, assistant_name=assistant_name)
+                    if prompt_knowledge else ""
                 )
                 if knowledge_context:
                     system_content += f"\n{knowledge_context}"
@@ -4930,7 +4959,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
                 # Get permanent home address (for "directions from home" type queries)
-                home_address = extract_home_address(visible_knowledge)
+                home_address = extract_home_address(prompt_knowledge)
                 search_location = home_address  # Default search location to home
                 logger.info("home_address_resolved", address_set=bool(home_address))
 
@@ -5042,7 +5071,7 @@ Use CURRENT location for searches and as default origin for directions.
 """
         else:
             system_content += f"""
-You are Jarvis, an intelligent AI assistant. You have access to tools for real-time information, but you can also have natural conversations.
+You are an intelligent AI assistant with access to tools for real-time information, and you can also have natural conversations.
 
 WHEN TO USE TOOLS (mandatory):
 - Weather, sports scores, flights, news, stocks, restaurants, recipes, events, airports, streaming content
@@ -5417,6 +5446,14 @@ If the user is asking to repeat, search again, or modify the previous request, u
                 state.answer = finish_spoken_answer(
                     content, selection_interface, llm_response, max_tokens, stage="tool_selection"
                 )
+                identity_reply = identity_answer.backstop(
+                    state.query, state.answer, addressee.kind,
+                    extract_owner_name(visible_knowledge), extract_property_address(visible_knowledge),
+                )
+                if identity_reply:
+                    state.answer = identity_reply
+                    state.identity_answer = True
+                    logger.info("identity_backstop_replaced", node="tool_call")
                 state.data_source = f"LLM ({llm_model}) - no tools needed"
                 # Capture token metrics from direct LLM response
                 state.llm_tokens = llm_response.get("eval_count", 0)
@@ -6139,6 +6176,10 @@ def post_graph_intent_refusal(intent: Any, error: Optional[str], permissions: Op
 # (logger, should_use_tool_calling, is_conversational_reference,
 # IntentCategory) — no closure-scoped dependencies on create_orchestrator_graph.
 async def route_after_classify(state: OrchestratorState) -> str:
+    # The fixed identity reply is the answer: nothing else runs.
+    if state.identity_answer and state.answer:
+        return "finalize"
+
     # One intent gate before any routing: a disallowed intent never
     # reaches a routing, retrieval or tool node.
     if intent_gate_refusal(state.intent, state.permissions):
@@ -6643,6 +6684,7 @@ async def process_query(
     # every semantic-cache key. None means "not computed or could not load":
     # the cache is neither read nor written.
     cache_knowledge_digest: Optional[str] = None
+    identity_query = False
 
     try:
         # Multi-guest identification: Look up user by device fingerprint
@@ -6970,9 +7012,16 @@ async def process_query(
             # A mode=guest hint in an owner-mode house is mode_guest by key but
             # not a real guest: it must not read what a real stay wrote.
             unverified_guest = authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified
+            # An identity question ("what's my name") is never cached, read or write,
+            # whoever asks and whatever vocative the deployment's assistant name adds.
+            identity_query = identity_answer.may_be_identity_question(request.query) and (
+                identity_answer.identity_question(
+                    request.query, await configured_assistant_names(authz.knowledge_audience)
+                ) is not None
+            )
             cache_blocked = (
                 request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee
-                or authz.degraded or owner_caller or unverified_guest
+                or authz.degraded or owner_caller or unverified_guest or identity_query
             )
             if not cache_blocked:
                 # Same filtered rows the prompt uses; a failed load disables the
@@ -7469,6 +7518,8 @@ async def process_query(
             and not authz.knowledge_audience.owner_caller
             and not (authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified)
             and not authz.degraded
+            and not final_state.get("identity_answer", False)
+            and not identity_query
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -8379,11 +8430,17 @@ Respond honestly about your limitations.
 Response:"""
 
     addressee = await resolve_addressee(state, get_admin_client())
+    visible_knowledge = (
+        [] if is_public_audience(state.permissions)
+        else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
+    )
 
+    assistant_name = await resolve_assistant_name(assistant_name_from(visible_knowledge))
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
         interface_type=state.interface_type,
         long_form=is_long_form_turn(state.intent, state.query),
+        assistant_name=assistant_name,
         **addressee.prompt_kwargs(),
     ) + "\n"
 
@@ -8393,6 +8450,8 @@ Response:"""
             admin_client = get_admin_client()
             knowledge_context = await get_knowledge_context_for_user(
                 admin_client, audience=state.knowledge_audience,
+                without_identity_rows=addressee.kind is None and identity_answer.mentions_identity(state.query),
+                assistant_name=assistant_name,
             )
             if knowledge_context:
                 system_context += knowledge_context
@@ -8462,6 +8521,9 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     """
     # Run classification
     state = await classify_node(state)
+
+    if state.identity_answer and state.answer:
+        return state
 
     # The same intent gate the graph router applies, before any dispatch.
     if intent_gate_refusal(state.intent, state.permissions):

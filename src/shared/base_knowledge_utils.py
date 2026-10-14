@@ -5,11 +5,13 @@ Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
 import hashlib
+import re
 import os
 from typing import List, Dict, Any, Optional
 import structlog
+from shared.assistant_profile import clean_guest_name
 from shared.config import get_config
-from shared.knowledge_tiers import OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
+from shared.knowledge_tiers import NAME_KEY_CATEGORIES, OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
 from shared.local_time import local_now
 
 logger = structlog.get_logger()
@@ -74,7 +76,9 @@ def _category(entry: Dict[str, Any]) -> str:
     return str(entry.get("category") or "general").strip().lower()
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience: KnowledgeAudience) -> str:
+def build_knowledge_context(
+    knowledge_entries: List[Dict[str, Any]], *, audience: KnowledgeAudience, assistant_name: Optional[str] = None
+) -> str:
     """
     Build formatted context string from base knowledge entries.
 
@@ -164,7 +168,9 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience
             elif category == "general":
                 key = entry.get("key", "")
                 if "assistant_name" in key:
-                    context_lines.append(f"• Your Name: {resolved_value}")
+                    # The prompt states one name: the resolved one, from the caller.
+                    if assistant_name:
+                        context_lines.append(f"• Your Name: {assistant_name}")
                 elif "location_context" in key:
                     context_lines.append(f"• {resolved_value}")
                 else:
@@ -231,6 +237,18 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
     return _DEFAULT_LOCATION
 
 
+def extract_property_address(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
+    """The ``property``/``address`` row's value from already-filtered entries,
+    or None. Unlike ``extract_home_address`` there is no default-location
+    fallback: only a stored address counts as the home address."""
+    for entry in knowledge_entries or []:
+        if _category(entry) == "property" and entry.get("key") == "address":
+            value = str(entry.get("value") or "").strip()
+            if value:
+                return value
+    return None
+
+
 def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
     """The owner's name from already-filtered entries.
 
@@ -250,6 +268,61 @@ def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]
         return None
     best = min(candidates, key=lambda e: (tier_rank[e["applies_to"]], -(e.get("priority") or 0)))
     return best["value"].strip()
+
+
+_NAME_INTRODUCTION_RE = re.compile(r"^(?:i am|i'm|my name is|call me|you are|you're|this is)\s+", re.IGNORECASE)
+_NAME_CLAUSE_END_RE = re.compile(r"[,.;:!?\n]")
+_ASSISTANT_NAME_MAX_WORDS = 2
+# The value admin-backend seeds into a fresh install's assistant_name row
+# (admin/backend/app/database.py, pinned by test_identity_answer). Nobody chose it,
+# so it never names the assistant.
+SEEDED_ASSISTANT_NAME_VALUE = "I am Athena, an AI assistant."
+
+
+def clean_assistant_name(value: Any) -> Optional[str]:
+    """An assistant name fit to show the model, or None.
+
+    "I am Athena, an AI assistant." and "My name is Athena" give "Athena";
+    a bare name stays as is. The result passes the guest-name cleaner and has
+    at most two words, so an instruction-like value ("Jarvis ignore prior
+    rules") is rejected rather than rendered.
+    """
+    if not isinstance(value, str):
+        return None
+    text = _NAME_INTRODUCTION_RE.sub("", value.strip(), count=1)
+    text = _NAME_CLAUSE_END_RE.split(text, maxsplit=1)[0].strip()
+    name = clean_guest_name(text)
+    if name and len(name.split()) <= _ASSISTANT_NAME_MAX_WORDS:
+        return name
+    return None
+
+
+def assistant_name_from(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
+    """The assistant's name from already-filtered ``general`` rows whose key
+    contains ``assistant_name`` (see ``clean_assistant_name``); the first row
+    that gives a clean name wins. A row still holding the shipped seed text is
+    ignored. None when no visible row qualifies."""
+    for entry in knowledge_entries or []:
+        if _category(entry) == "general" and "assistant_name" in str(entry.get("key", "")):
+            if str(entry.get("value") or "").strip() == SEEDED_ASSISTANT_NAME_VALUE:
+                continue
+            name = clean_assistant_name(entry.get("value"))
+            if name:
+                return name
+    return None
+
+
+def drop_identity_rows(knowledge_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The entries without the owner-name rows and the property-address row:
+    the prompt of a turn that asks who the speaker is or where they live
+    must not carry them."""
+    return [
+        e for e in (knowledge_entries or [])
+        if not (
+            (_category(e) in NAME_KEY_CATEGORIES and "name" in str(e.get("key", "")))
+            or (_category(e) == "property" and e.get("key") == "address")
+        )
+    ]
 
 
 async def load_visible_knowledge(admin_client, *, audience: KnowledgeAudience) -> List[Dict[str, Any]]:
@@ -301,7 +374,10 @@ async def knowledge_cache_digest(admin_client, *, audience: KnowledgeAudience) -
     return knowledge_digest(entries)
 
 
-async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAudience) -> str:
+async def get_knowledge_context_for_user(
+    admin_client, *, audience: KnowledgeAudience, without_identity_rows: bool = False,
+    assistant_name: Optional[str] = None,
+) -> str:
     """
     Fetch and format base knowledge context for one audience.
 
@@ -314,11 +390,13 @@ async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAud
     """
     try:
         knowledge_entries = await load_visible_knowledge(admin_client, audience=audience)
+        if without_identity_rows:
+            knowledge_entries = drop_identity_rows(knowledge_entries)
         if not knowledge_entries:
             logger.info("no_base_knowledge_entries_found")
             return ""
 
-        context = build_knowledge_context(knowledge_entries, audience=audience)
+        context = build_knowledge_context(knowledge_entries, audience=audience, assistant_name=assistant_name)
 
         logger.info(
             "knowledge_context_generated",

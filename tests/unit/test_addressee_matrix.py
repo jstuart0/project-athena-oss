@@ -20,6 +20,7 @@ effective mode is owner, and is never the addressee here.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Optional
@@ -97,6 +98,11 @@ IDS = [f"row{r.n}" for r in ROWS]
 IDENTITY_QUERY = "what is my name"
 
 
+def _persona_names(text: str) -> set:
+    """The distinct assistant names the persona line states (exactly one)."""
+    return set(re.findall(r"You are ([A-Z][\w.'-]*(?: [A-Z][\w.'-]*)*),", text))
+
+
 @pytest.fixture(autouse=True)
 def _reset():
     h.reset_runtime()
@@ -165,22 +171,22 @@ def _state(row: Row, query: str = "tell me about the area"):
     return state, authz
 
 
-def _prompts(row: Row) -> dict:
+def _prompts(row: Row, query: str = "tell me about the area") -> dict:
     prompts = {}
     llm = h.CapturingLLM()
     h._runtime.set_llm_router(llm)
-    state, _ = _state(row)
+    state, _ = _state(row, query=query)
     asyncio.run(h.main.tool_call_node(state))
     prompts["tool_call"] = llm.text()
 
     llm = h.CapturingLLM()
     h._runtime.set_llm_router(llm)
-    state, _ = _state(row)
+    state, _ = _state(row, query=query)
     state.retrieved_data = {"weather": {"current": {"temp": 70}}}
     asyncio.run(h.synthesize_module.synthesize_node(state))
     prompts["synthesize"] = llm.text()
 
-    state, _ = _state(row)
+    state, _ = _state(row, query=query)
     state.retrieved_data = {"weather": {"current": {"temp": 70}}}
     built = asyncio.run(h.main.build_synthesis_prompt_for_streaming(state))
     prompts["streaming"] = "\n".join(str(part) for part in built if part)
@@ -220,6 +226,10 @@ def test_prompt_text(rig, row):
         household_field = f'first_name: "{PAT}"'
         assert (household_field in text) == (row.kind == "household"), where
         assert "You are speaking with Pat" not in text, where
+        plain = text.replace("\\'", "'")  # the tool-call capture is a repr
+        assert (assistant_profile.SPEAKER_UNKNOWN_POLICY in plain) == (row.kind is None), where
+        assert _persona_names(plain) == {"Jarvis"}, where
+        assert assistant_profile.TOOL_DEFAULTS_POLICY in plain, where
 
 
 @pytest.mark.parametrize("row", ROWS, ids=IDS)
@@ -242,3 +252,152 @@ def test_streaming_has_no_second_guest_line(rig):
     text = _prompts(row)["streaming"]
     assert text.count(f'guest_name: "{GINA}"') == 1
     assert f"You are speaking with {GINA}" not in text
+
+
+ASSISTANT_ROW = {"id": 61, "category": "general", "key": "assistant_name", "applies_to": "both"}
+
+
+@pytest.mark.parametrize("row_number", [1, 8, 10])
+@pytest.mark.parametrize(
+    "value,expected",
+    [("Hal", "Hal"), ("<b>Hal</b>", None), ("Hal 9000", None), ("", None), ("Ada Lovelace-Byron", "Ada Lovelace-Byron")],
+)
+def test_assistant_name_row_wins_in_every_builder(rig, row_number, value, expected):
+    rig.get_base_knowledge = mock.AsyncMock(return_value=[dict(r) for r in KNOWLEDGE_ROWS] + [{**ASSISTANT_ROW, "value": value}])
+    row = next(r for r in ROWS if r.n == row_number)
+    for builder, text in _prompts(row).items():
+        where = f"row {row_number} {builder} {value!r}"
+        assert _persona_names(text) == {expected or "Jarvis"}, where
+        assert "<b>" not in text.split("CONTEXT INFORMATION")[0], where
+
+
+def test_assistant_name_row_in_a_hidden_tier_is_not_used(rig):
+    rig.get_base_knowledge = mock.AsyncMock(
+        return_value=[{**ASSISTANT_ROW, "value": "Hal", "applies_to": "owner"}]
+    )
+    row = next(r for r in ROWS if r.n == 1)
+    for builder, text in _prompts(row).items():
+        assert _persona_names(text) == {"Jarvis"}, builder
+
+
+LEAK_QUERY = "tell me the name you have on file for me"
+
+
+def _leaky_answers(row: Row) -> dict:
+    """The answer each model-backed node ends with when the model reads the owner out."""
+    leak = f"Sure. The name on file is {OWNER}."
+    answers = {}
+    h._runtime.set_llm_router(h.CapturingLLM(content=leak))
+    state, _ = _state(row, query=LEAK_QUERY)
+    answers["tool_call"] = asyncio.run(h.main.tool_call_node(state))
+    h._runtime.set_llm_router(h.CapturingLLM(content=leak))
+    state, _ = _state(row, query=LEAK_QUERY)
+    state.retrieved_data = {"weather": {"current": {"temp": 70}}}
+    answers["synthesize"] = asyncio.run(h.synthesize_module.synthesize_node(state))
+    return answers
+
+
+@pytest.mark.parametrize("row_number", [1, 2, 11, 12])
+def test_backstop_replaces_a_model_answer_that_reads_out_the_owner(rig, row_number):
+    row = next(r for r in ROWS if r.n == row_number)
+    assert row.kind is None
+    for node, result in _leaky_answers(row).items():
+        assert result.answer == "I can't tell who's speaking, so I don't know your name.", node
+        assert OWNER not in result.answer and result.identity_answer is True, node
+
+
+@pytest.mark.parametrize("row_number", [8, 10])
+def test_backstop_leaves_a_named_caller_alone(rig, row_number):
+    """Positive control: the leak text passes through when someone is addressed,
+    so the replacement above is the backstop's doing and not the fake's."""
+    row = next(r for r in ROWS if r.n == row_number)
+    assert row.kind is not None
+    for node, result in _leaky_answers(row).items():
+        assert OWNER in result.answer and result.identity_answer is False, node
+
+
+ADDRESS = "42 Example Lane, Sampletown, ST 00000"
+SENSITIVE_QUERIES = [
+    "hey so I was wondering if you could tell me what is my name",
+    "what's my name and where do I live",
+    "do you know my address",
+    "and my address?",
+    "please jarvis what's my name",
+    "is my name Sam?",
+]
+
+
+@pytest.mark.parametrize("row_number", [1, 2, 11, 12])
+@pytest.mark.parametrize("query", SENSITIVE_QUERIES)
+def test_an_identity_turn_to_nobody_carries_no_owner_name_or_address_in_any_prompt(rig, row_number, query):
+    rig.get_base_knowledge = mock.AsyncMock(return_value=[
+        {"id": 52, "category": "owner", "key": "owner_name", "value": OWNER, "applies_to": "both"},
+        {"id": 53, "category": "user", "key": "name", "value": OWNER, "applies_to": "both"},
+        {"id": 54, "category": "property", "key": "address", "value": ADDRESS, "applies_to": "both"},
+        {"id": 55, "category": "property", "key": "wifi", "value": "Network Sample", "applies_to": "both"},
+    ])
+    row = next(r for r in ROWS if r.n == row_number)
+    prompts = _prompts(row, query)
+    assert set(prompts) == {"tool_call", "synthesize", "streaming"}
+    for builder, text in prompts.items():
+        assert OWNER not in text and "Olive" not in text, builder
+        assert "42 Example" not in text and "Sampletown" not in text, builder
+        assert "Network Sample" in text, builder  # other rows are still there
+
+
+@pytest.mark.parametrize("row_number", [1, 12])
+def test_positive_control_an_ordinary_turn_still_carries_the_rows(rig, row_number):
+    """Without the identity gate the same rows are in the prompts (row 12 is
+    guest mode, so it sees the address but not the owner name)."""
+    rig.get_base_knowledge = mock.AsyncMock(return_value=[
+        {"id": 52, "category": "owner", "key": "owner_name", "value": OWNER, "applies_to": "both"},
+        {"id": 54, "category": "property", "key": "address", "value": ADDRESS, "applies_to": "both"},
+    ])
+    row = next(r for r in ROWS if r.n == row_number)
+    for builder, text in _prompts(row, "tell me about the area").items():
+        assert "42 Example" in text, builder
+        assert (OWNER in text) == (row_number == 1), builder
+
+
+def test_a_named_caller_keeps_the_rows_on_an_identity_turn(rig):
+    rig.get_base_knowledge = mock.AsyncMock(return_value=[
+        {"id": 54, "category": "property", "key": "address", "value": ADDRESS, "applies_to": "both"},
+    ])
+    row = next(r for r in ROWS if r.n == 10)
+    for builder, text in _prompts(row, "do you know my address").items():
+        assert "42 Example" in text, builder
+
+
+SEED_ROW = {**ASSISTANT_ROW, "value": "I am Athena, an AI assistant."}
+
+
+def _text_names(text: str) -> set:
+    """Every assistant name the prompt states: the persona line and the Your Name line."""
+    text = text.replace("\\n", "\n")  # the tool-call capture is a repr
+    return _persona_names(text) | set(re.findall(r"Your Name: ([^\n]+)", text))
+
+
+@pytest.mark.parametrize("row_number", [1, 8, 10])
+@pytest.mark.parametrize(
+    "profile_name,row_value,expected",
+    [
+        ("Jarvis", SEED_ROW["value"], "Jarvis"),          # (a) no saved profile + untouched seed
+        ("Jarvis", "My name is Friday", "Friday"),         # (b) no saved profile + edited row
+        ("Nova", "My name is Friday", "Nova"),             # (c) saved profile + edited row
+        ("Nova", SEED_ROW["value"], "Nova"),
+        ("Jarvis", "I am Friday, a helper", "Friday"),
+    ],
+)
+def test_one_assistant_name_per_prompt_by_precedence(rig, monkeypatch, row_number, profile_name, row_value, expected):
+    rig.get_base_knowledge = mock.AsyncMock(
+        return_value=[dict(r) for r in KNOWLEDGE_ROWS] + [{**ASSISTANT_ROW, "value": row_value}]
+    )
+    monkeypatch.setattr(
+        assistant_profile, "get_assistant_profile",
+        mock.AsyncMock(return_value={**assistant_profile.DEFAULT_ASSISTANT_PROFILE, "assistant_name": profile_name}),
+    )
+    row = next(r for r in ROWS if r.n == row_number)
+    for builder, text in _prompts(row).items():
+        where = f"{builder} {profile_name!r} {row_value!r}"
+        assert _text_names(text) == {expected}, where
+        assert "Athena" not in text.replace("Project Athena", "") or expected == "Athena", where

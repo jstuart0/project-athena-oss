@@ -934,7 +934,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         # UNKNOWN when the kill switch is enabled (legacy behaviour).
         kill_switch_config = await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)
         state_question_kill_switch = kill_switch_config.get("enabled", False)
-        real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names())
+        real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names(state.knowledge_audience))
         extraction_query = state.query
         clarification = _clarification_reply(state, real_uk)
         if clarification is not None:

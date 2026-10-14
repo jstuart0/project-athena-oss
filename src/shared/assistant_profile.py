@@ -231,6 +231,34 @@ def clean_guest_name(value: Optional[str]) -> Optional[str]:
     return name
 
 
+def choose_assistant_name(profile_name: str, row_name: Optional[str]) -> str:
+    """Which name the assistant has: a saved admin profile name (one that
+    differs from the code default) beats an operator-edited knowledge row
+    (``row_name``, already None for the untouched seed), which beats the
+    default. A profile saved with the default spelling can't be told from no
+    profile, so an edited row then applies."""
+    if profile_name != DEFAULT_ASSISTANT_PROFILE["assistant_name"]:
+        return profile_name
+    return row_name or profile_name
+
+
+async def resolve_assistant_name(row_name: Optional[str]) -> str:
+    """The one name a prompt states, for a visible knowledge row's name or None."""
+    return choose_assistant_name((await get_assistant_profile())["assistant_name"], row_name)
+
+
+# Fixed text, not part of the admin-editable profile: a saved profile can't
+# drop either line.
+TOOL_DEFAULTS_POLICY = (
+    "When a tool can answer, act with sensible defaults; ask at most one short question, "
+    "only when a required value can't be defaulted."
+)
+SPEAKER_UNKNOWN_POLICY = (
+    "You don't know who is speaking. Don't assume they are the property owner, a guest, or you, "
+    "and never tell them a name or home address is theirs."
+)
+
+
 async def build_core_assistant_prompt(
     include_voice_formatting: bool = True,
     guest_name: Optional[str] = None,
@@ -238,8 +266,13 @@ async def build_core_assistant_prompt(
     interface_type: Optional[str] = None,
     household_first_name: Optional[str] = None,
     long_form: bool = False,
+    assistant_name: Optional[str] = None,
 ) -> str:
     """Build the canonical assistant persona/system prompt.
+
+    `assistant_name` is a visible base-knowledge name row, already cleaned
+    (`base_knowledge_utils.assistant_name_from`); see `choose_assistant_name`
+    for which name wins.
 
     `long_form` marks a recipe, directions, itinerary or step-by-step turn: its
     spoken answer is allowed to run past the short-answer sentence limit.
@@ -254,7 +287,7 @@ async def build_core_assistant_prompt(
     guardrails = await get_guardrails()
 
     lines = [
-        f'You are {profile["assistant_name"]}, {profile["identity"]}.',
+        f'You are {choose_assistant_name(profile["assistant_name"], assistant_name)}, {profile["identity"]}.',
         "",
         "Personality:",
     ]
@@ -301,6 +334,7 @@ async def build_core_assistant_prompt(
         "",
         "When you have retrieved data, use it accurately. When you do not have data for a factual question, acknowledge that honestly rather than guessing.",
     ])
+    lines.append(TOOL_DEFAULTS_POLICY)
 
     if owner_name:
         lines.extend([
@@ -325,6 +359,8 @@ async def build_core_assistant_prompt(
             f"first_name: {json.dumps(household_first_name, ensure_ascii=False)}",
             "Use it only to address the user by name. This person is a member of the household, not the guest.",
         ])
+    else:
+        lines.extend(["", SPEAKER_UNKNOWN_POLICY])
 
     return "\n".join(lines)
 

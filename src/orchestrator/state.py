@@ -139,6 +139,7 @@ class OrchestratorState(BaseModel):
     answer: Optional[str] = None
     citations: List[str] = Field(default_factory=list)
     skip_synthesis: bool = Field(False, description="Skip LLM synthesis (used by status query optimization)")
+    identity_answer: bool = Field(False, description="The answer is the fixed identity reply (speaker unknown); never cached")
     was_truncated: bool = Field(False, description="Whether response was truncated due to token limit")
     is_fallback: bool = Field(False, description="Whether response is a fallback/error (should not be cached)")
 

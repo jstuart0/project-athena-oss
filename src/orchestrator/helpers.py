@@ -67,7 +67,8 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
-from shared.base_knowledge_utils import extract_owner_name, load_visible_knowledge
+from orchestrator import identity_answer
+from shared.base_knowledge_utils import assistant_name_from, extract_owner_name, load_visible_knowledge
 from shared.knowledge_tiers import KnowledgeAudience
 from shared.fast_path_vocab import normalize as normalize_fast_path_query, reply_for as fast_path_reply_for
 from shared.output_channel import (
@@ -435,7 +436,67 @@ ASSISTANT_NAME_CACHE_TTL_SECONDS = 300.0
 _assistant_names_cache: Dict[str, Any] = {"names": (), "expires_at": 0.0}
 
 
-async def configured_assistant_names() -> tuple:
+# A per-audience row lookup that found nothing or failed is remembered briefly,
+# so an admin outage or an install with no name row pays the HTTP call (or the
+# 0.5 s bound) once per window, not on every control turn. A found name is not
+# remembered: it is cheap (the admin client reuses its list) and edits show at once.
+ASSISTANT_ROW_MISS_TTL_SECONDS = 10.0
+_ASSISTANT_ROW_MISS_MAX_ENTRIES = 64
+_now = time.monotonic
+_assistant_row_misses: Dict[tuple, float] = {}
+
+
+def _audience_key(audience: KnowledgeAudience) -> tuple:
+    return (audience.mode, audience.degraded, audience.public, audience.owner_caller,
+            audience.owner_proven, audience.guest_verified)
+
+
+async def configured_assistant_names(audience: Optional[KnowledgeAudience] = None) -> tuple:
+    """The profile's assistant name (cached for the process) and, given an
+    audience, the name in a base-knowledge row that audience can see (read
+    per call, bounded, failing soft to the profile name; the row name first)."""
+    names = await _profile_assistant_names()
+    if audience is None:
+        return names
+    key = _audience_key(audience)
+    now = _now()
+    if _assistant_row_misses.get(key, 0.0) > now:
+        return names
+    row_name = None
+    try:
+        entries = await asyncio.wait_for(
+            load_visible_knowledge(get_admin_client(), audience=audience),
+            timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS,
+        )
+        row_name = assistant_name_from(entries)
+    except Exception as e:
+        logger.warning("assistant_row_name_lookup_failed", error_type=type(e).__name__)
+    if not row_name:
+        if len(_assistant_row_misses) >= _ASSISTANT_ROW_MISS_MAX_ENTRIES:
+            _assistant_row_misses.clear()
+        _assistant_row_misses[key] = now + ASSISTANT_ROW_MISS_TTL_SECONDS
+        return names
+    return names if row_name in names else (row_name, *names)
+
+
+async def identity_reply_for(state: Any) -> Optional[str]:
+    """The fixed "speaker unknown" reply when this turn is a first-person
+    identity question and nobody is addressed (same rule as resolve_addressee,
+    without the owner-name lookup); otherwise None. Costs nothing for a query
+    that can't be an identity question."""
+    if not identity_answer.may_be_identity_question(state.query):
+        return None
+    audience = getattr(state, "knowledge_audience", KnowledgeAudience.UNRESOLVED)
+    context = getattr(state, "context", None) or {}
+    kind = None if is_public_audience(getattr(state, "permissions", None)) else addressee_kind(context, audience=audience)
+    if kind == "guest" and not clean_guest_name(context.get("guest_name")):
+        kind = None
+    if kind == "household" and not clean_speaker_first_name(context.get("speaker_first_name")):
+        kind = None
+    return identity_answer.reply_for(state.query, kind, await configured_assistant_names(audience))
+
+
+async def _profile_assistant_names() -> tuple:
     now = time.monotonic()
     if now < _assistant_names_cache["expires_at"]:
         return _assistant_names_cache["names"]

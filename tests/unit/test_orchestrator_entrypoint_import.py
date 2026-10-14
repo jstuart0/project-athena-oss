@@ -123,6 +123,7 @@ FIRST_IMPORTS = [
     "orchestrator.room_directory",
     "orchestrator.room_choice",
     "orchestrator.main",
+    "orchestrator.identity_answer",
 ]
 
 

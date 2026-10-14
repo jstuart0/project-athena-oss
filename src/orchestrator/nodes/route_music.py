@@ -116,7 +116,7 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
         # ATHENA-128: a state question ("is music playing") runs under a
         # read-only scope here too -- defence in depth, since its parse
         # already yields a read (now_playing). The kill switch reverts it.
-        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
+        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names(state.knowledge_audience))
         kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,

@@ -25,10 +25,13 @@ UNPARSABLE = {"src/jetson/athena_lite_llm.py"}
 # loader; each orchestrator site hands it the request's KnowledgeAudience.
 ALLOWED = {
     ("src/orchestrator/helpers.py", "_owner_name", "load_visible_knowledge"),
+    ("src/orchestrator/helpers.py", "configured_assistant_names", "load_visible_knowledge"),  # the audience's own assistant_name row
     ("src/orchestrator/main.py", "build_synthesis_prompt_for_streaming", "get_knowledge_context_for_user"),
+    ("src/orchestrator/main.py", "build_synthesis_prompt_for_streaming", "load_visible_knowledge"),  # assistant_name row
     ("src/orchestrator/main.py", "tool_call_node", "build_knowledge_context"),
     ("src/orchestrator/main.py", "tool_call_node", "load_visible_knowledge"),
     ("src/orchestrator/nodes/synthesize.py", "synthesize_node", "get_knowledge_context_for_user"),
+    ("src/orchestrator/nodes/synthesize.py", "synthesize_node", "load_visible_knowledge"),  # assistant_name row, identity backstop
     ("src/rag/directions/main.py", "lifespan", PUBLIC_ROUTE),  # Everyone rows only (D13)
     ("src/shared/admin_config.py", "get_base_knowledge", PUBLIC_ROUTE),  # tiers= is required
     ("src/shared/base_knowledge_utils.py", "<module>", "build_knowledge_context"),  # __main__ demo
