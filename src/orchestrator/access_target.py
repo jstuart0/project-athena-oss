@@ -727,7 +727,7 @@ NO_CUE = "no_cue"
 def write_cue_problem(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
     kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
-    assistant_names: Iterable[str] = (),
+    assistant_names: Iterable[str] = (), allow_scheduled: bool = False,
 ) -> Optional[str]:
     """None when a device-changing command is backed by the words; else
     ``NO_CUE`` (nothing in the words asks for a change) or ``WRONG_DEVICE``
@@ -769,7 +769,7 @@ def write_cue_problem(
         return NO_CUE
     if kind == "cover" and is_opening_action("cover", act):
         return None
-    query = cue_text(query, assistant_names)
+    query = cue_text(query, assistant_names, allow_scheduled=allow_scheduled)
     if not query or not query.strip():
         return NO_CUE  # everything said was narration or a condition
     if kind == "motion":
@@ -814,12 +814,12 @@ def write_cue_problem(
 def lacks_write_cue(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
     kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
-    assistant_names: Iterable[str] = (),
+    assistant_names: Iterable[str] = (), allow_scheduled: bool = False,
 ) -> bool:
     """``write_cue_problem`` as a yes/no."""
     return write_cue_problem(
         device_type, action, query, parameters, named_entity=named_entity, kind_hint=kind_hint,
-        whole_scene_phrase=whole_scene_phrase, assistant_names=assistant_names,
+        whole_scene_phrase=whole_scene_phrase, assistant_names=assistant_names, allow_scheduled=allow_scheduled,
     ) is not None
 
 

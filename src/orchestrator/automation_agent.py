@@ -1641,6 +1641,15 @@ class AutomationAgent:
             await self.ha_client.call_service("light", "turn_on", restore_data)
 
 
+_SCHEDULE_LED_RE = re.compile(
+    r"^\s*(?:(?:in|after)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)"
+    r"\s*(?:seconds?|secs?|minutes?|mins?|hours?)\s+"
+    r"|at\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?|noon|midnight|sunset|sunrise)\s+"
+    r"|if\s+[^,]{3,80},\s*)"
+    r"(?:please\s+)?(?:turn|switch|lock|unlock|open|close|dim|set|start|stop|play|pause|activate|run)\b"
+)
+
+
 def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     """
     Determine if a query should be handled by the automation agent.
@@ -1799,6 +1808,12 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     has_event = any(p in query_lower for p in event_patterns)
     has_time_pattern = any(p in query_lower for p in time_pattern_patterns)
     has_automation_mgmt = any(p in query_lower for p in automation_management_patterns)
+
+    # A command led by a time or a condition ("in 5 minutes lock the door", "at 11 turn
+    # off the lights", "if it gets dark, turn on the porch light") is never for now:
+    # the agent sets it up.
+    if has_home_device and _SCHEDULE_LED_RE.search(query_lower):
+        return True
 
     # Only return True if we have clear home automation intent
     if has_automation_mgmt:

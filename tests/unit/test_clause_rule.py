@@ -127,7 +127,6 @@ COMMANDS = [
     ("you're right, turn it off", IMPERATIVE, "turn it off"),
     ("I'm back, turn on the lights", IMPERATIVE, "turn on the lights"),
     ("porch light off", IMPERATIVE, "porch light off"),
-    ("then at 11 turn off all the lights", IMPERATIVE, "at 11 turn off all the lights"),
     ("kitchen lights on and turn them blue", IMPERATIVE, "kitchen lights on and turn them blue"),
     ('I said "turn off the lights"', IMPERATIVE, "I said turn off the lights"),
     ("turn the lights on, I love it", IMPERATIVE, "turn the lights on"),
@@ -375,7 +374,7 @@ def test_the_harness_sees_a_write_when_the_gate_is_open():
     # Positive control for the zero-write tests above: with the clause rule
     # bypassed (every text is its own command) the same rig records the write.
     with mock.patch("orchestrator.nodes.route_control.command_query", side_effect=lambda uk, q: q), \
-            mock.patch("orchestrator.access_target.cue_text", side_effect=lambda q, names=(): q):
+            mock.patch("orchestrator.access_target.cue_text", side_effect=lambda q, names=(), **kw: q):
         state, _model, client = drive_control("those hall lights look great")
     assert writes(client), state.answer
 
@@ -489,7 +488,7 @@ MUST_WORK = [
     "living room lamp turn on", "porch light on and set it to 50%",
     "can we dim the lights", "could we turn it down", "can I get the lights off", "can u turn on the fan",
     "yeah leave the lights on", "thanks turn off the lights", "sure keep it on", "actually turn on the fan",
-    "okay so turn on the fan", "in 5 minutes lock the door", "at 11 turn off the lights",
+    "okay so turn on the fan",
 ]
 # The same kinds of command with a room the rig can write: the write must be observed.
 MUST_WRITE = [
@@ -506,7 +505,6 @@ MUST_WRITE = [
     ("thanks turn off the hall light", "light.hall_lamp"),
     ("sure keep the porch light on", "light.porch_lamp"),
     ("actually turn on the hall light", "light.hall_lamp"),
-    ("at 11 turn off the hall light", "light.hall_lamp"),
 ]
 
 
@@ -540,12 +538,6 @@ def test_a_real_command_reaches_the_music_and_tv_nodes(utterance):
         assert state.answer != NO_WRITE_CUE_TEXT, (utterance, intent)
     state, _raw, _h = drive_tv(utterance, names=NAMES)
     assert state.answer != NO_WRITE_CUE_TEXT, utterance
-
-
-def test_a_lock_with_a_time_phrase_is_a_command_for_the_agent_too():
-    args = {"domain": "lock", "service": "lock", "entity_id": "lock.front_door"}
-    h = _agent_calls_after("in 5 minutes lock the door", "ha_service", args)
-    assert h.client.call_service.await_count == 1
 
 
 def test_lights_off_at_ten_is_a_schedule_not_narration():
@@ -619,3 +611,137 @@ def test_a_room_first_command_needs_a_room_the_generic_vocabulary_knows():
     assert classify_utterance("kitchen turn off the lights").kind == IMPERATIVE
     assert classify_utterance("kids turn off the lights").kind == UNKNOWN
     assert classify_utterance("galley turn off the lights").kind == UNKNOWN
+
+
+# --- reconcile round: closed room-first tails, schedule-led commands, the house's own names ------
+
+# Never an immediate write. "Deferred": the words ask for something later or on a condition.
+SCHEDULE_LED = [
+    "in 5 minutes unlock the front door", "in 5 minutes lock the door", "at 11 turn off the lights",
+    "if it gets dark, turn on the porch light",
+]
+ROOM_FIRST_DEFERRED = [
+    "porch light turn on whenever someone walks by", "kitchen lights turn off after the kids leave",
+    "upstairs lights turn off at ten",
+]
+# Room phrases that are a house's own names (R3) and ones that are not.
+OWN_NAME_COMMANDS = ["passage light turn on", "master closet light turn off"]
+NOT_OWN_NAME_COMMANDS = ["kids lights turn off at nine", "Sarah's lamp turn on", "neighbor's lights turn on at night"]
+ROOM_FIRST_NOT_CLOSED = [
+    "kitchen lights keep turning on", "kitchen lights turn on by themselves", "kitchen lights turn off all night",
+    "kitchen lights turn off if the kids leave",
+]
+
+
+@pytest.mark.parametrize("utterance", SCHEDULE_LED + ROOM_FIRST_DEFERRED + NOT_OWN_NAME_COMMANDS[:1], ids=str)
+def test_a_schedule_led_or_conditional_command_is_deferred_never_immediate(utterance):
+    uk = classify_utterance(utterance, NAMES)
+    assert (uk.kind, uk.command_text, uk.deferred) == (UNKNOWN, None, True), utterance
+    for device, action in HOSTILE_WRITES:
+        assert write_cue_problem(device, action, utterance, kind_hint=uk.kind, assistant_names=NAMES) == NO_CUE
+
+
+@pytest.mark.parametrize("utterance", SCHEDULE_LED + ROOM_FIRST_DEFERRED + NOT_OWN_NAME_COMMANDS + ROOM_FIRST_NOT_CLOSED,
+                         ids=str)
+def test_no_route_writes_now_for_a_deferred_or_not_closed_row(utterance):
+    state, _model, client = drive_control(utterance, names=NAMES)
+    assert writes(client) == [], (utterance, writes(client), state.answer)
+    for intent in (IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL):
+        _s, raw, _h = drive_music(utterance, names=NAMES, intent=intent)
+        assert raw.call_service.await_count == 0, (utterance, intent)
+    _s, raw, _h = drive_tv(utterance, names=NAMES)
+    assert raw.call_service.await_count == 0, utterance
+
+
+@pytest.mark.parametrize("utterance,domain,service", [
+    ("in 5 minutes unlock the front door", "lock", "unlock"), ("in 5 minutes lock the door", "lock", "lock"),
+    ("in 5 minutes close the garage door", "cover", "close_cover"),
+], ids=str)
+def test_a_door_never_moves_now_for_a_schedule_led_clause(utterance, domain, service):
+    # Through the agent's immediate tool, and through the controller with a lock the model picked.
+    h = _agent_calls_after(utterance, "ha_service", {"domain": domain, "service": service,
+                                                      "entity_id": f"{domain}.front_door"})
+    assert h.client.call_service.await_count == 0
+    from orchestrator import mode_permission as mp
+    from orchestrator.smart_home_controller import SmartHomeController
+    from unittest.mock import AsyncMock, MagicMock
+    from ._clause_harness import House, run
+    controller = SmartHomeController(entity_manager=House(), llm_router=MagicMock())
+    raw = MagicMock()
+    raw.call_service = AsyncMock(return_value={})
+    raw.get_state = AsyncMock(return_value={"state": "locked"})
+    intent = {"device_type": domain, "action": "unlock" if service == "unlock" else "lock",
+              "room": "front_door", "target_scope": "group", "parameters": {}}
+
+    async def go():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(utterance)):
+            return await controller.execute_intent(intent, raw, original_query=utterance)
+
+    assert run(go()) == NO_WRITE_CUE_TEXT and raw.call_service.await_count == 0
+
+
+@pytest.mark.parametrize("utterance", SCHEDULE_LED, ids=str)
+def test_a_schedule_led_command_reaches_the_automation_agent(utterance):
+    assert should_use_automation_agent(utterance) is True
+    create = ("create_automation", {"name": "Later", "trigger": {"type": "time", "time": "23:00"},
+                                    "actions": [{"type": "service", "entity_id": "light.office_0",
+                                                 "service": "turn_off"}]})
+    h = _agent_calls_after(utterance, *create)
+    assert h.client.create_automation.await_count == 1, utterance
+
+
+@pytest.mark.parametrize("utterance", ["in 5 minutes turn off the lights", "then at 11 turn off all the lights"], ids=str)
+def test_a_timed_step_of_a_sequence_still_has_its_cue(utterance):
+    # The sequence loop judges each step's own clause; a time-led one is the step's cue.
+    assert write_cue_problem("light", "turn_off", utterance, allow_scheduled=True) is None
+    assert write_cue_problem("light", "turn_off", utterance) == NO_CUE
+
+
+@pytest.mark.parametrize("utterance", OWN_NAME_COMMANDS, ids=str)
+def test_a_house_own_room_name_in_first_position_is_a_command(utterance):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.command_text) == (IMPERATIVE, utterance)
+    state, _model, client = drive_control(utterance)
+    assert state.answer != NO_WRITE_CUE_TEXT, (utterance, state.answer)
+
+
+@pytest.mark.parametrize("utterance", NOT_OWN_NAME_COMMANDS + ROOM_FIRST_NOT_CLOSED, ids=str)
+def test_other_leading_phrases_are_not_room_first_commands(utterance):
+    assert classify_utterance(utterance).kind != IMPERATIVE, utterance
+
+
+@pytest.mark.parametrize("utterance", [
+    "kitchen lights set to 50 percent", "kitchen lights set to blue", "kitchen lights dim to 30%",
+    "kitchen lights dim", "kitchen lights turn off please", "kitchen turn off the lights",
+    "bedroom lights turn up", "porch light on and set it to 50%",
+], ids=str)
+def test_the_closed_room_first_tails_are_commands(utterance):
+    assert classify_utterance(utterance).kind == IMPERATIVE, utterance
+
+
+def test_an_unavailable_room_vocabulary_is_retried_not_cached(monkeypatch):
+    import sys
+    from orchestrator import utterance_kind as uk
+    monkeypatch.setattr(uk, "_room_words_cache", None)
+    monkeypatch.setattr(uk, "_room_words_failure_logged", False)
+    real = sys.modules.get("orchestrator.room_context")
+    monkeypatch.setitem(sys.modules, "orchestrator.room_context", None)  # an import error
+    assert uk._room_words() == frozenset()
+    assert uk._room_words_cache is None and uk._room_words_failure_logged is True
+    if real is not None:
+        monkeypatch.setitem(sys.modules, "orchestrator.room_context", real)
+    else:
+        monkeypatch.delitem(sys.modules, "orchestrator.room_context")
+    assert "kitchen" in uk._room_words()
+
+
+def test_the_room_first_tail_is_closed_and_a_condition_anywhere_blocks_it():
+    from orchestrator.utterance_kind import _room_first_command as rf
+    assert rf("kitchen lights turn off please".split()) and rf("kitchen lights turn off now".split())
+    # An open tail is no command, with no schedule word to refuse it.
+    assert not rf("kitchen lights turn off tomorrow".split())
+    assert not rf("kitchen lights turn off the kids".split())
+    # A closed tail with a schedule or condition word in the clause is none either.
+    assert rf("kitchen lights turn off and set it to 50".split())
+    assert not rf("kitchen lights turn off and set it to 50 after ten".split())
+    assert not rf("kitchen lights turn off and set it to 50 if dark".split())

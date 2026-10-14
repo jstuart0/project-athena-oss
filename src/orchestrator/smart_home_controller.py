@@ -2520,6 +2520,16 @@ Return ONLY valid JSON."""
             ):
                 original_query = imperative_text(original_query) or original_query
                 words = original_query if cue_query is None else words
+            if (
+                utterance is not None and utterance.deferred and original_query is not None
+                and access_target.canonical_device_type(device_type) in ('lock', 'cover')
+                and action not in access_target.READ_ONLY_ACTIONS
+            ):
+                # A door never moves now for words that name a later time or a
+                # condition ("in 5 minutes unlock the front door").
+                import logging
+                logging.getLogger(__name__).info("deferred_door_command_refused")
+                return NO_WRITE_CUE_TEXT
             kind_hint = utterance.kind if utterance is not None else None
             scene_phrase = scene_request_allowed(utterance) if utterance is not None else False
             problem = access_target.write_cue_problem(
@@ -3120,7 +3130,7 @@ Return ONLY valid JSON."""
             kind = access_target.entity_domain(entity_id)
             if access_target.lacks_write_cue(
                 kind if kind in ('lock', 'cover') else target.get('device_type', 'light'), step.get('action'),
-                step_words, parameters, kind_hint=step_utterance.kind,
+                step_words, parameters, kind_hint=step_utterance.kind, allow_scheduled=True,
             ):
                 return NO_WRITE_CUE_TEXT
         door_text = await self._plan_sequence_doors(steps, query)

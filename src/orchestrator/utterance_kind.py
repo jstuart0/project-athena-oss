@@ -43,6 +43,9 @@ class UtteranceClassification:
     # The utterance without leading okay/hey/name and a trailing name: what a
     # scene phrase is compared with as a whole utterance.
     core_text: Optional[str] = None
+    # No command for now, but a command for later or on a condition ("in 5
+    # minutes lock the door", "if it gets dark, turn on the porch light").
+    deferred: bool = False
 
 
 UNKNOWN_CLASSIFICATION = UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="kill_switch")
@@ -476,6 +479,9 @@ class Clause(NamedTuple):
     # a condition that carries the command ("when it gets dark turn on the
     # porch light"). Not narration, but not an immediate request either.
     deferred: bool = False
+    # A command led by a time ("in 5 minutes lock the door", "at 11 turn off the
+    # lights"): never for now, so never an immediate write; a sequence plans it.
+    scheduled: bool = False
 
 
 class ClauseAnalysis(NamedTuple):
@@ -560,60 +566,164 @@ def _imperative_shape(content: Sequence[str]) -> bool:
     return bool(core) and (_clause_is_imperative_open(" ".join(core)) or _room_first_command(core))
 
 
-@functools.lru_cache(maxsize=1)
+_room_words_cache: Optional[frozenset] = None
+_room_words_failure_logged = False
+
+
 def _room_words() -> frozenset:
     """The words of the generic room vocabulary (``room_context.COMMON_ROOM_WORDS``,
-    the one place room words live). Read at call time so this module keeps
-    importing on its own; with the vocabulary unavailable no word names a room,
-    which refuses a room-first command rather than guessing one. A house's own
-    room names are not here: "galley turn off the lights" is not recognised."""
+    the one place room words live), read at call time so this module keeps
+    importing on its own. A failed read is logged once (the error type only) and
+    retried on the next call, never cached: with the vocabulary unavailable no
+    word names a room, which refuses a room-first command rather than guessing
+    one. A house's own room names are not here; a short phrase ending in a
+    device word stands in for them (see ``_leading_phrase_lengths``)."""
+    global _room_words_cache, _room_words_failure_logged
+    if _room_words_cache is not None:
+        return _room_words_cache
     try:
         from orchestrator.room_context import COMMON_ROOM_WORDS
-    except Exception:
+    except Exception as exc:
+        if not _room_words_failure_logged:
+            _room_words_failure_logged = True
+            import logging
+            logging.getLogger(__name__).warning("room_vocabulary_unavailable error_type=%s", type(exc).__name__)
         return frozenset()
-    return frozenset(w for phrase in COMMON_ROOM_WORDS for w in phrase.split())
+    _room_words_cache = frozenset(w for phrase in COMMON_ROOM_WORDS for w in phrase.split())
+    return _room_words_cache
 
 
-_ROOM_FIRST_VERBS = frozenset({
-    "turn", "switch", "dim", "brighten", "set", "lock", "unlock", "raise", "lower", "activate", "deactivate",
-    "enable", "disable", "start", "stop", "pause", "resume", "play", "open", "close", "shut",
-})
-_ROOM_FIRST_AFTER_ONOFF = frozenset({"and", "then"})  # "porch light on and set it to 50%"
+_ROOM_FIRST_VERBS = frozenset({"turn", "switch", "dim", "brighten", "set"})
+_ROOM_FIRST_PARTICLES = frozenset({"on", "off", "up", "down"})
+_ROOM_FIRST_JOINERS = frozenset({"and", "then"})  # "porch light on and set it to 50%"
+# Anything that makes the clause a schedule, a condition or a thing that happens by itself.
+_SCHEDULE_OR_CONDITION_RE = re.compile(
+    r"\b(?:when|whenever|after|before|because|if|at|every|until|while|once|unless|"
+    r"by itself|by themselves|on its own|on their own|all night|all day)\b"
+)
 _SELF_ACTING_RE = re.compile(
     r"\b(?:by itself|by themselves|on its own|on their own|all night|every night|every day|at night|"
     r"all day|every morning|every evening)\b"
 )
+_LEVEL_RE = re.compile(r"\d{1,3}%?")
+_OBJECT_DETERMINERS = frozenset({"the", "all", "my", "our", "those", "these", "it", "them"})
+
+
+def _is_device_word(w: str) -> bool:
+    return w in _room_words() or w in _COLOUR_BRIGHTNESS_WORDS or _DEVICE_NOUN_RE.fullmatch(w) is not None
 
 
 def _room_noun_phrase_length(ws: Sequence[str]) -> int:
     """How many leading words are a room, a device or a colour with no
     determiner ("kitchen lights", "living room lamp", "porch light")."""
     n = 0
-    while n < min(len(ws), 4) and (
-        ws[n] in _room_words() or ws[n] in _COLOUR_BRIGHTNESS_WORDS or _DEVICE_NOUN_RE.fullmatch(ws[n])
-    ):
+    while n < min(len(ws), 4) and _is_device_word(ws[n]):
         n += 1
     return n
+
+
+def _plain_name_word(w: str) -> bool:
+    """A word that could be part of a house's own room name: no possessive, no
+    pronoun or determiner, nothing that reads as a person doing something."""
+    return (
+        "'" not in w and not w[0].isdigit() and w not in _PRONOUN_SUBJECTS and w not in _DETERMINERS
+        and w not in _NARRATIVE_SUBJECTS and w not in _FINITE_VERBS and w not in _THIRD_PERSON_CONTROL_FORMS
+        and w not in _LEADING_FILLERS and w not in _SUBORDINATORS and not _CONTROL_VERB_RE.match(w)
+    )
+
+
+def _leading_phrase_lengths(ws: Sequence[str]) -> List[int]:
+    """The lengths a leading room phrase may have: the generic vocabulary's, and
+    a house's own name, a plain phrase of at most three words that ends in a
+    device word ("passage light", "master closet light")."""
+    lengths = []
+    n = _room_noun_phrase_length(ws)
+    if n:
+        lengths.append(n)
+    for k in (1, 2, 3):
+        if k <= len(ws) and _DEVICE_NOUN_RE.fullmatch(ws[k - 1]) and all(_plain_name_word(w) for w in ws[:k - 1]):
+            if k not in lengths:
+                lengths.append(k)
+    return lengths
+
+
+def _skip_object(rest: List[str]) -> List[str]:
+    """An optional object after "turn off": "the lights", "all the kitchen lights", "it"."""
+    if rest and rest[0] in _OBJECT_DETERMINERS:
+        rest = rest[1:]
+        if rest and rest[0] in _OBJECT_DETERMINERS:
+            rest = rest[1:]
+    k = 0
+    while k < min(len(rest), 3) and _is_device_word(rest[k]):
+        k += 1
+    return rest[k:]
+
+
+def _closed_command_tail(rest: List[str]) -> Optional[List[str]]:
+    """What follows a room phrase's command, or None when it is not one of the
+    closed forms: turn/switch + on|off|up|down; set + to + a number, N% or a
+    colour; dim/brighten + optional up|down|it|them|to N."""
+    verb, tail = rest[0], rest[1:]
+    if verb in ("turn", "switch"):
+        return _skip_object(tail[1:]) if tail[:1] and tail[0] in _ROOM_FIRST_PARTICLES else None
+    if verb == "set":
+        if tail[:1] == ["to"] and len(tail) > 1 and (_LEVEL_RE.fullmatch(tail[1]) or tail[1] in _COLOUR_BRIGHTNESS_WORDS):
+            tail = tail[2:]
+            return tail[1:] if tail[:1] == ["percent"] else tail
+        return None
+    if verb in ("dim", "brighten"):
+        if tail[:1] and tail[0] in ("up", "down", "it", "them"):
+            return _skip_object(tail[1:])
+        if tail[:1] == ["to"] and len(tail) > 1 and _LEVEL_RE.fullmatch(tail[1]):
+            tail = tail[2:]
+            return tail[1:] if tail[:1] == ["percent"] else tail
+        return _skip_object(tail)
+    return None
+
+
+def _closed_rest(tail: Sequence[str]) -> bool:
+    """Nothing left, "please" or "now", or and/then and another command."""
+    if not tail or list(tail) in (["please"], ["now"], ["now", "please"]):
+        return True
+    return tail[0] in _ROOM_FIRST_JOINERS and len(tail) > 1 and _imperative_shape(list(tail[1:]))
 
 
 def _room_first_command(ws: Sequence[str]) -> bool:
     """A command that names its room or device first: "kitchen lights set to
     50 percent", "bedroom lights turn off", "kitchen turn off the lights",
-    "living room lamp turn on", "porch light on and set it to 50%". The room
-    phrase carries no determiner ("the kitchen lights keep turning on" is
-    narration), the verb is one that changes a device, and "lights off at ten"
-    (a schedule, no verb) is left as it is."""
-    n = _room_noun_phrase_length(ws)
-    if n == 0 or n >= len(ws) or _SELF_ACTING_RE.search(" ".join(ws)):
+    "living room lamp turn on", "passage light turn on", "porch light on and
+    set it to 50%". The tail is closed (see ``_closed_command_tail``); a time,
+    a condition or "by itself" anywhere in the clause makes it something
+    else. "The kitchen lights keep turning on" (a determiner) is narration, and
+    "lights off at ten" (a schedule) is left as it is."""
+    text = " ".join(ws)
+    if _SCHEDULE_OR_CONDITION_RE.search(text):
         return False
-    nxt = ws[n]
-    if nxt in _ROOM_FIRST_VERBS:
-        return nxt != "set" or ws[n + 1:n + 2] == ["to"]
-    if nxt in ("on", "off"):
-        # Only as the first half of two commands. "Office lights off please" stays
-        # the non-imperative request it always was (its fan-out limits still apply).
-        return n + 1 < len(ws) and ws[n + 1] in _ROOM_FIRST_AFTER_ONOFF
+    for n in _leading_phrase_lengths(ws):
+        if n >= len(ws):
+            continue
+        rest = list(ws[n:])
+        if rest[0] in ("on", "off"):
+            # Only as the first half of two commands. "Office lights off please" stays
+            # the non-imperative request it always was (its fan-out limits still apply).
+            if len(rest) > 2 and rest[1] in _ROOM_FIRST_JOINERS and _imperative_shape(rest[2:]):
+                return True
+            continue
+        if rest[0] in _ROOM_FIRST_VERBS:
+            tail = _closed_command_tail(rest)
+            if tail is not None and _closed_rest(tail):
+                return True
     return False
+
+
+def _device_first_schedule_request(ws: Sequence[str]) -> bool:
+    """"porch light turn on whenever someone walks by", "upstairs lights turn off
+    at ten": a room or device first, a command verb, and a schedule or condition.
+    An automation to set up, not narration and not for now."""
+    text = " ".join(ws)
+    if not _SCHEDULE_OR_CONDITION_RE.search(text) or _SELF_ACTING_RE.search(text):
+        return False
+    return any(n < len(ws) and ws[n] in _ROOM_FIRST_VERBS for n in _leading_phrase_lengths(ws))
 
 
 def _split_sentence(toks: Sequence[_Tok], seqs: Tuple[Tuple[str, ...], ...]) -> List[Tuple[List[_Tok], str]]:
@@ -904,6 +1014,8 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
             return False, False, False
         # A copula lead-in ("we're home, turn on the lights") is no narrative lead (G4).
         return True, False, base in _NARRATIVE_SUBJECTS and not _copula_lead(ws)
+    if _device_first_schedule_request(ws):
+        return False, True, False  # "porch light turn on whenever someone walks by": an automation to set up
     if _device_subject_request(ws):
         return False, True, False  # "the porch light should come on at sunset": an automation to set up
     if _determiner_narration(ws):
@@ -936,7 +1048,7 @@ def _automation_shaped(content: Sequence[str]) -> bool:
     turn on the lights"): a control verb after the condition, and no subject
     and verb after that command ("if I turn off the lights it flickers" is a
     statement about the lights, and a question word opens a question)."""
-    if _device_subject_request(content):
+    if _device_subject_request(content) or _device_first_schedule_request(content):
         return True
     if not content or content[0] in _QUESTION_WORDS:
         return False
@@ -996,9 +1108,13 @@ def _analyze_sentence(
             cond = True
         shape = _imperative_shape(content)
         deferred = False
+        scheduled = False
         if shape:
             narration = reported or quoted or narrative
-            conditional = cond
+            scheduled = (
+                not narration and content[0] in _SCHEDULE_LEADS and _unwrap_time_phrase(list(content))[1]
+            )
+            conditional = cond or scheduled
             imperative = not (narration or conditional)
             deferred = conditional and not narration
         else:
@@ -1010,7 +1126,9 @@ def _analyze_sentence(
             if lead and not negated:
                 narrative = True
         cue_ok = imperative or negated or not (narration or conditional)
-        out.append(Clause(start, end, words, sep, imperative, narration, conditional, negated, False, cue_ok, deferred))
+        out.append(Clause(
+            start, end, words, sep, imperative, narration, conditional, negated, False, cue_ok, deferred, scheduled,
+        ))
     return out
 
 
@@ -1068,16 +1186,22 @@ def analyze_clauses(query: Optional[str], assistant_names: Iterable[str] = ()) -
     return _analyze_or_none(query, assistant_names) or ClauseAnalysis(query or "", (), None)
 
 
-def cue_text(query: Optional[str], assistant_names: Iterable[str] = ()) -> Optional[str]:
+def cue_text(
+    query: Optional[str], assistant_names: Iterable[str] = (), *, allow_scheduled: bool = False,
+) -> Optional[str]:
     """The words that may carry the cue for a write. When the utterance has a
     command, only the command's words; else the clauses that are not
     narration or a condition, and the text itself when nothing is dropped.
-    Fails closed: an analysis that fails gives no words."""
+    Fails closed: an analysis that fails gives no words. ``allow_scheduled``
+    lets a time-led command count (a sequence step is run later, not now)."""
     if query is None:
         return None
     analysis = _analyze_or_none(query, assistant_names)
     if analysis is None:
         return ""
+    if allow_scheduled and any(c.scheduled for c in analysis.clauses):
+        # A sequence plans a timed step: its time-led command is the cue.
+        return ", ".join(analysis.text[c.start:c.end] for c in analysis.clauses if c.imperative or c.scheduled)
     if analysis.command_text is not None:
         return analysis.command_text
     if not query.strip():
@@ -1294,7 +1418,10 @@ def _classify(query: Optional[str], names: Tuple[str, ...]) -> UtteranceClassifi
                 rule="ends_in_question_mark",
             )
 
-        return UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="fallthrough")
+        return UtteranceClassification(
+            kind=UtteranceKind.UNKNOWN, rule="fallthrough",
+            deferred=any(c.deferred for c in analysis.clauses) and not first_is_question_open,
+        )
     except Exception:
         return UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="error")
 
