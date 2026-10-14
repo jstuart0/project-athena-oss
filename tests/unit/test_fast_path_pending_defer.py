@@ -4,7 +4,7 @@ For every acknowledgement, thanks and farewell word, against every kind of
 open question -- a real pending fan-out confirmation stored by
 `route_control._store_pending_write_confirmation`, an `awaiting_state_question`
 context from `_await_state_question_clarification`, a last assistant message
-ending in "?", and an unreadable context store -- the turn reaches the full
+ending in "?" or in an offer ("I can also check ... if you'd like."), and an unreadable context store -- the turn reaches the full
 pipeline, the stored context is left untouched, and a following "yes" from the
 same caller still replays the confirmation. Positive controls prove the same
 words are answered without a question open.
@@ -80,6 +80,13 @@ async def _open_question(rig, session_id):
     await sm.add_message(session_id, "assistant", "Which light do you mean?")
 
 
+async def _open_promise(rig, session_id):
+    sm = h._runtime.get_session_manager()
+    await sm.get_or_create_session(session_id=session_id, caller_class="other")
+    await sm.add_message(session_id, "user", "any good italian places nearby")
+    await sm.add_message(session_id, "assistant", "I found three. I can also check for outdoor seating if you'd like.")
+
+
 async def _open_foreign_pending(rig, session_id):
     await _open_pending(rig, session_id, fingerprint="someone-else-entirely")
 
@@ -88,6 +95,7 @@ OPENERS = {
     "pending_confirmation": _open_pending,
     "awaiting_state_question": _open_awaiting,
     "assistant_question": _open_question,
+    "assistant_promise": _open_promise,
     "foreign_pending": _open_foreign_pending,
 }
 
@@ -144,6 +152,7 @@ def test_a_context_read_error_defers(monkeypatch):
     ("foreign_pending", "pending_confirmation"),
     ("awaiting_state_question", "awaiting_context"),
     ("assistant_question", "open_question"),
+    ("assistant_promise", "open_question"),
 ])
 def test_the_deferral_reason_is_counted(monkeypatch, opener, reason):
     rig = fp.install(monkeypatch, slow="record")

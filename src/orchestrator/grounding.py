@@ -97,6 +97,8 @@ def prior_tool_context(state: Any) -> bool:
     previous = _field(state, "prev_context")
     if not intent or not isinstance(previous, dict):
         return False
+    if _field(state, "resolved_request"):
+        return False  # a resumed task is a new search ("yes" to "want outdoor seating?"), not a question about the last one
     if previous.get("intent") != getattr(intent, "value", intent):
         return False
     parameters = previous.get("parameters") or {}

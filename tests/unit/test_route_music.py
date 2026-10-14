@@ -262,7 +262,9 @@ class TestBrowserPlaybackFallback:
         assert "office" in result.answer
         assert result.retrieved_data.get("playback_room") == "office"
 
-    def test_browser_playback_jarvis_web_room_falls_back_to_office(self):
+    def test_browser_playback_with_no_speaker_room_asks_which_room(self):
+        """A browser has no speaker (``_NO_PLAYBACK_ROOM``): nothing is guessed, the
+        user is asked, and nothing is played."""
         mh = _make_music_handler()
         mh.parse_music_play_intent = AsyncMock(return_value={
             "media_type": "artist",
@@ -272,15 +274,14 @@ class TestBrowserPlaybackFallback:
             "play_in_browser": True,
             "is_room_group": False,
         })
-        mh.handle_play = AsyncMock(return_value="Playing in office.")
         _runtime.set_music_handler(mh)
         state = _make_state(query="play Radiohead here", room="jarvis_web")
         with patch("orchestrator.nodes.route_music.store_conversation_context",
                    new_callable=AsyncMock):
             result = _run(route_music_node(state))
-        _, kwargs = mh.handle_play.call_args
-        assert kwargs["room"] == "office"
-        assert result.retrieved_data.get("playback_room") == "office"
+        mh.handle_play.assert_not_awaited()
+        assert result.answer == "Which room should I play it in?"
+        assert "playback_room" not in result.retrieved_data
 
 
 class TestMusicControl:
@@ -325,18 +326,27 @@ class TestContextStorage:
         mock_store.assert_awaited_once()
         kwargs = mock_store.call_args[1]
         assert kwargs["session_id"] == "ctx-session"
-        assert kwargs["intent"] == "music"
+        assert kwargs["intent"] == state.intent.value  # a real IntentCategory value, not "music"
+        assert "outcome" not in kwargs["parameters"]
         assert kwargs["ttl"] == 300
 
-    def test_store_context_not_called_when_answer_contains_sorry(self):
+    @pytest.mark.parametrize("answer", [
+        "I'm sorry, that artist wasn't found.",
+        "The music service didn't start that in the office. Want me to try again?",
+    ])
+    def test_a_failed_play_is_stored_with_its_outcome(self, answer):
         mh = _make_music_handler()
-        mh.handle_play = AsyncMock(return_value="I'm sorry, that artist wasn't found.")
+        mh.handle_play = AsyncMock(return_value=answer)
         _runtime.set_music_handler(mh)
         state = _make_state()
         mock_store = AsyncMock()
         with patch("orchestrator.nodes.route_music.store_conversation_context", mock_store):
             _run(route_music_node(state))
-        mock_store.assert_not_awaited()
+        mock_store.assert_awaited_once()
+        kwargs = mock_store.call_args[1]
+        assert kwargs["intent"] == state.intent.value
+        assert kwargs["parameters"]["outcome"] == "failed"
+        assert kwargs["response"] == answer
 
     def test_store_context_not_called_when_session_id_none(self):
         mh = _make_music_handler()

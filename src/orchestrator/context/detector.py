@@ -8,6 +8,15 @@ This enables follow-up queries like "do that again", "turn them off", "what abou
 import re
 from typing import Any, Dict, List, Set
 
+from shared.fast_path_vocab import (
+    AFFIRMATION_WORDS,
+    GRATITUDE_WORDS,
+    NEGATION_WORDS,
+    POLITE_SUFFIX_WORDS,
+    PROCEED_PHRASES,
+    normalize_reply,
+)
+
 
 # Context reference detection patterns
 CONTEXT_REF_PATTERNS = {
@@ -41,8 +50,10 @@ CONTEXT_REF_PATTERNS = {
     ],
     # Short continuation responses - answers to Athena's questions
     "continuations": [
-        "yes", "no", "ok", "okay", "sure", "nope", "yeah", "yep", "yup",
-        "nah", "please", "thanks", "go ahead", "sounds good", "that works",
+        # the confirmation vocabulary (shared with the fast path and the write
+        # fan-out reply), then the rest of what a person says to a question
+        *AFFIRMATION_WORDS, *NEGATION_WORDS,
+        "please", "thanks", "go ahead", "sounds good", "that works",
         "perfect", "fine", "great", "awesome", "cool", "alright", "right",
         "correct", "exactly", "definitely", "absolutely", "of course",
         "not really", "i guess", "maybe", "perhaps", "probably",
@@ -433,8 +444,9 @@ def detect_context_reference(query: str) -> Dict[str, Any]:
     if result["is_short_query"]:
         # Check if the entire query matches a continuation pattern
         # or if it starts with one (e.g., "no thanks", "yes please")
+        reply = normalize_reply(query_lower)  # "Yes." and "yes" are the same reply
         for cont in CONTEXT_REF_PATTERNS["continuations"]:
-            if query_lower == cont or query_lower.startswith(cont + " ") or query_lower.startswith(cont + ","):
+            if reply == cont or reply.startswith(cont + " "):
                 result["has_context_ref"] = True
                 result["ref_types"].append("continuation")
                 result["is_continuation"] = True
@@ -632,13 +644,6 @@ def detect_location_correction(query: str) -> Dict[str, Any]:
 # Public: the confirmation vocabulary lives in shared.fast_path_vocab (the
 # deterministic fast path must exclude it too) and is re-exported here, so the
 # anaphora tag, the confirmation reply and the fast path share one source.
-from shared.fast_path_vocab import (  # noqa: E402,F401
-    AFFIRMATION_WORDS,
-    GRATITUDE_WORDS,
-    NEGATION_WORDS,
-    POLITE_SUFFIX_WORDS,
-    PROCEED_PHRASES,
-)
 
 _YES_NO_BASE_WORDS = AFFIRMATION_WORDS + NEGATION_WORDS
 _YES_NO_STANDALONE_WORDS = ("any", "anything", "whatever")

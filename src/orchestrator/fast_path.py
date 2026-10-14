@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Tuple
@@ -81,6 +82,33 @@ def _ends_with_question(text: Optional[str]) -> bool:
     return text.rstrip().rstrip(_TRAILING_CLOSERS).rstrip().endswith(_QUESTION_MARKS)
 
 
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+_PROMISE_VERBS = r"(?:look|find|check|search|pull|get|show|give|tell|help|try|do|send|text|add|set)"
+_PROMISE_RE = re.compile(
+    r"\b(?:if you(?:'d| would)? (?:like|want|prefer|wish)"
+    r"|would you like"
+    r"|do you want"
+    r"|want me to"
+    r"|shall i"
+    r"|let me know if"
+    rf"|i (?:can|could) (?:also |even )?{_PROMISE_VERBS}"
+    rf"|i(?:'ll| will) (?:also |gladly |be happy to )?{_PROMISE_VERBS})\b"
+)
+
+
+def last_sentence(text: Optional[str]) -> str:
+    """The text's final sentence, whitespace-trimmed."""
+    parts = [p for p in _SENTENCE_BREAK.split((text or "").strip()) if p.strip()]
+    return parts[-1].strip() if parts else ""
+
+
+def ends_with_promise(text: Optional[str]) -> bool:
+    """The last sentence offers or promises more ("I can also check for outdoor
+    seating if you'd like."): a reply to it is an answer, like a reply to a question."""
+    sentence = last_sentence(text).lower().replace("\u2019", "'")
+    return bool(sentence) and bool(_PROMISE_RE.search(sentence))
+
+
 def _context_reason(parameters: Mapping[str, Any]) -> Optional[str]:
     if parameters.get(_PENDING_KEY):
         return REASON_PENDING_CONFIRMATION
@@ -120,7 +148,7 @@ async def fast_path_open_question(session_id: Optional[str], last_assistant: Opt
 
     Reasons: `pending_confirmation` (any caller's pending write confirmation),
     `awaiting_context` (any `awaiting_*` clarification), `open_question` (the
-    last assistant message ended with a question), `context_unreadable`
+    last assistant message ended with a question or an offer), `context_unreadable`
     (the store failed or held malformed data). Never raises.
     """
     try:
@@ -133,7 +161,7 @@ async def fast_path_open_question(session_id: Optional[str], last_assistant: Opt
                 reason = _context_reason(parameters)
                 if reason:
                     return reason
-        if _ends_with_question(last_assistant):
+        if _ends_with_question(last_assistant) or ends_with_promise(last_assistant):
             return REASON_OPEN_QUESTION
         return None
     except Exception:

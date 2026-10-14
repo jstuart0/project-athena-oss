@@ -81,6 +81,8 @@ GLOBS = (
     "tests/unit/test_grounding.py",
     "tests/unit/test_tool_call_grounding.py",
     "tests/unit/test_answer_route.py",
+    "tests/unit/test_followup.py",
+    "tests/unit/test_followup_wiring.py",
     "tests/integration/test_semantic_cache_real_redis.py",
     "tests/integration/test_ha_auth_*.py",
     "admin/backend/tests/test_ha_*.py",
@@ -167,6 +169,8 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_grounding.py",
     "tests/unit/test_tool_call_grounding.py",
     "tests/unit/test_answer_route.py",
+    "tests/unit/test_followup.py",
+    "tests/unit/test_followup_wiring.py",
     "tests/integration/test_semantic_cache_real_redis.py",
 )
 

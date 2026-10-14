@@ -282,6 +282,60 @@ def test_continuation_path_uses_continuation_prompt():
     assert result.answer == "Continuation answer."
 
 
+def test_continuation_prompt_is_used_with_only_a_history_summary():
+    """Summarized history mode leaves conversation_history empty: the summary counts."""
+    router = _make_llm_router("Continuation answer.")
+    _runtime.set_llm_router(router)
+
+    state = _make_state(
+        query="yes please",
+        intent=IntentCategory.GENERAL_INFO,
+        retrieved_data={},
+        context_ref_info={"is_continuation": True},
+        history_summary="Previous context: Assistant's last reply: Would you like me to proceed?",
+    )
+    with (
+        _patch_direct_response(None),
+        _patch_component_config(),
+        _patch_build_prompt(),
+        _patch_knowledge_context(),
+        _patch_admin_client(),
+        _patch_store_context(),
+        _patch_sms_detection(),
+    ):
+        asyncio.run(synthesize_node(state))
+
+    assert "continuing a conversation" in router.generate.call_args[1].get("prompt", "")
+
+
+def test_a_resumed_task_is_synthesized_from_its_request_not_the_bare_reply():
+    router = _make_llm_router("Resumed answer.")
+    _runtime.set_llm_router(router)
+
+    state = _make_state(
+        query="Yes.",
+        intent=IntentCategory.GENERAL_INFO,
+        retrieved_data={},
+        context_ref_info={"is_continuation": True},
+        conversation_history=[{"role": "assistant", "content": "Want outdoor seating?"}],
+    )
+    state.resolved_request = "Any good Italian places nearby. The user answered: yes."
+    with (
+        _patch_direct_response(None),
+        _patch_component_config(),
+        _patch_build_prompt(),
+        _patch_knowledge_context(),
+        _patch_admin_client(),
+        _patch_store_context(),
+        _patch_sms_detection(),
+    ):
+        asyncio.run(synthesize_node(state))
+
+    prompt = router.generate.call_args[1].get("prompt", "")
+    assert "Any good Italian places nearby. The user answered: yes." in prompt
+    assert "continuing a conversation" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # Test 6: No RAG data, has conversation history
 # ---------------------------------------------------------------------------

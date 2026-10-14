@@ -1878,6 +1878,34 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
 # summarize_conversation_history (Pattern 1 — uses _runtime at call time)
 # =============================================================================
 
+_LAST_REPLY_LABEL = "Assistant's last reply:"
+_LAST_REPLY_MAX_CHARS = 300
+
+
+def _last_reply_line(history: List[Dict[str, str]]) -> str:
+    """"Assistant's last reply: ..." from the newest assistant message, or "".
+
+    A summary that dropped the assistant's side loses the question a bare
+    "yes" answers, so the reply rides along verbatim. The tail is kept, because
+    the question is the end of an answer."""
+    for message in reversed(history):
+        if message.get("role") != "assistant":
+            continue
+        text = " ".join(str(message.get("content") or "").split())
+        if not text:
+            return ""
+        if len(text) > _LAST_REPLY_MAX_CHARS:
+            text = "..." + text[-_LAST_REPLY_MAX_CHARS:]
+        return f"{_LAST_REPLY_LABEL} {text}"
+    return ""
+
+
+def _without_last_reply(summary: str) -> str:
+    """A stored summary minus its reply line: the next summary carries only the
+    newest reply, not every earlier one."""
+    return summary.split(_LAST_REPLY_LABEL, 1)[0].rstrip()
+
+
 async def summarize_conversation_history(
     history: List[Dict[str, str]],
     current_query: str,
@@ -1902,6 +1930,8 @@ async def summarize_conversation_history(
     """
     if not history:
         return previous_summary or ""
+    previous_summary = _without_last_reply(previous_summary or "")
+    last_reply = _last_reply_line(history)
 
     # SHORT HISTORY PATH (1-2 messages):
     # Skip the LLM entirely. Small models struggle to "summarize" when there's
@@ -1918,6 +1948,8 @@ async def summarize_conversation_history(
                 result = f"Previous context: {clean_prev} {raw_context}"
             else:
                 result = f"Previous context: {raw_context}"
+            if last_reply:
+                result = f"{result} {last_reply}"
             logger.info(f"Short history path: {len(history)} messages -> {len(result)} chars (no LLM)")
             return result
 
@@ -1947,6 +1979,8 @@ Write a concise summary (2-5 sentences) that captures:
 1. ALL facts the user stated about themselves (name, location, occupation, pets, family, preferences, etc.) — include facts from the "previously known" section above
 2. Key topics discussed and any decisions or corrections made (corrections override old facts)
 3. Any context relevant to this new query: "{current_query}"
+
+4. Any question or offer the assistant made that the user has not answered yet (keep it word for word)
 
 IMPORTANT: Never drop user-stated facts even if they seem unrelated to the new query. The user expects you to remember everything they told you. If a user corrected a fact (e.g., "actually Mochi is 4 now"), use the corrected value.
 You MUST produce a summary. Every user message contains information worth preserving for conversation continuity.
@@ -1987,13 +2021,13 @@ Summary:"""
         # Validate summary isn't too long or empty
         if summary and len(summary) < 1000 and "No relevant prior context" not in summary:
             logger.info(f"History summarized: {len(history)} messages -> {len(summary)} chars")
-            return f"Previous context: {summary}"
+            return f"Previous context: {summary} {last_reply}".rstrip()
 
-        return ""
+        return f"Previous context: {last_reply}" if last_reply else ""
 
     except Exception as e:
         logger.warning(f"History summarization failed: {e}")
-        return ""
+        return f"Previous context: {last_reply}" if last_reply else ""
 
 
 # =============================================================================
