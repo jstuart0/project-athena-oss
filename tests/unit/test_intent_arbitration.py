@@ -81,6 +81,8 @@ W = I.WEATHER
     "any sleet or hail coming",
     "is there a storm tonight",
     "what's the outside temperature",
+    "show me the forecast",
+    "show me the weather",
 ])
 @pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
 def test_weather_phrasing_takes_the_pattern_over_general_info(query, llm_conf):

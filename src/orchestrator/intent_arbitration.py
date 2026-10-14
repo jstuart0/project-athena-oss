@@ -58,8 +58,9 @@ _WEATHER_EVIDENCE = re.compile(
     r"\b(?:weather|forecast|rain|raining|snow|snowing|sleet|hail|storms?|"
     r"(?:cold|hot|warm|temperature|temp)\s+(?:is it\s+)?outside|outside\s+temp(?:erature)?|outdoors?\s+temp(?:erature)?)\b"
 )
+_WEATHER_NAMED = re.compile(r"\b(?:weather|forecast)\b")  # naming the service outranks a media word
 # Music, film and show titles share these words ("the rain album").
-_MEDIA_WORDS = re.compile(r"\b(?:album|song|songs|track|band|lyrics|movie|film|show|series|podcast|playlist|book)\b")
+_MEDIA_WORDS = re.compile(r"\b(?:album|song|songs|track|band|lyrics|movie|film|series|podcast|playlist)\b")
 _PATTERN_EVIDENCE: Mapping[IntentCategory, "re.Pattern[str]"] = {
     IntentCategory.SPORTS: _SPORTS_EVIDENCE,
     IntentCategory.WEATHER: _WEATHER_EVIDENCE,
@@ -166,7 +167,9 @@ def _any(query: str, phrases) -> bool:
 
 def _has_evidence(intent: IntentCategory, query: str) -> bool:
     pattern = _PATTERN_EVIDENCE.get(intent)
-    if pattern is None or (intent == IntentCategory.WEATHER and _MEDIA_WORDS.search(query)):
+    if pattern is None or (
+        intent == IntentCategory.WEATHER and _MEDIA_WORDS.search(query) and not _WEATHER_NAMED.search(query)
+    ):
         return False
     if pattern.search(query):
         return True
