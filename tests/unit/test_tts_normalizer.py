@@ -603,3 +603,101 @@ def test_digit_runs_longer_than_the_bound_are_not_corrupted():
     long_run = "1" * 12
     assert n(f"{long_run} apples") == f"{long_run} apples"
     assert n(f"{long_run} mph") == f"{long_run} miles per hour"
+
+
+# --- Markdown stage (T5) ----------------------------------------------------------------
+
+from shared.tts_normalizer import strip_markdown  # noqa: E402
+
+MARKDOWN_CASES = [
+    ("1. I estimate **two** people", "I estimate two people."),
+    ("Read [the forecast](https://example.com/a_b_c) today", "Read the forecast today"),
+    ("![chart](https://example.com/c.png) is up", "chart is up"),
+    ("This is __very__ and *quite* odd", "This is very and quite odd"),
+    ("# Weather\n## Today", "Weather Today"),
+    ("- one\n* two!\n+ three", "one. two! three."),
+    ("1) first\n2. second:", "first. second:"),
+    ("> quoted\n> > deeper", "quoted deeper"),
+    ("```python\nx = 1\n```", "x = 1"),
+    ("Use `ls` now and ~~not~~ that", "Use ls now and not that"),
+    ("| Day | High |\n|---|:--:|\n| Mon | 72 |", "Day, High Mon, 72"),
+    ("Intro\n\n---\n\nOutro", "Intro Outro"),
+    ("Plan:\r\n- one\r\n- two", "Plan: one. two."),
+    ("An **unbalanced bold and *nested* text", "An unbalanced bold and nested text"),
+    ("***both***", "both"),
+]
+MARKDOWN_NEGATIVES = [
+    "5 * 3 equals 15",
+    "the snake_case name and file_name_here",
+    "Version 2. Then it ships",
+    "It was 2024. Then rain",
+    "Rated 5/5 - great, and -5 degrees",
+    "2 * 3 * 4",
+]
+
+
+@pytest.mark.parametrize("src,expected", MARKDOWN_CASES, ids=_ids(MARKDOWN_CASES))
+def test_markdown_is_stripped_for_speech(src, expected):
+    assert n(src) == expected
+
+
+@pytest.mark.parametrize("src", MARKDOWN_NEGATIVES)
+def test_markdown_negatives_are_untouched(src):
+    assert strip_markdown(src) == src
+    assert "*" in n("5 * 3 equals 15")
+
+
+def test_markdown_named_member_golden():
+    assert ("1. I estimate **two** people", "I estimate two people.") in MARKDOWN_CASES
+    assert len(MARKDOWN_CASES) >= 12 and len(MARKDOWN_NEGATIVES) >= 5
+
+
+def test_markdown_runs_before_url_stripping():
+    assert n("See [docs](https://example.com/x) for 5 mph") == "See docs for 5 miles per hour"
+    assert n("[https://example.com](https://example.com)") == ""
+
+
+def test_plain_text_is_not_changed_by_strip_markdown():
+    plain = _REALISTIC_PARAGRAPH
+    assert strip_markdown(plain) == plain
+
+
+def test_strip_markdown_is_idempotent_over_the_corpus():
+    bad = [t for t in CORPUS if strip_markdown(strip_markdown(t)) != strip_markdown(t)]
+    assert not bad, bad[:5]
+
+
+@pytest.mark.parametrize("seed", [7, 1301])
+def test_markdown_fuzz_is_idempotent_and_never_longer(seed):
+    rng = random.Random(seed)
+    alphabet = ["*", "**", "_", "__", "#", "# ", "- ", "1. ", "> ", "`", "```", "~~", "|", "[", "]",
+                "(", ")", "[a](b)", "\n", "\r\n", " ", " ", "a", "word", "5", "x_y", "2) ", "•  ", "---"]
+    for _ in range(4000):
+        x = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 24)))
+        y = n(x)
+        assert n(y) == y, f"not idempotent: {x!r} -> {y!r} -> {n(y)!r}"
+        z = strip_markdown(x)
+        assert strip_markdown(z) == z, f"strip_markdown not idempotent: {x!r}"
+        assert len(z) <= len(x) + 1 + x.count("\n"), f"growth: {x!r} -> {z!r}"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        pytest.param("*_#-|" * 20_000, id="marks-100kb"),
+        pytest.param("1. " * 34_000, id="digit-period-space-100kb"),
+        pytest.param("*" * 100_000, id="stars"),
+        pytest.param("[" * 100_000, id="brackets"),
+        pytest.param("[a](" * 25_000, id="link-openers"),
+        pytest.param("_a" * 50_000, id="underscore-a"),
+        pytest.param("*a " * 34_000, id="star-a-space"),
+        pytest.param("-" * 100_000, id="dashes"),
+        pytest.param(" " * 100_000 + "|", id="spaces-pipe"),
+        pytest.param("# " * 50_000, id="hash-space"),
+    ],
+)
+def test_markdown_hostile_input_is_linear_and_settles(hostile):
+    started = time.perf_counter()
+    y = n(hostile)
+    assert time.perf_counter() - started < 0.5
+    assert n(y) == y

@@ -786,7 +786,7 @@ def strip_urls(text: str) -> str:
     - Bare URLs: http://... or www...
     """
     # First, extract text from markdown links: [text](url) -> text
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'\[([^\[\]]{1,200})\]\([^()\s]{1,2000}\)', r'\1', text)
 
     # Remove standalone URLs (http, https, ftp)
     text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', '', text)
@@ -801,6 +801,70 @@ def strip_urls(text: str) -> str:
     # Clean up multiple spaces and trim
     text = re.sub(r'\s+', ' ', text).strip()
 
+    return text
+
+
+# --- Markdown (spoken answers must carry no formatting marks) -----------------------
+# Every quantifier is bounded or anchored to a line start, and nothing scans past a
+# newline, so hostile single-line input costs O(n) (pinned by test_tts_normalizer.py).
+_MD_LINK = re.compile(r"!?\[([^\[\]\n]{1,200})\]\([^()\[\]\s]{1,2000}\)")
+_MD_BOLD_STAR = re.compile(r"\*\*(?=[^\s*])([^*]{1,200}?)(?<=[^\s*])\*\*")
+_MD_BOLD_UNDER = re.compile(r"(?<!\w)__(?=[^\s_])([^_]{1,200}?)(?<=[^\s_])__(?!\w)")
+_MD_ITALIC_STAR = re.compile(r"(?<![\w*])\*(?=[^\s*])([^*]{1,200}?)(?<=[^\s*])\*(?![\w*])")
+_MD_ITALIC_UNDER = re.compile(r"(?<!\w)_(?=[^\s_])([^_]{1,200}?)(?<=[^\s_])_(?!\w)")
+_MD_STRAY_STARS = re.compile(r"\*{2,}")
+_MD_LINE_PREFIX = re.compile(
+    r"[ \t]{0,6}(?:(?:[-*\u2022+]|\d{1,3}[.)]|\#{1,6})[ \t]+|>[ \t]*)+"
+)
+_MD_LIST_MARK = re.compile(r"[-*\u2022+\d]")
+_MD_RULE = re.compile(r"[ \t]{0,3}(?:[-*_][ \t]*){3,}")
+_MD_FENCES = ("```", "~~~")
+_MD_SENTENCE_END = ".!?:;,"
+_MD_MAX_PASSES = 4
+
+
+def _markdown_line(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith(_MD_FENCES) or _MD_RULE.fullmatch(line):
+        return ""
+    line = _MD_LINK.sub(r"\1", line)
+    line = _MD_BOLD_STAR.sub(r"\1", line)
+    line = _MD_BOLD_UNDER.sub(r"\1", line)
+    line = _MD_ITALIC_STAR.sub(r"\1", line)
+    line = _MD_ITALIC_UNDER.sub(r"\1", line)
+    line = _MD_STRAY_STARS.sub("", line).replace("~~", "").replace("`", "")
+    stripped = line.strip()
+    if stripped.startswith("|") or stripped.endswith("|"):
+        cells = (cell.strip() for cell in stripped.split("|"))
+        if set(stripped) <= set("|:- \t"):
+            return ""
+        return ", ".join(cell for cell in cells if cell)
+    prefix = _MD_LINE_PREFIX.match(line)
+    if not prefix:
+        return line
+    rest = line[prefix.end():]
+    if rest.strip() and _MD_LIST_MARK.search(prefix.group(0)):
+        rest = rest.rstrip()
+        if rest[-1] not in _MD_SENTENCE_END:
+            rest += "."
+    return rest
+
+
+def strip_markdown(text: str) -> str:
+    """Remove markdown formatting so it is neither spoken nor read as symbols.
+
+    Keeps link text and emphasised words, drops fences, rules, heading, quote and
+    list markers (a list item gets a closing period), and turns table rows into
+    comma-separated cells. `5 * 3`, `snake_case` and mid-sentence "Version 2. Then"
+    are left alone. Newlines are preserved for the later whitespace collapse.
+    """
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for _ in range(_MD_MAX_PASSES):
+        converted = "\n".join(_markdown_line(line) for line in text.split("\n"))
+        if converted == text:
+            break
+        text = converted
     return text
 
 
@@ -819,7 +883,9 @@ def normalize_for_tts(text: str) -> str:
     if not text:
         return text
 
-    # FIRST: Strip emojis and URLs before any other processing
+    # FIRST: Strip markdown (needs the newlines the next stages collapse), then
+    # emojis and URLs, before any other processing
+    text = strip_markdown(text)
     text = strip_emojis(text)
     text = strip_urls(text)
 
@@ -847,6 +913,10 @@ def normalize_for_tts(text: str) -> str:
 
     # Optional: normalize phone numbers (can make them sound robotic)
     # text = normalize_phone_numbers(text)
+
+    # Removing URLs and emoji can leave a marker at the very start ("# 5 mph"); a
+    # second look keeps the whole function idempotent.
+    text = strip_markdown(text)
 
     # Clean up any double spaces
     text = re.sub(r'\s+', ' ', text).strip()
