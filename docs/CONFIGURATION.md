@@ -2589,7 +2589,7 @@ rather than guessing a device/room your HA instance doesn't have. See
 
 "Leave the lights on for two hours", "keep the lights off, I'm napping", "disable motion" and similar commands set helper entities that your own motion automation reads. Athena finds the rooms that have them in Home Assistant's states; there is no setting to list them.
 
-A room has motion control when Home Assistant holds `input_boolean.<room>_motion_disable`. `<room>` is the room's name in lower case with words joined by underscores (`Master Bedroom` is `master_bedroom`, `Nursery` is `nursery`). The other helpers use the same prefix, and an action needs the ones it writes:
+A room has motion control when Home Assistant holds `input_boolean.<room>_motion_disable`. `<room>` is the room's name in lower case with words joined by underscores (`Master Bedroom` is `master_bedroom`, `Nursery` is `nursery`), or the same form of one of the area's aliases: name the helpers after the area, or after one of its aliases (an area `Master Bedroom` with the alias `MBR` can use `mbr_motion_disable`). The room's own name wins over another room's alias; if two rooms claim one alias, or a room has helpers under two of its aliases, those helpers are skipped, so give each room one. The other helpers use that same prefix, and an action needs the ones it writes:
 
 | Action | Helpers it writes |
 |---|---|

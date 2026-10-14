@@ -5516,17 +5516,46 @@ Return ONLY the JSON, no other text."""
     async def _motion_control_rooms(self) -> Dict[str, str]:
         """The rooms that have motion control, from the states Home
         Assistant reports: ``{room key: slug}`` for every
-        ``input_boolean.<slug>_motion_disable``. The slug is the room's key
-        (``room_key`` of its name), so "Sun Room" has
-        ``sun_room_motion_disable``. That one helper is what makes a
-        room count; the others an action needs are checked when it runs."""
+        ``input_boolean.<slug>_motion_disable``. A slug belongs to a room
+        when it is ``room_key`` of the room's name or of one of its Home
+        Assistant area aliases (``nb`` for "North Wing"); the room's own
+        name wins over another room's alias. A slug two rooms claim only by
+        alias, or a room with two alias slugs, is skipped. A slug no room
+        claims is keyed by itself. That one helper is what makes a room
+        count; the others an action needs are checked when it runs. Entity
+        ids are always built from the slug, labels from the room key."""
         entities = await self.entity_manager.get_entities()
-        rooms: Dict[str, str] = {}
+        slugs = set()
         for entity_id in entities:
             if entity_id.startswith(_INPUT_BOOLEAN) and entity_id.endswith(MOTION_DISABLE_SUFFIX):
                 slug = entity_id[len(_INPUT_BOOLEAN):-len(MOTION_DISABLE_SUFFIX)]
                 if slug and room_key(slug) == slug:
-                    rooms[slug] = slug
+                    slugs.add(slug)
+        directory = self._directory()
+        room_keys = directory.keys() if directory is not None else ()
+        rooms: Dict[str, str] = {key: key for key in room_keys if key in slugs}
+        by_alias: Dict[str, List[str]] = {}
+        claimed_slugs = set(rooms.values())
+        for key in room_keys:
+            if key in rooms:
+                continue
+            claimed = [n for n in directory.name_keys(key) if n in slugs and n not in rooms.values()]
+            claimed_slugs.update(claimed)
+            if len(set(claimed)) == 1:
+                by_alias.setdefault(claimed[0], []).append(key)
+            elif claimed:
+                by_alias.setdefault("", []).append(key)
+        skipped = len(by_alias.pop("", []))
+        for slug, claimants in by_alias.items():
+            if len(claimants) == 1:
+                rooms[claimants[0]] = slug
+            else:
+                skipped += len(claimants)
+        for slug in slugs - claimed_slugs:
+            rooms.setdefault(slug, slug)
+        if skipped:
+            import structlog
+            structlog.get_logger(__name__).info("motion_control_ambiguous_slugs", skipped=skipped)
         return rooms
 
     async def _motion_rooms_reply(self, rooms: Dict[str, str]) -> str:
@@ -5580,11 +5609,12 @@ Return ONLY the JSON, no other text."""
         logger = logging.getLogger(__name__)
 
         motion_rooms = await self._motion_control_rooms()
-        normalized_room = motion_rooms.get(room_key(room or ""))
+        key = room_key(room or "")
+        normalized_room = motion_rooms.get(key)
         if not normalized_room:
             logger.info("motion_control_room_unsupported room_given=%s rooms_with_helpers=%d", bool(room), len(motion_rooms))
             return await self._motion_rooms_reply(motion_rooms)
-        spoken_room = self._spoken_room(normalized_room)
+        spoken_room = self._spoken_room(key)
 
         # Authorize the whole write set before saying anything about the
         # room's helpers, so a denied caller learns nothing about them.
@@ -5703,7 +5733,7 @@ Return ONLY the JSON, no other text."""
             elif action == "keep_current_brightness":
                 # Read the room's current brightness from the entity states
                 try:
-                    brightness_percent = await self._current_room_brightness(normalized_room)
+                    brightness_percent = await self._current_room_brightness(key)
                     if brightness_percent is not None:
                         await ha_client.call_service(
                             "input_number", "set_value",

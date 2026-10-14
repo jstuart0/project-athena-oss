@@ -20,6 +20,7 @@ from ._room_chat_harness import Chat
 
 import orchestrator.smart_home_controller as shc  # noqa: E402
 import shared.config  # noqa: E402
+from shared import ha_registry as hr  # noqa: E402
 from orchestrator import ha_entity_manager as hem  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator import mode_permission as mp  # noqa: E402
@@ -285,3 +286,68 @@ def test_hostile_helper_ids_are_ignored_by_discovery(monkeypatch, entity_id):
     chat.rig.manager._entities_cache[entity_id] = _state(entity_id, "off")
     chat.rig.manager._build_indexes()
     assert asyncio.run(chat.rig.controller._motion_control_rooms()) == {"study": "study"}
+
+
+def add_area(chat, name, aliases=()):
+    chat.raw_registry["areas"].append(
+        {"area_id": "area_" + name.lower().replace(" ", "_"), "name": name, "aliases": list(aliases)})
+    chat.rig.registry._snapshot = hr.RegistrySnapshot.from_raw(chat.raw_registry, fetched_at=3.0)
+
+
+def with_helpers(chat, *slugs):
+    for slug in slugs:
+        chat.rig.manager._entities_cache.update(helper_states(slug))
+    chat.rig.manager._build_indexes()
+
+
+class TestSlugAliases:
+    def _chat(self, monkeypatch, *slugs, aliases=("MBR",)):
+        chat = Chat(monkeypatch)
+        add_area(chat, "Master Bedroom", aliases)
+        with_helpers(chat, *slugs)
+        return chat
+
+    def test_a_slug_that_is_an_area_alias_belongs_to_the_area(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr")
+        chat.llm.reply = intent("master bedroom", "leave_lights_on", duration_minutes=60)
+        out = chat.turn("leave the lights on in the master bedroom")
+        assert chat.written == ["input_number.mbr_leave_lights_on_minutes", "input_boolean.mbr_leave_lights_on"], (
+            chat.written, out.answer)
+        assert "master bedroom" in out.answer.lower() and "mbr" not in out.answer.lower()
+
+    def test_the_refusal_names_the_area_not_the_slug(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr")
+        chat.llm.reply = intent("galley")
+        out = chat.turn("disable motion in the galley")
+        assert "master bedroom" in out.answer.lower() and "mbr" not in out.answer.lower(), out.answer
+
+    def test_the_rooms_own_name_beats_another_rooms_alias(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr", "study", aliases=("MBR", "Study"))
+        rooms = asyncio.run(chat.rig.controller._motion_control_rooms())
+        assert rooms["study"] == "study" and rooms["master_bedroom"] == "mbr", rooms
+
+    def test_a_slug_two_rooms_claim_by_alias_is_skipped(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr")
+        add_area(chat, "Guest Suite", ["MBR"])
+        rooms = asyncio.run(chat.rig.controller._motion_control_rooms())
+        assert rooms == {}, rooms
+
+    def test_a_room_with_two_alias_slugs_is_skipped(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr", "main", aliases=("MBR", "Main"))
+        rooms = asyncio.run(chat.rig.controller._motion_control_rooms())
+        assert rooms == {}, rooms
+
+    def test_a_slug_no_room_claims_stays_keyed_by_itself(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr", "workshop")
+        rooms = asyncio.run(chat.rig.controller._motion_control_rooms())
+        assert rooms == {"master_bedroom": "mbr", "workshop": "workshop"}, rooms
+
+    def test_permission_and_refusal_follow_the_slug(self, monkeypatch):
+        chat = self._chat(monkeypatch, "mbr")
+        chat.llm.reply = intent("master bedroom", "leave_lights_on", duration_minutes=60)
+        out = chat.turn("leave the lights on in the master bedroom",
+                        perms=guest(r"input_number\.mbr_leave_lights_on_minutes"), mode="guest")
+        assert chat.written == [] and "trouble" not in out.answer, (chat.written, out.answer)
+        chat.llm.reply = intent("galley")
+        out = chat.turn("disable motion in the galley", perms=guest(r"input_\w+\.mbr_.*"), mode="guest")
+        assert out.answer == shc.MOTION_NOT_SET_UP, out.answer

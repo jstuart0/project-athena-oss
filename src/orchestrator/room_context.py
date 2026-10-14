@@ -273,6 +273,14 @@ class RoomDirectory:
         entry = self._entries.get(key)
         return entry.ref() if entry else None
 
+    def name_keys(self, key: str) -> Tuple[str, ...]:
+        """The ``room_key`` form of every name a room answers to (its own
+        and each alias), for matching a room to an id slug."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return ()
+        return tuple(dict.fromkeys(["_".join(phrase) for phrase in entry.phrases] + [entry.key]))
+
     def members_of(self, key: str) -> Tuple[str, ...]:
         entry = self._entries.get(key)
         return entry.members if entry else ()
