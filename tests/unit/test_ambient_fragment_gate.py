@@ -556,3 +556,115 @@ def test_the_streaming_runner_does_not_gate_real_utterances(rig, monkeypatch, qu
     out = asyncio.run(h.main.run_orchestrator_for_streaming(_state(query)))
     assert out.answer != AMBIENT_REPLY
     rig.selection.assert_awaited_once()
+
+
+# --- Phase 10: there/here, long narration, and the unconditional no-web-search rule ---------------------
+
+LONG_NARRATION = [
+    "the kids are playing in the yard while dinner cooks quietly",
+    "he said the game was boring and they left early today",
+    "the dog keeps barking at the mailman every single afternoon around three",
+]
+# Long enough to pass the word-count floor only as narration; each must stay blocked.
+LONG_BUT_NOT_NARRATION = {
+    "I think the kids are playing in the yard while dinner cooks": "word_count",                   # first person
+    "turn on the lights in the yard while the kids are outside playing around": "word_count",      # a command
+    "the kids are playing in the yard while dinner cooks and the dog sleeps by the door "
+    "and the neighbours talk over the fence about nothing at all in particular today": "word_count",  # over the cap
+}
+
+
+@pytest.mark.parametrize("query", ["hmm interesting over there", "oh look over there"])
+def test_there_and_here_are_not_reference_words_when_nothing_is_open(query):
+    assert _reason(query) is None
+    assert _reason(query, open_question="open_question") == "open_question"
+
+
+def test_here_inside_a_first_person_or_device_remark_is_still_blocked():
+    assert _reason("it's too dark in here") is not None
+    assert _reason("well that happened out here") == "reference_word"
+
+
+@pytest.mark.parametrize("query", LONG_NARRATION)
+def test_long_third_person_narration_is_gated(query):
+    assert _reason(query) is None
+    assert _reason(query, channel=TEXT) == "channel"
+    assert _reason(query, open_question="open_question") == "open_question"
+    assert _reason(query, intent=IntentCategory.GENERAL_INFO) == "intent"
+
+
+@pytest.mark.parametrize("query,guard", list(LONG_BUT_NOT_NARRATION.items()))
+def test_long_utterances_that_are_not_narration_are_blocked(query, guard):
+    assert _reason(query) == guard
+
+
+def test_the_gate_off_still_hands_a_long_narration_to_the_pipeline(rig):
+    rig.guardrails.return_value = DEFAULT_GUARDRAILS
+    assert asyncio.run(ambient_fragment_applies(_state(LONG_NARRATION[0]))) is False
+
+
+class _SearchSpy:
+    def __init__(self):
+        self.search = AsyncMock(return_value=("general_info", []))
+
+
+@pytest.fixture
+def web_fallback(monkeypatch):
+    spy = _SearchSpy()
+    h._runtime.set_parallel_search_engine(spy)
+    config = {"enabled": True, "config": {"excluded_intents": [], "detection_patterns": ["couldn't find"]}}
+    monkeypatch.setattr(h.helpers_module, "get_post_synthesis_fallback_config", AsyncMock(return_value=config))
+    monkeypatch.setattr(h.helpers_module, "detect_insufficient_response", lambda answer, cfg: "couldn't find")
+    return spy
+
+
+def _fallback_state(query, **kw):
+    state = _state(query, **kw)
+    state.answer = "I couldn't find anything about that."
+    return state
+
+
+@pytest.mark.parametrize("gate", [SWITCH_ON, DEFAULT_GUARDRAILS], ids=["gate-on", "gate-off"])
+@pytest.mark.parametrize("fragment", ["hmm interesting point", "huh well alright then", "okay", "over there"])
+def test_a_raw_fragment_is_never_web_searched_with_the_gate_on_or_off(web_fallback, rig, gate, fragment):
+    rig.guardrails.return_value = gate
+    assert asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(_fallback_state(fragment))) is False
+    web_fallback.search.assert_not_awaited()
+
+
+def test_a_full_unknown_question_still_falls_back_to_the_web(web_fallback):
+    state = _fallback_state("what's the tallest building in the world right now")
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(state))
+    web_fallback.search.assert_awaited_once()
+
+
+@pytest.mark.parametrize("query", [
+    "is the tallest building in dubai",      # question form by its first word
+    "tallest building in the world?",        # question mark
+])
+def test_a_short_question_is_not_a_fragment(web_fallback, query):
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(_fallback_state(query)))
+    web_fallback.search.assert_awaited_once()
+
+
+def test_a_fragment_with_an_open_offer_or_a_reference_is_not_exempt(web_fallback):
+    offered = _fallback_state("hmm interesting point", history=[{"role": "assistant", "content": "Want me to check?"}])
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(offered))
+    assert web_fallback.search.await_count == 1
+    referring = _fallback_state("hmm interesting point")
+    referring.context_ref_info = {"is_continuation": True}
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(referring))
+    assert web_fallback.search.await_count == 2
+
+
+def test_a_non_unknown_short_turn_keeps_the_fallback(web_fallback):
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(
+        _fallback_state("hmm interesting point", intent=IntentCategory.GENERAL_INFO)))
+    web_fallback.search.assert_awaited_once()
+
+
+def test_the_fragment_cap_is_six_words(web_fallback):
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(_fallback_state("wow big surprise ending nobody saw")))
+    web_fallback.search.assert_not_awaited()                                    # 6 words: a fragment
+    asyncio.run(h.helpers_module.maybe_post_synthesis_fallback(_fallback_state("wow big surprise ending nobody saw coming")))
+    web_fallback.search.assert_awaited_once()                                   # 7 words: a statement the pipeline handles

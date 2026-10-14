@@ -202,7 +202,12 @@ def test_classify_node_uses_the_shared_scene_constants():
     literals = {n.value for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
     assert not {"movie mode", "watch a movie", "set the mood"} & literals, "a scene phrase is spelled out in main.py again"
     assert source.count("scene_patterns = SCENE_TRIGGER_PHRASES") == 2
-    assert "scene_patterns = SCENE_OVERRIDE_PHRASES" in source
+    arbitration = (MAIN_PY.parent / "intent_arbitration.py").read_text(encoding="utf-8")
+    arbitration_literals = {
+        n.value for n in ast.walk(ast.parse(arbitration)) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+    assert not {"movie mode", "watch a movie", "set the mood", "party vibes"} & arbitration_literals
+    assert "_any(query, SCENE_OVERRIDE_PHRASES)" in arbitration
     assert "goodbye" in vocab.SCENE_TRIGGER_PHRASES and "party vibes" in vocab.SCENE_OVERRIDE_PHRASES
 
 

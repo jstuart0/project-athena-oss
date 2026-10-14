@@ -186,7 +186,7 @@ def component_meta() -> Dict[str, Dict[str, str]]:
 
 
 def profile_registry() -> Dict[str, Dict[str, Any]]:
-    ollama_default = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+    ollama_default = get_config().athena_default_model
     mlx_small = os.getenv("ATHENA_MLX_SMALL_MODEL", "qwen3-4b-mlx")
     mlx_large = os.getenv("ATHENA_MLX_LARGE_MODEL", "qwen3-8b-mlx")
     # Output length is not a profile concern: callers pass max_tokens (see

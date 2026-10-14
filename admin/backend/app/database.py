@@ -310,7 +310,7 @@ def seed_dev_data():
 
 
 # OSS default model configuration
-OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+OSS_DEFAULT_MODEL = get_config().athena_default_model
 # OSS_OLLAMA_URL preserved as module-level constant for compatibility with
 # admin/backend/main.py:25 import (`from app.database import ... OSS_OLLAMA_URL`)
 # and main.py:350, 352, 355, 380 reads.  Resolution is now centralized via

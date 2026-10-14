@@ -21,11 +21,12 @@ from typing import Any, Dict, List, Optional, Union
 import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
+from shared.config import get_config as get_athena_config
 from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
 from orchestrator import access_target
-from orchestrator.model_safe_errors import make_user_safe, model_safe_error, scrub_tool_result
+from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance, command_query, has_narration, is_narration
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
@@ -499,7 +500,7 @@ class AutomationAgent:
         self,
         query: str,
         context: Dict[str, Any],
-        model: str = "llama3.1:8b"
+        model: Optional[str] = None
     ) -> str:
         """
         Execute agent loop for automation-related queries.
@@ -507,11 +508,12 @@ class AutomationAgent:
         Args:
             query: User's natural language request
             context: Contains room, mode (owner/guest), session_id, guest_name
-            model: LLM model to use
+            model: LLM model to use (default: AthenaConfig.athena_default_model)
 
         Returns:
             Single response message to user
         """
+        model = model or get_athena_config().athena_default_model
         # The turn's own words ground every door and scene the model picks.
         context = {**context, "query": query}
         mode = context.get("mode", "owner")
@@ -586,8 +588,8 @@ class AutomationAgent:
                     })
 
             except Exception as e:
-                logger.error(f"AutomationAgent error in iteration {iteration}: {e}")
-                return "Sorry, something went wrong with that request."
+                logger.error("automation_agent_iteration_failed", iteration=iteration, **log_safe(e))
+                return model_safe_error(e)
 
         # Safety fallback
         logger.warning(f"AutomationAgent hit max iterations ({max_iterations})")
@@ -639,7 +641,7 @@ class AutomationAgent:
             return parsed
 
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.error("automation_agent_llm_call_failed", **log_safe(e))
             raise
 
     def _messages_to_prompt(self, messages: List[Dict]) -> str:
@@ -1641,6 +1643,18 @@ class AutomationAgent:
             await self.ha_client.call_service("light", "turn_on", restore_data)
 
 
+# A motion condition ("when there's motion in the hall, ...") sets up an
+# automation; "disable motion in the garage" is a motion-flow control and "is
+# there motion" a question. Only a condition word before the motion word counts.
+_MOTION_TRIGGER_RE = re.compile(
+    r"\b(?:when|whenever|if|once|as soon as|any ?time)\b[^.;!?]{0,40}?\b(?:motion|movement)\b"
+)
+
+
+def is_motion_trigger_form(query: str) -> bool:
+    return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
+
+
 _SCHEDULE_LED_RE = re.compile(
     r"^\s*(?:(?:in|after)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)"
     r"\s*(?:seconds?|secs?|minutes?|mins?|hours?)\s+"
@@ -1758,7 +1772,7 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     # Event/trigger indicators - home automation triggers
     event_patterns = [
         'when motion', 'when there is motion', 'when i walk', 'when someone',
-        'motion is detected', 'motion detected', 'motion in',
+        'motion is detected',
         'when the door', 'when door opens', 'when door closes',
         'when i arrive', 'when i leave', 'when i get home', 'when i come home',
         'at sunset turn', 'at sunrise turn', 'before sunset turn', 'after sunset turn',
@@ -1805,7 +1819,7 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
 
     has_sequence = any(p in query_lower for p in sequence_patterns)
     has_schedule_action = any(p in query_lower for p in schedule_with_action_patterns)
-    has_event = any(p in query_lower for p in event_patterns)
+    has_event = any(p in query_lower for p in event_patterns) or is_motion_trigger_form(query_lower)
     has_time_pattern = any(p in query_lower for p in time_pattern_patterns)
     has_automation_mgmt = any(p in query_lower for p in automation_management_patterns)
 

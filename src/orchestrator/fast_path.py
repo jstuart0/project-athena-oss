@@ -25,6 +25,7 @@ from shared.local_time import local_now
 from shared.logging_config import configure_logging
 from shared.output_channel import OutputChannel, channel_for_interface_type
 
+from orchestrator import access_target
 from orchestrator.nodes import _runtime
 from orchestrator.session_keys import context_storage_key
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -192,6 +193,14 @@ async def fast_path_open_question(session_id: Optional[str], last_assistant: Opt
 
 AMBIENT_MIN_WORDS = 3
 AMBIENT_MAX_WORDS = 8
+# Third-person narration ("the kids are playing in the yard while dinner cooks")
+# is gated up to this length when `statement_clause` says every word is a
+# statement; the short-fragment guards apply to it too, except the reference
+# words, which only matter for a short reply to an option list.
+AMBIENT_NARRATION_MAX_WORDS = 30
+# A raw fragment this short (and no question, task or reference) is never
+# web-searched, with the gate on or off.
+FRAGMENT_MAX_WORDS = 6
 AMBIENT_CONFIDENCE_CEILING = 0.30
 # The pattern classifier's no-match result is GENERAL_INFO at 0.5; a specific
 # match is 0.85. Anything at or above this ceiling is a real match.
@@ -232,7 +241,7 @@ _MEDIA_COMMAND_WORDS = frozenset(
 _FIRST_PERSON_WORDS = frozenset("i im ive id ill my me mine we us our you youre your".split())
 # Words that point back at an earlier question or an option list ("the kitchen one", "all of them").
 _REFERENCE_WORDS = frozenset(
-    ("the a an all both that this those these it its them they one ones first second third last other another same there here").split()
+    ("the a an all both that this those these it its them they one ones first second third last other another same").split()
 )
 # A device, room or house-system noun: the utterance is probably about the house.
 _DEVICE_WORDS = frozenset(
@@ -288,7 +297,12 @@ def ambient_block_reason(
         words = normalize(query).split()
         if SAFETY_WORDS.intersection(words):
             return GUARD_SAFETY_WORD
-        if not AMBIENT_MIN_WORDS <= len(words) <= AMBIENT_MAX_WORDS:
+        long_narration = (
+            AMBIENT_MAX_WORDS < len(words) <= AMBIENT_NARRATION_MAX_WORDS
+            and not _FIRST_PERSON_WORDS.intersection(words)
+            and access_target.statement_clause(words)
+        )
+        if not (AMBIENT_MIN_WORDS <= len(words) <= AMBIENT_MAX_WORDS or long_narration):
             return GUARD_WORD_COUNT
         if words[0] in _FIRST_WORDS:
             return GUARD_FIRST_WORD
@@ -296,7 +310,7 @@ def ambient_block_reason(
             return GUARD_MEDIA_WORD
         if _FIRST_PERSON_WORDS.intersection(words):
             return GUARD_FIRST_PERSON
-        if _REFERENCE_WORDS.intersection(words):
+        if not long_narration and _REFERENCE_WORDS.intersection(words):
             return GUARD_REFERENCE_WORD
         if _DEVICE_WORDS.intersection(words):
             return GUARD_DEVICE_WORD
@@ -312,6 +326,33 @@ def ambient_block_reason(
         return None
     except Exception:
         return GUARD_ERROR
+
+
+def fragment_shaped_unknown(state: Any) -> bool:
+    """An UNKNOWN turn that is a raw fragment: at most FRAGMENT_MAX_WORDS words,
+    no question form, no open task or offer, no reference to an earlier turn.
+    Such a turn is never web-searched. Pure, no I/O, never raises (a turn it
+    cannot read is not a fragment, so the admin settings decide as before)."""
+    try:
+        if getattr(getattr(state, "intent", None), "value", getattr(state, "intent", None)) != "unknown":
+            return False
+        query = state.query or ""
+        words = normalize(query).split()
+        if not 1 <= len(words) <= FRAGMENT_MAX_WORDS:
+            return False
+        if any(mark in query for mark in _QUESTION_MARKS) or words[0] in _FIRST_WORDS:
+            return False
+        previous = getattr(state, "prev_context", None) or {}
+        if _context_reason(previous.get("parameters") or {}):
+            return False
+        if ends_with_open_offer(_last_assistant_in_history(getattr(state, "conversation_history", None))):
+            return False
+        ref_info = getattr(state, "context_ref_info", None) or {}
+        return not (
+            ref_info.get("is_continuation") or ref_info.get("has_context_ref") or _REFERENCE_WORDS.intersection(words)
+        )
+    except Exception:
+        return False
 
 
 def is_ambient_fragment(

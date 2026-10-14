@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+from shared.config import get_config as get_athena_config
 import httpx
 import structlog
 from shared.admin_url import get_admin_url
@@ -710,7 +712,7 @@ Respond with ONLY the JSON, no markdown or explanation.
 async def generate_tool_from_request(
     user_request: str,
     llm_router: Any = None,
-    model: str = "llama3.1:8b"
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Use LLM to generate a tool definition from natural language.
@@ -718,11 +720,12 @@ async def generate_tool_from_request(
     Args:
         user_request: What the user wants the tool to do
         llm_router: LLMRouter instance (if None, will import and get one)
-        model: LLM model to use
+        model: LLM model to use (default: AthenaConfig.athena_default_model)
 
     Returns:
         Parsed tool definition or error
     """
+    model = model or get_athena_config().athena_default_model
     prompt = TOOL_GENERATION_PROMPT.format(user_request=user_request)
 
     try:
