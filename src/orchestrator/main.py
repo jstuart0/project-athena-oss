@@ -5455,6 +5455,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     state.identity_answer = True
                     logger.info("identity_backstop_replaced", node="tool_call")
                 state.data_source = f"LLM ({llm_model}) - no tools needed"
+                state.model_used = llm_model
                 # Capture token metrics from direct LLM response
                 state.llm_tokens = llm_response.get("eval_count", 0)
                 if state.llm_tokens > 0 and llm_call_duration > 0:
@@ -6072,6 +6073,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
             "synthesis_model": synthesis_model
         }
         state.data_source = f"Tool Calling ({llm_backend}/{synthesis_model})"
+        state.model_used = synthesis_model
         state.citations.extend([f"Tool: {tc.get('function', {}).get('name')}" for tc in tool_calls])
 
         logger.info(f"Tool calling completed with {len(tool_calls)} tool(s)")
@@ -7827,6 +7829,7 @@ async def process_query_stream(
                 # build_synthesis_prompt_for_streaming() returns the FULL assembled prompt:
                 # system_context + history_context + synthesis_prompt — do NOT prepend again.
                 full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
+                state.model_used = synthesis_model
 
                 # Use per-intent max_tokens from component config, same as synthesize_node.
                 synthesis_config = await get_component_config("response_synthesis")
@@ -8881,6 +8884,7 @@ async def chat_completions(
                 else:
                     # TRUE STREAMING: Build prompt and stream directly from LLM
                     full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
+                    state.model_used = synthesis_model
 
                     logger.info(
                         "streaming_llm_started",

@@ -18,9 +18,10 @@ from tests.integration._capture_pg import Database, require_server
 pytestmark = pytest.mark.integration
 
 DEBUG_COLUMNS = (
-    "model_used", "rag_tools_used", "tokens_generated", "tokens_per_second", "validation_passed",
-    "error_message", "complexity", "base_knowledge_populated", "node_timings_ms", "debug_detail",
+    "tokens_generated", "tokens_per_second", "validation_passed",
+    "error_message", "complexity", "base_knowledge_populated", "debug_detail",
 )
+STANDARD_COLUMNS = ("model_used", "rag_tools_used", "node_timings_ms")
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +84,7 @@ def test_missing_flag_row_counts_as_off(db):
     assert counts(db) == (0, 0)
 
 
-def test_analytics_on_debug_off_stores_base_fields_and_nulls_the_debug_block(db):
+def test_analytics_on_debug_off_stores_base_fields_model_tools_timings_and_nulls_the_debug_block(db):
     db.set_flag(cc.ANALYTICS_KEY, True)
     write(db, record())
     row = db.rows("SELECT * FROM conversation_turns")[0]
@@ -92,6 +93,7 @@ def test_analytics_on_debug_off_stores_base_fields_and_nulls_the_debug_block(db)
     assert (row["intent"], float(row["confidence"]), row["is_fallback"], row["response_time_ms"]) == ("control", 0.91, False, 420)
     assert row["source"] == "analytics" and row["text_withheld"] is False and row["turn_number"] == 1
     assert all(row[c] is None for c in DEBUG_COLUMNS), {c: row[c] for c in DEBUG_COLUMNS}
+    assert (row["model_used"], row["rag_tools_used"], row["node_timings_ms"]) == ("m1", ["weather"], {"classify": 12.5})
     conv = db.rows("SELECT * FROM conversations")[0]
     assert (conv["session_class"], conv["user_mode"], conv["room"], conv["total_tokens"], conv["turn_count"]) == ("owner", "owner", "porch", None, 1)
 
@@ -108,6 +110,14 @@ def test_debug_on_fills_the_debug_block(db):
     assert row["debug_detail"] == {"cache_hit": True, "prompt_tokens": 99}
     assert row["error_message"] == "oops"
     assert db.scalar("SELECT total_tokens FROM conversations") == 12
+
+
+def test_off_list_tool_names_and_timing_keys_never_reach_the_row(db):
+    db.set_flag(cc.ANALYTICS_KEY, True)
+    write(db, record(rag_tools_used=["weather", "tell me the pin 1234"], node_timings_ms={"classify": 1.0, "my secret": 2.0},
+                     model_used="has spaces and text"))
+    row = db.rows("SELECT * FROM conversation_turns")[0]
+    assert (row["rag_tools_used"], row["node_timings_ms"], row["model_used"]) == (["weather"], {"classify": 1.0}, None)
 
 
 def test_debug_flag_alone_never_writes(db):
@@ -166,7 +176,7 @@ def test_withheld_record_stores_no_text_and_no_debug_even_in_debug_mode(db):
     row = db.rows("SELECT * FROM conversation_turns")[0]
     assert (row["query_text"], row["response_text"], row["outcome"], row["text_withheld"]) == ("", None, "withheld", True)
     assert row["intent"] is None and row["confidence"] is None
-    assert all(row[c] is None for c in DEBUG_COLUMNS)
+    assert all(row[c] is None for c in DEBUG_COLUMNS + STANDARD_COLUMNS)
     assert db.scalar("SELECT turn_count FROM conversations") == 1  # a marker counts as a turn
 
 

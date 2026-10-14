@@ -61,7 +61,7 @@ class State:
         defaults = dict(answer="Done.", intent="control", confidence=0.9, request_id="r1", is_fallback=False,
                         model_used="m", complexity="simple", llm_tokens=7, llm_tokens_per_second=3.5,
                         validation_passed=True, validation_reason="ok", base_knowledge_populated=True,
-                        node_timings={"classify": 12.0}, retrieved_data={"weather": {"t": 1}}, data_source="weather",
+                        node_timings={"classify": 12.0}, retrieved_data={"t": 1}, data_source="OpenWeatherMap",
                         error=None, was_truncated=False, is_multi_intent=False, is_novel_intent=False)
         defaults.update(kw)
         self.__dict__.update(defaults)
@@ -136,10 +136,56 @@ def test_session_class_comes_from_the_session_id_prefix_only():
 def test_observe_takes_a_graph_dict_too():
     recording = RecordingSink()
     capture = bound(tc.TurnCapture("query", recording))
-    capture.observe({"answer": "from dict", "intent": "weather", "confidence": 0.5, "retrieved_data": {"a": 1}})
+    capture.observe({"answer": "from dict", "intent": "weather", "confidence": 0.5, "retrieved_data": {"weather": 1, "payload_key": 2}})
     capture.submit()
     rec = recording.records[0]
-    assert rec.response_text == "from dict" and rec.intent == "weather" and rec.rag_tools_used == ["a"]
+    assert rec.response_text == "from dict" and rec.intent == "weather" and rec.rag_tools_used == ["weather"]
+
+
+def test_observe_takes_tool_names_from_emitted_calls_and_drops_data_source_and_off_list_keys():
+    recording = RecordingSink()
+    capture = bound(tc.TurnCapture("query", recording))
+    capture.observe(State(
+        tool_calls_emitted=[{"name": "search_restaurants", "arguments": {"term": "call 5551234"}}, {"name": "get_weather"}],
+        retrieved_data={"tool_calls": ["x"], "tool_results": {}, "synthesis_model": "m"},
+        data_source="Tool Calling (ollama/qwen3)", model_used="qwen3:4b", node_timings={"tool_call": 1.5, "mystery": 2.0},
+    ))
+    capture.answered("ok")
+    capture.submit()
+    rec = cc.sanitize_record(recording.records[0])
+    assert rec.rag_tools_used == ["search_restaurants", "get_weather"]
+    assert rec.model_used == "qwen3:4b" and rec.node_timings_ms == {"tool_call": 1500}
+
+
+def test_retrieve_path_turns_record_their_service_from_data_source():
+    # Shapes copied from nodes/retrieve.py: retrieved_data is the service payload, data_source its label.
+    cases = [
+        ({"current": {"temp": 61}, "daily": []}, "OpenWeatherMap", ["weather"]),
+        ({"current": {"temp": 61}}, "OpenWeatherMap OneCall 3.0", ["onecall"]),
+        ({"airport": {"code": "SFO"}}, "FlightAware", ["airports"]),
+        ({"team": "x", "last_games": [], "upcoming_games": []}, "TheSportsDB", ["sports"]),
+        ({"results": [], "sources": ["brave"]}, "Parallel Search (restaurants): brave, serp", ["websearch"]),
+        ({"results": []}, "Brave Search", ["websearch"]),
+        ({"results": []}, "LLM knowledge (websearch exception)", None),
+        ({"type": "conversation_context", "previous_query": "q"}, "ConversationHistory", None),
+    ]
+    for payload, source, expected in cases:
+        recording = RecordingSink()
+        capture = bound(tc.TurnCapture("query", recording))
+        capture.observe(State(retrieved_data=payload, data_source=source))
+        capture.answered("ok")
+        capture.submit()
+        assert cc.sanitize_record(recording.records[0]).rag_tools_used == expected, source
+
+
+def test_node_timings_are_stored_in_milliseconds_not_seconds():
+    recording = RecordingSink()
+    capture = bound(tc.TurnCapture("query", recording))
+    capture.observe(State(node_timings={"classify": 0.0125, "tool_call": 2.5, "bad": "x"}))
+    capture.answered("ok")
+    capture.submit()
+    assert recording.records[0].node_timings_ms == {"classify": 12, "tool_call": 2500}  # non-numeric dropped
+    assert cc.sanitize_record(recording.records[0]).node_timings_ms == {"classify": 12.0, "tool_call": 2500.0}
 
 
 def test_pin_shaped_and_long_digit_queries_are_withheld_and_the_digits_never_reach_the_record():

@@ -149,7 +149,7 @@ def test_debug_flipped_between_two_turns(db):
 
     asyncio.run(run())
     first, second = db.rows("SELECT query_text, source, model_used, debug_detail FROM conversation_turns ORDER BY turn_number")
-    assert (first["source"], first["model_used"], first["debug_detail"]) == ("analytics", None, None)
+    assert (first["source"], first["model_used"], first["debug_detail"]) == ("analytics", "m1", None)
     assert (second["source"], second["model_used"], second["debug_detail"]) == ("debug", "m1", {"cache_hit": False})
 
 

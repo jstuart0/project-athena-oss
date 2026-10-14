@@ -87,6 +87,37 @@ def _valid_session_id(session_id: Any) -> bool:
     return isinstance(session_id, str) and 0 < len(session_id) <= contract.FIELD_WIDTHS["session_id"]
 
 
+# The retrieve node's data_source strings (nodes/retrieve.py) onto the closed
+# retrieve-service set. Anything not listed is dropped, never stored.
+_RETRIEVE_SOURCE_SERVICES = {
+    "Weather forecast limitation": "weather",
+    "OpenWeatherMap": "weather",
+    "OpenWeatherMap OneCall 3.0": "onecall",
+    "FlightAware": "airports",
+    "TheSportsDB": "sports",
+    "Brave Search": "websearch",
+}
+_PARALLEL_SEARCH_PREFIX = "Parallel Search ("
+
+
+def _retrieve_service(data_source: str) -> Optional[str]:
+    if data_source.startswith(_PARALLEL_SEARCH_PREFIX):
+        return "websearch"
+    return _RETRIEVE_SOURCE_SERVICES.get(data_source)
+
+
+def _timings_ms(timings: Any) -> Optional[Dict[str, int]]:
+    """Every graph writer records seconds; the column and its label are milliseconds."""
+    if not isinstance(timings, dict):
+        return None
+    converted = {
+        k: round(v * 1000)
+        for k, v in timings.items()
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+    return converted or None
+
+
 def _field(state: Any, name: str, default: Any = None) -> Any:
     """Read ``name`` from an ``OrchestratorState`` or a graph dict."""
     if isinstance(state, dict):
@@ -233,10 +264,11 @@ class TurnCapture:
         if self._withheld_marker:
             return
         try:
-            tools = [k for k in (_field(state, "retrieved_data") or {}) if isinstance(k, str)]
+            emitted = [c.get("name") for c in (_field(state, "tool_calls_emitted") or []) if isinstance(c, dict)]
+            retrieved = list(_field(state, "retrieved_data") or {})
             data_source = _field(state, "data_source")
-            if isinstance(data_source, str) and data_source not in tools:
-                tools.append(data_source)
+            from_source = [_retrieve_service(data_source)] if isinstance(data_source, str) else []
+            tools = [t for t in dict.fromkeys(n for n in emitted + retrieved + from_source if isinstance(n, str)) if t in contract.CAPTURE_TOOL_NAMES]
             error = _field(state, "error")
             if error == "permission_denied":
                 self._refused = True
@@ -252,7 +284,7 @@ class TurnCapture:
                 "validation_passed": _field(state, "validation_passed"),
                 "complexity": _label(_field(state, "complexity")),
                 "base_knowledge_populated": bool(_field(state, "base_knowledge_populated", False)),
-                "node_timings_ms": dict(_field(state, "node_timings") or {}) or None,
+                "node_timings_ms": _timings_ms(_field(state, "node_timings")),
                 "error": str(error)[:_ERROR_STATE_MAX_CHARS] if error else None,
             }
             for key in ("validation_reason", "was_truncated", "is_multi_intent", "is_novel_intent", "prompt_tokens"):

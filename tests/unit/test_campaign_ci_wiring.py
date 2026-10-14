@@ -248,14 +248,28 @@ def pytest_paths_in(script: str) -> Set[str]:
     return found
 
 
+def pytest_dirs_in(script: str) -> Set[str]:
+    """Directory arguments of a pytest invocation (``pytest ... tests/integration``), as written."""
+    found = set()
+    for line in script.splitlines():
+        tokens = _tokens(line)
+        if "pytest" not in tokens:
+            continue
+        for token in tokens[tokens.index("pytest") + 1:]:
+            if "/" in token and not token.startswith("-") and not token.endswith(".py") and "::" not in token:
+                found.add(token.rstrip("/"))
+    return found
+
+
 def _repo_path(working_directory: str, token: str) -> str:
     return posixpath.normpath(posixpath.join(working_directory or ".", token))
 
 
 def runs_of(workflow: Dict, path: str) -> List[Step]:
-    """The steps that name ``path`` as a pytest path relative to their working directory."""
+    """The steps that name ``path``, or a directory above it, as a pytest path relative to their working directory."""
     return [(wd, step) for wd, step in run_steps(workflow)
-            if any(_repo_path(wd, token) == path for token in pytest_paths_in(step["run"]))]
+            if any(_repo_path(wd, token) == path for token in pytest_paths_in(step["run"]))
+            or any(path.startswith(_repo_path(wd, token) + "/") for token in pytest_dirs_in(step["run"]))]
 
 
 def _glob_match(pattern: str, path: str) -> bool:
@@ -518,3 +532,16 @@ def test_a_node_id_still_counts_as_the_file():
 def test_a_source_a_filtered_workflow_reads_must_be_in_both_lists():
     workflows = {"telemetry.yml": load(GOOD)}
     assert source_problems(workflows, lambda p: p == "src/shared/ha_credentials.py") != []
+
+
+def test_a_pytest_directory_argument_covers_the_files_beneath_it_and_only_those():
+    step = "      - name: run it\n        working-directory: admin/backend\n        run: python -m pytest -m integration tests/integration -q\n"
+    workflow = load("on: push\njobs:\n  j:\n    steps:\n" + step)
+    for covered in ("admin/backend/tests/integration/test_conversation_capture_postgres.py",
+                    "admin/backend/tests/integration/test_capture_sink_postgres.py"):
+        assert runs_of(workflow, covered)
+    assert not runs_of(workflow, "admin/backend/tests/unit_like/test_x.py")
+    assert not runs_of(workflow, "admin/backend/tests/integration_other/test_x.py")
+    assert not runs_of(workflow, "tests/integration/test_x.py")  # wrong working directory
+    real = all_workflows()["admin-memory.yml"]
+    assert runs_of(real, "admin/backend/tests/integration/test_conversation_capture_postgres.py")

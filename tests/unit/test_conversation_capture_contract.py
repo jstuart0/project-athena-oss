@@ -291,11 +291,12 @@ def test_sanitise_redacts_every_text_field_and_caps_them():
 def test_sanitise_withholds_whole_row_and_drops_debug_text():
     rec = cc.sanitize_record(_record(
         query_text="my pin is one two three four five six", response_text="ok",
-        error_message="x", debug_detail={"cache_hit": True}, rag_tools_used=["a"], node_timings_ms={"n": 1.0},
+        error_message="x", debug_detail={"cache_hit": True}, rag_tools_used=["get_weather"],
+        node_timings_ms={"classify": 1.0}, model_used="m1",
     ))
     assert (rec.query_text, rec.response_text, rec.outcome, rec.text_withheld) == ("", None, "withheld", True)
     assert rec.error_message is None and rec.debug_detail is None
-    assert rec.rag_tools_used is None and rec.node_timings_ms is None
+    assert rec.rag_tools_used is None and rec.node_timings_ms is None and rec.model_used is None
 
 
 def test_sanitise_marker_stays_a_marker_and_is_idempotent():
@@ -336,11 +337,39 @@ def test_labels_are_clamped_to_their_column_widths_and_nul_stripped():
 
 def test_json_blocks_are_bounded():
     rec = cc.sanitize_record(_record(
-        rag_tools_used=[f"tool{i}" for i in range(100)] + [5],
-        node_timings_ms={f"n{i}": float(i) for i in range(100)} | {"bad": "x", "flag": True},
+        rag_tools_used=sorted(cc.CAPTURE_TOOL_NAMES) * 3 + [5],
+        node_timings_ms={n: 1.0 for n in cc.CAPTURE_NODE_NAMES} | {"classify": "x", "send_sms": True},
     ))
-    assert len(rec.rag_tools_used) == 20
-    assert len(rec.node_timings_ms) <= 40 and "bad" not in rec.node_timings_ms and "flag" not in rec.node_timings_ms
+    assert len(rec.rag_tools_used) == 20 and len(set(rec.rag_tools_used)) == 20
+    assert "classify" not in rec.node_timings_ms and "send_sms" not in rec.node_timings_ms
+    assert set(rec.node_timings_ms) == cc.CAPTURE_NODE_NAMES - {"classify", "send_sms"}
+
+
+def test_standard_rows_keep_model_tools_and_timings_but_drop_off_list_values():
+    rec = cc.sanitize_record(_record(
+        model_used="qwen3:4b-instruct@q4/x_1.5", rag_tools_used=["get_weather", "call 555-1234", "weather", "get_weather"],
+        node_timings_ms={"classify": 12.5, "post_synthesis_fallback": 3.0, "tool_selection": 4.0, "call 555-1234": 9.0},
+    ))
+    assert rec.model_used == "qwen3:4b-instruct@q4/x_1.5"
+    assert rec.rag_tools_used == ["get_weather", "weather"]
+    assert rec.node_timings_ms == {"classify": 12.5, "post_synthesis_fallback": 3.0}
+
+
+def test_model_name_must_match_the_model_pattern():
+    for bad in ("has space", "a" * 101, "", "x\ny", "answer: 1234", "mod\u00e9l", "\u0663\u0664"):
+        assert cc.sanitize_record(_record(model_used=bad)).model_used is None, bad
+    assert cc.sanitize_record(_record(model_used="a" * 100)).model_used == "a" * 100
+
+
+def test_capture_tool_names_match_rag_tools_and_node_names_match_the_graph():
+    import pathlib
+    import re
+    from orchestrator.rag_tools import TOOL_DEFINITIONS
+    assert cc.CAPTURE_RAG_TOOL_NAMES == {t["tool_name"] for t in TOOL_DEFINITIONS}
+    src = (pathlib.Path(__file__).resolve().parents[2] / "src/orchestrator/main.py").read_text()
+    nodes = set(re.findall(r'graph\.add_node\("(\w+)"', src))
+    assert len(nodes) >= 13 and "classify" in nodes
+    assert cc.CAPTURE_GRAPH_NODE_NAMES == nodes
 
 
 # ---------------------------------------------------------------------------
