@@ -105,6 +105,7 @@ from orchestrator.follow_me_audio import (
 
 # Resilience pattern imports
 from orchestrator.rag_client import get_rag_client, initialize_rag_client
+from orchestrator.sports_status import team_events
 from orchestrator.circuit_breaker import get_circuit_breaker_registry
 from orchestrator.ingress_auth import require_service_caller, service_authenticated
 from orchestrator.rate_limiter import get_rate_limiter_registry
@@ -4008,62 +4009,9 @@ async def execute_tools_parallel(
                         no_teams = f"No teams found matching '{team_name}'"
                         return (tool_call_id, tool_error_result(make_user_safe(no_teams, 404) or no_teams))
 
-                    team_id = teams[0]["idTeam"]
-                    team_full_name = teams[0].get("strTeam", team_name)
-                    logger.info(f"Found team: {team_full_name} (ID: {team_id})")
-
-                    # Determine league for live scores based on team info
-                    team_league = teams[0].get("strLeague", "")
-                    # Map common league paths to live score league codes
-                    league_code_map = {
-                        "soccer/eng.1": "premier-league",
-                        "soccer/esp.1": "la-liga",
-                        "soccer/ger.1": "bundesliga",
-                        "soccer/ita.1": "serie-a",
-                        "soccer/fra.1": "ligue-1",
-                        "soccer/usa.1": "mls",
-                        "football/nfl": "nfl",
-                        "basketball/nba": "nba",
-                        "baseball/mlb": "mlb",
-                        "hockey/nhl": "nhl",
-                    }
-                    live_league = league_code_map.get(team_league, "premier-league")
-
-                    # Step 2: Get last events, next events, AND live scores (parallel)
-                    last_response, next_response, live_response = await asyncio.gather(
-                        rag.get("sports", f"/sports/events/{team_id}/last"),
-                        rag.get("sports", f"/sports/events/{team_id}/next"),
-                        rag.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
-                        return_exceptions=True
-                    )
-
-                    # Build combined response with past, upcoming, and LIVE games
-                    events_data = {"team": team_full_name, "team_id": team_id}
-
-                    if isinstance(last_response, Exception) or not last_response.success:
-                        events_data["last_games"] = []
-                    else:
-                        events_data["last_games"] = last_response.data.get("events", [])
-
-                    if isinstance(next_response, Exception) or not next_response.success:
-                        events_data["upcoming_games"] = []
-                    else:
-                        events_data["upcoming_games"] = next_response.data.get("events", [])
-
-                    # Add live scores if available
-                    if isinstance(live_response, Exception) or not live_response.success:
-                        events_data["live_games"] = []
-                    else:
-                        live_data = live_response.data
-                        live_games = live_data.get("games", [])
-                        # Filter to only games with this team
-                        team_lower = team_full_name.lower()
-                        matching_live = [g for g in live_games if team_lower in g.get("home_team", "").lower() or team_lower in g.get("away_team", "").lower()]
-                        events_data["live_games"] = matching_live
-                        if matching_live:
-                            # If there's a live game, highlight it
-                            events_data["has_live_game"] = True
-                            events_data["live_score_summary"] = f"{matching_live[0]['away_team']} {matching_live[0]['away_score']} - {matching_live[0]['home_score']} {matching_live[0]['home_team']} ({matching_live[0]['status']})"
+                    events_data = await team_events(rag, teams[0], team_name=team_name)
+                    team_full_name = events_data["team"]
+                    logger.info(f"Found team: {team_full_name} (ID: {events_data['team_id']})")
 
                     # Record success metric
                     latency_ms = int((time.time() - start_time) * 1000)

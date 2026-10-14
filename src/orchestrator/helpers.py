@@ -35,13 +35,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
+import socket
 import time
 import unicodedata
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from shared.logging_config import configure_logging
 
@@ -1421,14 +1425,177 @@ def _synthesis_messages(
 # get_rag_service_url (Pattern 1 — uses sibling-already get_admin_client)
 # =============================================================================
 
+REACH_TIMEOUT_SECONDS = 0.5
+REACH_POSITIVE_TTL_SECONDS = 60.0
+REACH_NEGATIVE_TTL_SECONDS = 15.0
+REACH_CACHE_MAX_ENTRIES = 64
+_REACH_WARNED_MAX = 256
+
+# Process-global reachability state. Tests reset it with ``_reset_reachability_state``.
+_reach_clock = time.monotonic
+_reach_cache: "OrderedDict[str, Tuple[bool, float]]" = OrderedDict()
+_reach_inflight: Dict[str, "asyncio.Future[bool]"] = {}
+_reach_warned: "OrderedDict[str, None]" = OrderedDict()
+
+
+def _reset_reachability_state() -> None:
+    _reach_cache.clear()
+    _reach_inflight.clear()
+    _reach_warned.clear()
+
+
+def _probe_origin(url: str) -> Optional[Tuple[str, int, str]]:
+    """(host, port, cache key) for an http/https URL, else None."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    port = port or (443 if parts.scheme == "https" else 80)
+    return host, port, f"{parts.scheme}://{host}:{port}"
+
+
+def _forbidden_probe_address(addr: str) -> bool:
+    """Link-local, cloud-metadata, multicast and unspecified targets are never probed.
+
+    Loopback and cluster-local names stay allowed (unlike
+    ``shared.url_safety.validate_service_host``): a RAG service legitimately
+    lives on a Service DNS name or on the host itself.
+    """
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_link_local or ip.is_multicast or ip.is_unspecified
+
+
+async def _connect_probe(host: str, port: int) -> bool:
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    addresses = [info[4][0] for info in infos]
+    if not addresses or any(_forbidden_probe_address(a) for a in addresses):
+        return False
+    _reader, writer = await asyncio.open_connection(addresses[0], port)
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+async def _probe_url(url: str) -> bool:
+    target = _probe_origin(url)
+    if target is None:
+        return False
+    host, port, _key = target
+    try:
+        return await asyncio.wait_for(_connect_probe(host, port), REACH_TIMEOUT_SECONDS)
+    except (OSError, asyncio.TimeoutError, UnicodeError):
+        return False
+
+
+async def _reachable(url: str) -> bool:
+    """Whether a TCP connection to the URL's origin opens within the probe timeout.
+
+    Cached (60 s positive, 15 s negative, at most 64 origins) and single-flight
+    per origin. Never logs the URL.
+    """
+    target = _probe_origin(url)
+    if target is None:
+        return False
+    key = target[2]
+    cached = _reach_cache.get(key)
+    now = _reach_clock()
+    if cached is not None and cached[1] > now:
+        _reach_cache.move_to_end(key)
+        return cached[0]
+
+    pending = _reach_inflight.get(key)
+    if pending is not None:
+        return await asyncio.shield(pending)
+
+    future: "asyncio.Future[bool]" = asyncio.get_running_loop().create_future()
+    _reach_inflight[key] = future
+    ok = False
+    try:
+        ok = await _probe_url(url)
+    finally:
+        _reach_inflight.pop(key, None)
+        ttl = REACH_POSITIVE_TTL_SECONDS if ok else REACH_NEGATIVE_TTL_SECONDS
+        _reach_cache[key] = (ok, _reach_clock() + ttl)
+        _reach_cache.move_to_end(key)
+        while len(_reach_cache) > REACH_CACHE_MAX_ENTRIES:
+            _reach_cache.popitem(last=False)
+        if not future.done():
+            future.set_result(ok)
+    return ok
+
+
+def _warn_unreachable_once(url: str, source: str, intent: str) -> None:
+    target = _probe_origin(url)
+    key = target[2] if target else url
+    if key in _reach_warned:
+        return
+    _reach_warned[key] = None
+    while len(_reach_warned) > _REACH_WARNED_MAX:
+        _reach_warned.popitem(last=False)
+    logger.warning("rag_url_unreachable", source=source, intent=intent)
+
+
+_RAG_ENV_URLS = {
+    "weather": lambda: WEATHER_SERVICE_URL,
+    "onecall": lambda: ONECALL_SERVICE_URL,
+    "airports": lambda: AIRPORTS_SERVICE_URL,
+    "sports": lambda: SPORTS_SERVICE_URL,
+    "flights": lambda: FLIGHTS_SERVICE_URL,
+    "events": lambda: EVENTS_SERVICE_URL,
+    "streaming": lambda: STREAMING_SERVICE_URL,
+    "news": lambda: NEWS_SERVICE_URL,
+    "stocks": lambda: STOCKS_SERVICE_URL,
+    "websearch": lambda: WEBSEARCH_SERVICE_URL,
+    "dining": lambda: DINING_SERVICE_URL,
+    "recipes": lambda: RECIPES_SERVICE_URL,
+    "directions": lambda: DIRECTIONS_SERVICE_URL,
+}
+
+
+async def _override_url(intent: str) -> Optional[str]:
+    try:
+        routing_config = await get_admin_client().get_intent_routing()
+        if routing_config and intent in routing_config:
+            return routing_config[intent].get("rag_service_url") or None
+    except Exception as e:
+        logger.debug("rag_url_override_lookup_failed", intent=intent, error_type=type(e).__name__)
+    return None
+
+
+async def _registry_url(intent: str) -> Optional[str]:
+    try:
+        url = await registry_get_service_url(intent)
+    except Exception as e:
+        logger.warning("rag_url_registry_lookup_failed", intent=intent, error_type=type(e).__name__)
+        return None
+    if not url:
+        logger.info("rag_url_registry_miss", intent=intent)
+    return url or None
+
+
 async def get_rag_service_url(intent: str) -> Optional[str]:
     """
-    Get RAG service URL for intent from service registry.
+    Get RAG service URL for intent.
 
-    Priority order:
-    1. Intent routing table (for custom routing overrides)
-    2. Service registry (source of truth for service URLs)
-    3. Environment variables (last resort fallback)
+    Candidates are tried in order: intent routing override, service registry,
+    environment variable. The first one that accepts a connection wins, so a
+    dead override no longer outranks a working registry or env URL, while a
+    reachable override is still the operator's explicit choice. When none is
+    reachable the first non-empty candidate is returned (the caller's error
+    path then handles the failure).
 
     Args:
         intent: Intent category (e.g., "weather", "sports", "airports")
@@ -1436,48 +1603,24 @@ async def get_rag_service_url(intent: str) -> Optional[str]:
     Returns:
         RAG service URL or None
     """
-    # 1. First try intent routing table (for custom routing)
-    try:
-        client = get_admin_client()
-        routing_config = await client.get_intent_routing()
-
-        if routing_config and intent in routing_config:
-            url = routing_config[intent].get("rag_service_url")
-            if url:
-                logger.info(f"Using intent routing URL for '{intent}': {url}")
-                return url
-    except Exception as e:
-        logger.debug(f"Intent routing lookup failed for '{intent}': {e}")
-
-    # 2. Query service registry (source of truth)
-    try:
-        registry_url = await registry_get_service_url(intent)
-        if registry_url:
-            logger.info(f"Using service registry URL for '{intent}': {registry_url}")
-            return registry_url
-    except Exception as e:
-        logger.warning(f"Service registry lookup failed for '{intent}': {e}")
-
-    # 3. Last resort: environment variable fallback
-    env_var_map = {
-        "weather": WEATHER_SERVICE_URL,
-        "onecall": ONECALL_SERVICE_URL,
-        "airports": AIRPORTS_SERVICE_URL,
-        "sports": SPORTS_SERVICE_URL,
-        "flights": FLIGHTS_SERVICE_URL,
-        "events": EVENTS_SERVICE_URL,
-        "streaming": STREAMING_SERVICE_URL,
-        "news": NEWS_SERVICE_URL,
-        "stocks": STOCKS_SERVICE_URL,
-        "websearch": WEBSEARCH_SERVICE_URL,
-        "dining": DINING_SERVICE_URL,
-        "recipes": RECIPES_SERVICE_URL,
-        "directions": DIRECTIONS_SERVICE_URL,
-    }
-    fallback_url = env_var_map.get(intent)
-    if fallback_url:
-        logger.warning(f"Using env var fallback URL for '{intent}': {fallback_url} (service registry unavailable)")
-    return fallback_url
+    env_url = _RAG_ENV_URLS.get(intent)
+    sources = (
+        ("override", _override_url),
+        ("registry", _registry_url),
+        ("env", None),
+    )
+    first_candidate: Optional[str] = None
+    for source, lookup in sources:
+        url = (await lookup(intent)) if lookup else (env_url() if env_url else None)
+        if not url:
+            continue
+        if await _reachable(url):
+            logger.info("rag_url_resolved", source=source, intent=intent)
+            return url
+        _warn_unreachable_once(url, source, intent)
+        if first_candidate is None:
+            first_candidate = url
+    return first_candidate
 
 
 # =============================================================================

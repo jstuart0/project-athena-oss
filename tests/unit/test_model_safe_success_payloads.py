@@ -72,7 +72,10 @@ def test_the_sports_season_ended_result(monkeypatch):
         return m.ok({"games": []})
 
     messages = _reaching_the_model(monkeypatch, [m.call("get_sports_scores", team="Giants")], {"sports": sports})
-    expected = {"team": "Giants", "team_id": "7", "last_games": [season], "upcoming_games": [], "live_games": []}
+    expected = {
+        "team": "Giants", "team_id": "7", "league": "football/nfl", "last_games": [season], "upcoming_games": [],
+        "live_games": [], "status": {"state": "none", "summary": "", "winner": None},
+    }
     assert messages == [json.dumps(expected)]
 
 

@@ -452,10 +452,27 @@ class TestSportsIntent:
         assert result.retrieved_data["has_live_game"] is True
         assert result.data_source == "TheSportsDB"
 
+    def test_sports_without_a_team_entity_makes_no_search_and_leaves_data_empty(self):
+        rc = MagicMock()
+        rc.update_service_url = MagicMock()
+        rc.get = AsyncMock()
+        _runtime.set_rag_client(rc)
+        state = _make_state(query="who's winning?", intent=IntentCategory.SPORTS, entities={})
+        mock_fallback = AsyncMock()
+        with (
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
+            patch("orchestrator.nodes.retrieve._fallback_to_web_search", mock_fallback),
+        ):
+            result = _run(retrieve_node(state))
+        rc.get.assert_not_awaited()
+        mock_fallback.assert_not_awaited()
+        assert not result.retrieved_data
+        assert "retrieve" in result.node_timings
+
     def test_sports_service_url_not_configured_triggers_fallback(self):
         rc = _make_rag_client()
         _runtime.set_rag_client(rc)
-        state = _make_state(query="Ravens score?", intent=IntentCategory.SPORTS)
+        state = _make_state(query="Ravens score?", intent=IntentCategory.SPORTS, entities={"team": "Ravens"})
         mock_fallback = AsyncMock()
         with (
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value=None),
