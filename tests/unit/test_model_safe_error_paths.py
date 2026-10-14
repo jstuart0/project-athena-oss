@@ -153,15 +153,34 @@ def test_a_failing_ha_service_call_does_not_leak_into_the_tool_result():
     assert_clean(result)
 
 
-def test_a_crashing_agent_loop_speaks_a_fixed_sentence():
-    llm = mock.MagicMock()
-    llm.generate = mock.AsyncMock(side_effect=RuntimeError("boom http://10.0.0.5:8030 TESLAMATE_DB_HOST"))
+def _crashing_agent(error):
+    class _Router:  # no chat_with_tools: the agent takes the generate() path, which is what fails
+        generate = mock.AsyncMock(side_effect=error)
+
+    llm = _Router()
     from orchestrator.automation_agent import AutomationAgent
 
     agent = AutomationAgent(ha_client=mock.MagicMock(), llm_router=llm)
     agent._build_system_prompt = mock.AsyncMock(return_value="system")
+    return agent
+
+
+def test_a_crashing_agent_loop_speaks_the_phrase_for_its_cause():
+    from orchestrator.model_safe_errors import PHRASES
+
+    agent = _crashing_agent(RuntimeError("boom http://10.0.0.5:8030 TESLAMATE_DB_HOST"))
     answer = asyncio.run(agent.execute("do the thing", {"mode": "owner", "room": "kitchen"}, "m"))
-    assert answer == "Sorry, something went wrong with that request."
+    assert answer == PHRASES["failed"]
+    assert_clean(answer)
+
+
+def test_an_agent_backend_outage_says_the_service_is_unavailable_and_logs_no_text(capsys):
+    agent = _crashing_agent(ConnectionError("connection refused at http://10.0.0.5:11434 TESLAMATE_DB_HOST"))
+    answer = asyncio.run(agent.execute("do the thing", {"mode": "owner", "room": "kitchen"}, "m"))
+    assert answer == "That service is unavailable right now."
+    logged = capsys.readouterr().out
+    assert "automation_agent_iteration_failed" in logged and "ConnectionError" in logged
+    assert "10.0.0.5" not in logged and "TESLAMATE_DB_HOST" not in logged
 
 
 def test_agent_tool_messages_are_scrubbed():

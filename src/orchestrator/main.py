@@ -47,7 +47,8 @@ from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
 from orchestrator import identity_answer, room_choice, room_context
-from orchestrator.utterance_kind import is_indoor_temperature_question
+from orchestrator.entity_repair import repair_for_routing
+from orchestrator.intent_arbitration import arbitrate_intent
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
@@ -60,6 +61,7 @@ from shared.base_knowledge_utils import (
 )
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
+from shared.config import get_config as get_athena_config
 import shared.config as _shared_config  # alias to survive the orchestrator.config_loader rebinding below
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.metrics import record_tool_execution, get_metrics_text, record_timing_metrics
@@ -80,7 +82,7 @@ from orchestrator.session_manager import (
 from orchestrator.config_loader import get_config
 from shared.knowledge_tiers import KnowledgeAudience
 from orchestrator.timing import TimingTracker
-from shared.fast_path_vocab import SCENE_OVERRIDE_PHRASES, SCENE_TRIGGER_PHRASES
+from shared.fast_path_vocab import SCENE_TRIGGER_PHRASES
 from shared.output_channel import OutputChannel, channel_for_interface_type, render_answer, renders_spoken_answer
 
 from orchestrator.search_providers.intent_classifier import IntentClassifier
@@ -493,7 +495,7 @@ async def handle_tool_creation_request(
         result = await generate_tool_from_request(
             user_request=query,
             llm_router=llm_router,
-            model="llama3.1:8b"
+            model=get_athena_config().athena_default_model
         )
 
         if not result.get("success"):
@@ -729,7 +731,7 @@ from orchestrator.urls import (
 from orchestrator.state import IntentCategory, ModelTier, ConversationContext
 
 # Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+_DEFAULT_MODEL = get_athena_config().athena_default_model
 
 
 # Fallback model values if database unavailable
@@ -3010,6 +3012,13 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         except Exception as e:
             logger.warning(f"Pre-classification failed, falling back to LLM: {e}")
 
+    # Near-miss entity words are repaired for routing only: the pattern
+    # classifier, the classifier prompt and the sports team entity read this;
+    # state.query (what the controller and the write-cue check see) is untouched.
+    routing = repair_for_routing(state.query)
+    if routing.changes:
+        logger.info("entity_repair_applied", repaired_words=len(routing.changes), kinds=sorted({k for _, _, k in routing.changes}))
+
     try:
         # Build classification prompt
         classification_prompt = f"""Classify the following user query into a category, extract entities, and determine complexity.
@@ -3039,7 +3048,7 @@ Complexity Levels:
 - complex: Multi-step reasoning, comparisons (e.g., "Compare weather in SF and NY", "Find events this weekend")
 - super_complex: Deep analysis, multiple tool coordination, complex reasoning chains
 
-Query: "{state.query}"
+Query: "{routing.text}"
 
 Respond in JSON format:
 {{
@@ -3105,256 +3114,26 @@ Respond in JSON format:
 
             # Pattern-based classification for validation/override
             # Now returns (IntentCategory, confidence) where confidence indicates specific vs fallback match
-            pattern_intent, pattern_confidence = _pattern_based_classification(state.query, return_confidence=True)
+            pattern_intent, pattern_confidence = _pattern_based_classification(routing.text, return_confidence=True)
             logger.info(f"DEBUG pattern classification: query_len={len(state.query)}, pattern_intent={pattern_intent.value}, pattern_confidence={pattern_confidence}")
 
-            # "Is it cold in here" is the thermostat or a room sensor, never the
-            # weather service, whatever the pattern classifier said.
-            if state.intent == IntentCategory.WEATHER and is_indoor_temperature_question(state.query):
-                logger.info("indoor_temperature_override", from_intent="weather")
-                state.intent = IntentCategory.CONTROL
-                state.confidence = 0.9
-                state.entities = {**(state.entities or {}), "device_type": "climate", "action": "get_status"}
-            # If LLM returns "unknown", use pattern-based fallback
-            elif state.intent == IntentCategory.UNKNOWN:
-                if pattern_intent != IntentCategory.GENERAL_INFO or pattern_confidence >= 0.8:
-                    logger.info(f"LLM returned unknown, pattern-based fallback: {pattern_intent} (confidence: {pattern_confidence})")
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-            # CRITICAL FIX: If LLM says "directions" but pattern says "dining", always prefer dining
-            # This catches common misclassification where "nearby restaurant" is confused with navigation
-            elif state.intent == IntentCategory.DIRECTIONS and pattern_intent == IntentCategory.DINING:
-                logger.info(
-                    f"Dining override: LLM incorrectly classified food query as directions -> dining"
-                )
-                state.intent = IntentCategory.DINING
-                state.confidence = 0.9  # High confidence for food-related patterns
-            # WEBSEARCH override: When user explicitly says "search the web for X", always use websearch
-            # This catches explicit web search requests that LLM might classify as general_info
-            elif pattern_intent == IntentCategory.WEBSEARCH:
-                logger.info(
-                    f"WebSearch override: LLM={state.intent.value}({state.confidence:.2f}) -> websearch (explicit request)"
-                )
-                state.intent = IntentCategory.WEBSEARCH
-                state.confidence = 0.95  # High confidence for explicit web search requests
-            # Round 14: Override EVENTS when query is asking about NOW PLAYING music
-            # "yo whats playin rn" is a now_playing query, not events
-            elif state.intent == IntentCategory.EVENTS and pattern_intent == IntentCategory.MUSIC_CONTROL:
-                query_lower = state.query.lower()
-                now_playing_patterns = [
-                    "whats playing", "what's playing", "whats playin", "what's playin",
-                    "playin rn", "playing rn", "what song", "song is this",
-                    "who sings", "whos singing", "who's singing", "artist is this"
-                ]
-                if any(p in query_lower for p in now_playing_patterns):
-                    logger.info(
-                        f"Now playing override: LLM incorrectly classified music query as events -> MUSIC_CONTROL"
-                    )
-                    state.intent = IntentCategory.MUSIC_CONTROL
-                    state.confidence = 0.9  # High confidence for now playing patterns
-            # Round 15: Override MUSIC_PLAY when query contains color words
-            # "hit me with some blue" is a color request, not music
-            elif state.intent == IntentCategory.MUSIC_PLAY and pattern_intent == IntentCategory.CONTROL:
-                query_lower = state.query.lower()
-                color_words = [
-                    "blue", "red", "green", "yellow", "orange", "purple", "pink",
-                    "cyan", "magenta", "white", "warm", "cool", "sunset", "rainbow",
-                    "random color", "random colors",
-                    "christmas", "christmas colors"  # Round 16: "throw on some christmas colors"
-                ]
-                if any(c in query_lower for c in color_words):
-                    logger.info(
-                        f"Color override: LLM incorrectly classified color query as music_play -> CONTROL"
-                    )
-                    state.intent = IntentCategory.CONTROL
-                    state.confidence = 0.9  # High confidence for color requests
-                # Round 16: Override MUSIC_PLAY for scene/vibe patterns
-                else:
-                    scene_patterns = SCENE_OVERRIDE_PHRASES
-                    # Exclude planning/help queries from scene triggers
-                    planning_excl = ["help me", "plan a", "plan my", "planning", "ideas for",
-                                    "something ", "but also", "is that", "is it possible",
-                                    "what should", "where should", "recommend", "any "]
-                    is_planning = any(excl in query_lower for excl in planning_excl)
-                    if any(s in query_lower for s in scene_patterns) and not is_planning:
-                        logger.info(
-                            f"Scene override: LLM incorrectly classified scene query as music_play -> CONTROL"
-                        )
-                        state.intent = IntentCategory.CONTROL
-                        state.confidence = 0.9
-            # CRITICAL FIX: Override WEATHER when query is asking about INDOOR temperature
-            # "whats the temperature inside" should go to thermostat, not weather API
-            elif state.intent == IntentCategory.WEATHER and pattern_intent == IntentCategory.CONTROL:
-                query_lower = state.query.lower()
-                indoor_temp_indicators = [
-                    "temperature inside", "temperature in the house", "temperature in here",
-                    "temp inside", "inside temp", "indoor temp", "indoors",
-                    "how cold is it in", "how hot is it in", "how warm is it in",
-                    # Round 16: slang indoor temp queries
-                    "temp we at", "what temp we at", "temperature we at",
-                    "temp in here", "what is the temp in here"
-                ]
-                if any(ind in query_lower for ind in indoor_temp_indicators):
-                    logger.info(
-                        f"Indoor temperature override: LLM incorrectly classified indoor query as weather -> control"
-                    )
-                    state.intent = IntentCategory.CONTROL
-                    state.confidence = 0.9  # High confidence for indoor temperature patterns
-            # CRITICAL FIX: Override CONTROL when pattern detects problem/instructional query
-            # "TV won't turn on" is a PROBLEM (not a command), should be troubleshooting info
-            # "How do I use the coffee maker" is INSTRUCTIONAL (not a command)
-            elif (state.intent == IntentCategory.CONTROL and
-                  pattern_intent == IntentCategory.GENERAL_INFO and
-                  pattern_confidence >= 0.8):
-                query_lower = state.query.lower()
-                # Check for problem/troubleshooting patterns
-                problem_patterns = [
-                    "won't turn on", "wont turn on", "won't turn off", "wont turn off",
-                    "not working", "isn't working", "isnt working", "doesn't work", "doesnt work",
-                    "stopped working", "quit working", "broken", "not responding",
-                    "won't respond", "wont respond", "is broken", "seems broken",
-                    "having trouble with", "trouble with the", "problem with the",
-                    "issue with the", "can't get", "cant get", "won't work", "wont work",
-                    "not turning on", "not turning off",
-                    # Additional problem indicators
-                    "not getting hot", "not getting cold", "not heating", "not cooling",
-                    "black screen", "blank screen", "isnt showing", "isn't showing",
-                    "not showing", "nothing on", "no picture", "no sound", "no audio",
-                    "keeps turning off", "keeps shutting", "keeps restarting",
-                    "stuck on", "frozen", "unresponsive", "no response"
-                ]
-                # Check for instructional patterns
-                instructional_patterns = [
-                    "how do i use", "how do you use", "how to use", "how does the",
-                    "how does this", "how do i work", "how to work the", "how to operate",
-                    "how do i operate", "what's the best way to", "whats the best way to",
-                    "can you explain how", "show me how", "instructions for"
-                ]
-                is_problem = any(p in query_lower for p in problem_patterns)
-                is_instructional = any(p in query_lower for p in instructional_patterns)
-                if is_problem or is_instructional:
-                    reason = "problem/troubleshooting" if is_problem else "instructional"
-                    logger.info(
-                        f"CONTROL override: LLM={state.intent.value}({state.confidence:.2f}) -> GENERAL_INFO ({reason} query detected)"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-            # CRITICAL FIX: Override obvious misclassifications where pattern strongly indicates GENERAL_INFO
-            # but LLM returned a specific service intent (like weather for "what time is it")
-            # This catches cases where LLM confuses general knowledge queries with service queries
-            elif (pattern_intent == IntentCategory.GENERAL_INFO and
-                  pattern_confidence >= 0.8 and
-                  state.intent in [IntentCategory.WEATHER, IntentCategory.SPORTS, IntentCategory.AIRPORTS,
-                                   IntentCategory.FLIGHTS, IntentCategory.EVENTS, IntentCategory.STREAMING,
-                                   IntentCategory.NEWS, IntentCategory.STOCKS, IntentCategory.RECIPES,
-                                   IntentCategory.DINING]):
-                # Check if the query matches strong GENERAL_INFO patterns (time, knowledge questions)
-                query_lower = state.query.lower()
-                general_info_strong = any(p in query_lower for p in [
-                    "what time", "time is it", "current time", "what date", "today's date",
-                    "how do", "how does", "how can", "how to", "why do", "why does",
-                    "tell me about", "what is", "who is", "explain", "describe",
-                    "definition of", "meaning of"
-                ])
-                if general_info_strong:
-                    logger.info(
-                        f"Strong GENERAL_INFO override: LLM={state.intent.value}({state.confidence:.2f}) -> GENERAL_INFO (pattern matched time/knowledge query)"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-            # CRITICAL FIX Round 11: Override GENERAL_INFO when pattern detects CONTROL (implicit brightness)
-            # Queries like "take it easy on my eyes" get misclassified as general_info by LLM
-            # but are actually implicit brightness commands
-            elif (state.intent == IntentCategory.GENERAL_INFO and
-                  pattern_intent == IntentCategory.CONTROL and
-                  pattern_confidence >= 0.8):
-                query_lower = state.query.lower()
-                # Check for implicit brightness patterns that LLMs often misclassify
-                implicit_brightness_patterns = [
-                    "take it easy on my eyes", "easy on my eyes", "easy on the eyes",
-                    "darken it up", "tone down", "tone it down",
-                    "too bright", "too dark", "make it cozy",
-                    "can't see", "cant see", "hard to see",
-                    "light me up", "lights please"
-                ]
-                # Round 14: Indoor temperature complaints that get misclassified as general_info
-                indoor_temp_complaints = [
-                    "mad cold", "mad hot", "hella cold", "hella hot",
-                    "its cold", "it's cold", "its hot", "it's hot",
-                    "so cold", "so hot", "chilly", "freezing", "too warm",
-                    "drop the temp", "drop that temp", "raise the temp", "raise that temp",
-                    # Indoor vs outdoor temperature comparisons
-                    "warmer inside", "colder inside", "hotter inside", "cooler inside",
-                    "inside than outside", "how much warmer is it inside",
-                    "indoor vs outdoor", "temp difference"
-                ]
-                # Round 15: Color requests that get misclassified as general_info
-                color_request_patterns = [
-                    "random colors", "gimme random", "give me random",
-                    "hit me with some", "throw some", "gimme some"
-                ]
-                is_brightness = any(p in query_lower for p in implicit_brightness_patterns)
-                is_temp_complaint = any(p in query_lower for p in indoor_temp_complaints)
-                is_color_request = any(p in query_lower for p in color_request_patterns) and any(c in query_lower for c in ["blue", "red", "green", "purple", "color", "colors", "random"])
-                if is_brightness:
-                    logger.info(
-                        f"Implicit brightness override: LLM={state.intent.value}({state.confidence:.2f}) -> CONTROL (implicit brightness command)"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-                elif is_temp_complaint:
-                    logger.info(
-                        f"Indoor temp override: LLM={state.intent.value}({state.confidence:.2f}) -> CONTROL (temperature complaint detected)"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-                elif is_color_request:
-                    logger.info(
-                        f"Color request override: LLM={state.intent.value}({state.confidence:.2f}) -> CONTROL (color request detected)"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-            # If LLM confidence is low and pattern has a SPECIFIC match (high confidence),
-            # boost the confidence to prevent spurious emerging intents
-            elif state.confidence < 0.7 and pattern_confidence >= 0.8:
-                # Pattern matched something specific (time queries, knowledge questions, etc.)
-                # Use the pattern confidence to prevent emerging intent creation
-                logger.info(
-                    f"Pattern confidence boost: LLM={state.intent.value}({state.confidence:.2f}) -> pattern confidence {pattern_confidence}"
-                )
-                state.confidence = pattern_confidence
-            # If LLM confidence is moderate (<= 0.75) and pattern-based has specific non-GENERAL_INFO match,
-            # prefer pattern-based to avoid LLM misclassifications
-            elif state.confidence <= 0.75 and pattern_intent not in [IntentCategory.GENERAL_INFO, IntentCategory.UNKNOWN]:
-                if state.intent != pattern_intent:
-                    logger.info(
-                        f"Pattern-based override: LLM={state.intent.value}({state.confidence:.2f}) -> pattern={pattern_intent.value}"
-                    )
-                    state.intent = pattern_intent
-                    state.confidence = pattern_confidence
-
-            # Round 16: Final override - WEATHER with indoor temp patterns should be CONTROL
-            if state.intent == IntentCategory.WEATHER:
-                query_lower = state.query.lower()
-                indoor_temp_patterns = [
-                    "temp we at", "what temp we at", "temperature we at",
-                    "temp in here", "what is the temp in here", "whats the temp in here",
-                    "indoor temp", "inside temp", "thermostat",
-                    # Indoor vs outdoor temperature comparisons
-                    "warmer inside", "colder inside", "hotter inside", "cooler inside",
-                    "inside than outside", "how much warmer is it inside",
-                    "indoor vs outdoor", "temp difference"
-                ]
-                if any(p in query_lower for p in indoor_temp_patterns):
-                    logger.info(
-                        f"Final indoor temp override: WEATHER -> CONTROL for indoor temp query"
-                    )
-                    state.intent = IntentCategory.CONTROL
-                    state.confidence = 0.9
+            arbitration = arbitrate_intent(
+                query=routing.text,
+                llm_intent=state.intent,
+                llm_confidence=state.confidence,
+                pattern_intent=pattern_intent,
+                pattern_confidence=pattern_confidence,
+            )
+            state.intent = arbitration.intent
+            state.confidence = arbitration.confidence
+            if arbitration.entities_update:
+                state.entities = {**(state.entities or {}), **arbitration.entities_update}
+            if state.intent == IntentCategory.SPORTS and routing.team and not (state.entities or {}).get("team"):
+                state.entities = {**(state.entities or {}), "team": routing.team}
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse classification: {e}")
             # Fallback to pattern matching with confidence
-            state.intent, state.confidence = _pattern_based_classification(state.query, return_confidence=True)
+            state.intent, state.confidence = _pattern_based_classification(routing.text, return_confidence=True)
             # Use feature-based complexity even on parse error
             state.complexity = determine_complexity(state.query, state.intent.value)
 
@@ -3364,7 +3143,9 @@ Respond in JSON format:
         # This helps track user needs that don't match existing services
         discovery_start = time.time()
         try:
-            if state.confidence < INTENT_DISCOVERY_CONFIG["confidence_threshold"]:
+            if state.confidence < INTENT_DISCOVERY_CONFIG["confidence_threshold"] and await ambient_fragment_applies(state):
+                logger.info("intent_discovery_skipped_ambient_fragment", query_len=len(state.query))
+            elif state.confidence < INTENT_DISCOVERY_CONFIG["confidence_threshold"]:
                 logger.info(f"Low confidence ({state.confidence}) - triggering intent discovery")
                 discovery_result = await discover_intent(
                     query=state.query,
@@ -7114,7 +6895,7 @@ async def process_query(
                     session_id=session.session_id,
                     processing_time=time.time() - initial_state.start_time,
                     metadata={
-                        "model_used": "llama3.1:8b",
+                        "model_used": get_athena_config().athena_default_model,
                         "tool_proposal": tool_result.get("success", False),
                         "proposal_id": tool_result.get("proposal_id"),
                         "tool_name": tool_result.get("tool_name")

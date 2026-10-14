@@ -12,10 +12,11 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from shared.config import get_config as get_athena_config
 from shared.knowledge_tiers import KnowledgeAudience
 
-# Model configuration from environment (defaults to qwen3:4b-instruct-2507-q4_K_M for portability)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+# Model configuration: AthenaConfig.athena_default_model (env ATHENA_DEFAULT_MODEL)
+_DEFAULT_MODEL = get_athena_config().athena_default_model
 
 
 # Intent categories

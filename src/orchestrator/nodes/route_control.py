@@ -36,6 +36,7 @@ from orchestrator.helpers import (
     holds_foreign_pending,
     get_automation_system_mode,
     get_feature_config,
+    get_model_for_component,
     store_conversation_context,
 )
 from orchestrator.mode_permission import (
@@ -55,9 +56,10 @@ from orchestrator.ha_status_optimizer import (
     optimize_status_query,
     should_skip_synthesis,
 )
-from orchestrator.automation_agent import should_use_automation_agent
+from orchestrator.automation_agent import is_motion_trigger_form, should_use_automation_agent
 from orchestrator.mode_permission import READ_ONLY_REFUSAL
 from orchestrator.metrics import state_question_routed_total
+
 from orchestrator.utterance_kind import (
     STATE_QUESTION_KILL_SWITCH_FLAG,
     UtteranceClassification,
@@ -74,6 +76,18 @@ from orchestrator.room_choice import storable_intent as _storable_intent
 from orchestrator.turn_capture import audience_class_for
 
 logger = structlog.get_logger(__name__)
+
+
+
+def _is_agent_exempt(query: str, uk: UtteranceClassification) -> bool:
+    """A question, or a motion-flow control, is the controller's, not the agent's.
+
+    A motion condition ("when there's no motion for ten minutes, ...") is an
+    automation and stays with the agent."""
+    if uk.kind == UtteranceKind.STATE_QUESTION:
+        return True
+    lower = query.lower()
+    return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not is_motion_trigger_form(lower)
 
 
 PENDING_CONFIRMATION_TTL_SECONDS = 60
@@ -1165,7 +1179,12 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 automation_mode = await get_automation_system_mode()
 
                 # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
-                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query, assistant_names):
+                if (
+                    automation_mode == "dynamic_agent"
+                    and automation_agent
+                    and not _is_agent_exempt(state.query, uk)
+                    and should_use_automation_agent(state.query, assistant_names)
+                ):
                     logger.info(f"Dynamic agent mode - routing to automation agent: query_len={len(state.query)}")
 
                     # Build context for automation agent
@@ -1191,7 +1210,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     result = await automation_agent.execute(
                         query=state.query,
                         context=context,
-                        model="llama3.1:8b"  # Use capable model for automation
+                        model=await get_model_for_component("smart_home_control"),
                     )
                     if len(scope.denials) > denials_before:
                         state.answer = refusal_message(

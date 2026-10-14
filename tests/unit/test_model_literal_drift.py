@@ -5,10 +5,13 @@ path sends a request to a model Ollama doesn't have (ATHENA-258: the gateway's
 `gpt-4` mapping did exactly that). Models come from `AthenaConfig`
 (`athena_default_model`, `gateway_fallback_model`) instead.
 
-This scans the gateway. Docstrings and comments are not code: a docstring is
-skipped by position, a comment never reaches the AST. The orchestrator joins
-this scan in the phases that move its literals; `phi3:mini` is not forbidden
-because `manifests/athena-prod/ollama-model-pull-job.yaml` pulls it.
+This scans the gateway and the orchestrator. Docstrings and comments are not
+code: a docstring is skipped by position, a comment never reaches the AST.
+`phi3:mini` is not forbidden because
+`manifests/athena-prod/ollama-model-pull-job.yaml` pulls it.
+
+`ATHENA_DEFAULT_MODEL` has one reader, `AthenaConfig.athena_default_model`; the
+orchestrator and admin-backend read the field, not the variable.
 """
 from __future__ import annotations
 
@@ -17,9 +20,11 @@ from pathlib import Path
 from typing import Iterable, List, Set, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
-SCANNED_TREES = ("src/gateway",)
+SCANNED_TREES = ("src/gateway", "src/orchestrator")
+ENV_READ_TREES = ("src/orchestrator", "admin/backend/app")
+DEFAULT_MODEL_ENV = "ATHENA_DEFAULT_MODEL"
 FORBIDDEN_LITERALS = frozenset({"llama3.1:8b"})
-# (path, literal) -> why this literal is allowed. Empty: the gateway has none.
+# (path, literal) -> why this literal is allowed. Empty: neither tree has one.
 ALLOWLIST: dict = {}
 MIN_FILES_SCANNED = 10
 
@@ -70,6 +75,46 @@ def test_the_scan_covers_the_gateway_and_its_named_members():
     files = {p.name for p in scanned_files()}
     assert len(files) >= MIN_FILES_SCANNED
     assert {"main.py", "intent_prerouter.py", "circuit_breaker.py"} <= files
+
+
+def test_the_scan_covers_the_orchestrator_and_its_named_members():
+    files = {p.relative_to(ROOT).as_posix() for p in scanned_files()}
+    assert {
+        "src/orchestrator/main.py",
+        "src/orchestrator/automation_agent.py",
+        "src/orchestrator/nodes/route_control.py",
+        "src/orchestrator/self_building_tools.py",
+        "src/orchestrator/smart_home_controller.py",
+    } <= files
+
+
+def _env_reads(source: str) -> List[int]:
+    tree = ast.parse(source)
+    docstrings = _docstring_nodes(tree)
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == DEFAULT_MODEL_ENV and id(node) not in docstrings
+    )
+
+
+def test_nothing_reads_the_default_model_variable_directly():
+    problems = []
+    for tree in ENV_READ_TREES:
+        for path in sorted((ROOT / tree).rglob("*.py")):
+            for line in _env_reads(path.read_text(encoding="utf-8")):
+                problems.append(f"{path.relative_to(ROOT).as_posix()}:{line} reads {DEFAULT_MODEL_ENV}; use get_config().athena_default_model")
+    assert problems == []
+
+
+def test_a_planted_env_read_is_found_and_the_readers_are_in_scope():
+    assert _env_reads('import os\nx = os.getenv("ATHENA_DEFAULT_MODEL", "m")\n') == [2]
+    scanned = {p.relative_to(ROOT).as_posix() for t in ENV_READ_TREES for p in (ROOT / t).rglob("*.py")}
+    assert {
+        "src/orchestrator/main.py", "src/orchestrator/state.py", "src/orchestrator/helpers.py",
+        "src/orchestrator/utils/constants.py", "admin/backend/app/database.py",
+        "admin/backend/app/services/oss_profiles.py",
+    } <= scanned
 
 
 def test_a_planted_literal_is_found():

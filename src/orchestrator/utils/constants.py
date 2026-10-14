@@ -54,7 +54,7 @@ RAG_SERVICE_URL_MAP: Dict[str, str] = {
 # ============================================================================
 
 # Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+_DEFAULT_MODEL = get_config().athena_default_model
 
 # Fallback model values if database unavailable
 # These can be overridden via environment variables: ATHENA_FALLBACK_MODEL_<COMPONENT_NAME>

@@ -47,6 +47,7 @@ from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from shared.config import get_config as get_athena_config
 from shared.logging_config import configure_logging
 
 from orchestrator.context.storage import clear_conversation_context
@@ -110,7 +111,7 @@ _component_model_cache_time: float = 0.0
 COMPONENT_MODEL_CACHE_TTL: int = 300  # 5 minutes
 
 # Default model + fallback table (mirrors main.py verbatim)
-_DEFAULT_MODEL: str = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+_DEFAULT_MODEL: str = get_athena_config().athena_default_model
 FALLBACK_MODELS: Dict[str, str] = {
     "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", _DEFAULT_MODEL),
     "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", _DEFAULT_MODEL),
@@ -1101,6 +1102,13 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
         return False
     # A refusal is the answer; a web search must never route around it.
     if getattr(state, "error", None) == "permission_denied":
+        return False
+    # A raw fragment is never searched. Decided in code, before any admin
+    # setting: a full UNKNOWN question still falls back, a fragment doesn't.
+    from orchestrator.fast_path import fragment_shaped_unknown  # call time: fast_path imports the nodes package
+
+    if fragment_shaped_unknown(state):
+        logger.info("post_synthesis_fallback_skipped_fragment", query_len=len(state.query or ""))
         return False
 
     # Get feature config

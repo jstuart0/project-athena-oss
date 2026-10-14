@@ -2100,13 +2100,15 @@ class TestAutomationAgentQuestionGuard:
         assert h.client.create_automation.await_count == 1
         assert h.admin_writes() == ["create_voice_automation"]
 
-    def test_referent_question_without_the_kill_switch_keeps_the_read_only_refusal(self):
+    def test_referent_question_without_the_kill_switch_never_reaches_the_agent(self):
+        """A real question is the controller's: the agent is not asked, so its write tool is never offered."""
         uk = classify_utterance(AGENT_REFERENT_QUESTION)
         assert uk.kind == UtteranceKind.STATE_QUESTION and uk.needs_referent
         h = _AgentHarness(_tool_call(*HA_OFF), kill_switch=False)
         out = h.run_agent(AGENT_REFERENT_QUESTION)
         assert h.client.call_service.await_count == 0
-        assert out.answer == mp.READ_ONLY_REFUSAL, out.answer
+        assert h.agent.llm.chat_with_tools.await_count == 0
+        assert out.answer and out.answer != mp.READ_ONLY_REFUSAL  # the controller read the state
 
 
 class TestQuestionRefusal:

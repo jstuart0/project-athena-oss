@@ -131,14 +131,14 @@ def test_the_indoor_rule_moves_a_weather_verdict_to_control_with_no_pattern_help
     import ast
     from pathlib import Path
 
-    source = (Path(__file__).resolve().parents[2] / "src" / "orchestrator" / "main.py").read_text()
-    func = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.AsyncFunctionDef) and n.name == "classify_node")
+    source = (Path(__file__).resolve().parents[2] / "src" / "orchestrator" / "intent_arbitration.py").read_text()
+    func = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef) and n.name == "_chain")
     rules = [n for n in ast.walk(func) if isinstance(n, ast.If)
              and any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "is_indoor_temperature_question"
                      for c in ast.walk(n.test))]
     assert len(rules) == 1
     names = {n.id for n in ast.walk(rules[0].test) if isinstance(n, ast.Name)}
-    assert "pattern_intent" not in names, "the rule must not depend on the pattern classifier"
+    assert not {"pat", "pat_conf"} & names, "the rule must not depend on the pattern classifier"
 
 
 def test_an_indoor_question_is_answered_from_the_areas_own_sensor(monkeypatch):
