@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 from uuid import uuid4
 
 import structlog
@@ -542,6 +542,7 @@ def _carry_decision(
 
 def _carried_cue_query(
     prev_params: Any, intent: Dict[str, Any], state: OrchestratorState, command: Optional[str] = None,
+    assistant_names: Sequence[str] = (),
 ) -> Optional[str]:
     """The earlier command's words plus this turn's command words, when this
     turn continues that command and may count its cue: the same caller and
@@ -559,8 +560,8 @@ def _carried_cue_query(
         return None
     if access_target.has_negator(state.query):
         return None  # "no, not that one": a negated turn does not borrow a cue
-    this_turn = classify_utterance(state.query)
-    if this_turn.kind != UtteranceKind.IMPERATIVE and has_narration(state.query):
+    this_turn = classify_utterance(state.query, assistant_names=assistant_names)
+    if this_turn.kind != UtteranceKind.IMPERATIVE and has_narration(state.query, assistant_names):
         return None  # narration borrows no cue ("they turn them off at night")
     if command is None:
         command = command_query(this_turn, state.query)
@@ -1461,7 +1462,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # the same caller, audience, device and action, judged on the
                 # final intent (after every override above).
                 cue_query = (
-                    _carried_cue_query(state.prev_context.get("parameters"), intent, state, cmd)
+                    _carried_cue_query(state.prev_context.get("parameters"), intent, state, cmd, assistant_names)
                     if has_context and ref_info.get("has_context_ref") and state.prev_context else None
                 )
                 await _execute_and_record(

@@ -7,7 +7,8 @@ Home Assistant entities. Consulted once per turn by
 (via `PermissionScope.utterance`).
 
 R2-C3: stdlib only. Never import `orchestrator.main` or any sibling
-module -- this file must be importable standalone.
+module -- this file must be importable standalone. (The one exception is the
+generic room vocabulary, read lazily from `room_context` and optional.)
 
 Invariants: pure, never raises, and `None`/empty input classifies as
 UNKNOWN.
@@ -78,6 +79,7 @@ _REQUEST_PREFIXES = (
     "can you make sure", "go ahead and",
     "i want you to", "i need you to", "i said", "why don't you", "why dont you",
     "can you", "could you", "would you", "will you",
+    "can we", "could we", "can i", "could i", "can u", "could u", "would u", "will u",
     "let us", "let's", "lets",
     "make sure",
     "please",
@@ -283,8 +285,16 @@ def _strip_request_prefixes(clause: str) -> Optional[str]:
     return None
 
 
+# "can I get the lights off": a first-person request with "get" as its verb.
+_GET_REQUEST_RE = re.compile(r"^(?:can|could|may) (?:i|we|u) (?:please )?get\b.*\b(?:on|off|up|down|brighter|dimmer)\b")
+# "have the lights turn on at sunset": a request that someone or something do it, not a question.
+_CAUSATIVE_RE = re.compile(
+    r"^have (?:the|my|our|all|every)\b.*\b(?:turn|come|go|switch|run|dim|lock|unlock|open|close)\b"
+)
+
+
 def _clause_is_imperative_open(clause: str) -> bool:
-    if _strip_request_prefixes(clause) is not None:
+    if _strip_request_prefixes(clause) is not None or _GET_REQUEST_RE.match(clause):
         return True
     if _GERUND_FRAME_RE.match(clause):
         return True
@@ -371,6 +381,7 @@ _BUT = "but"
 _CONJUNCTIONS = frozenset({"and", "then", "also", "plus", _BUT})
 _LEADING_FILLERS = frozenset({
     "just", "now", "kindly", "also", "then", "so", _BUT, "and", "plus", "well", "oh", "um", "uh",
+    "yes", "yeah", "yep", "sure", "thanks", "actually",
 })
 _NEGATOR_STARTS = frozenset({"don't", "dont", "never", "no", "not", "won't", "wont", "can't", "cannot", "shouldn't"})
 _SUBORDINATORS = frozenset({
@@ -404,6 +415,8 @@ _FINITE_VERBS = frozenset({
 })
 _DETERMINER_VERB_WINDOW = 6
 _MODAL_STARTERS = frozenset({"can", "could", "will", "would", "should"})
+# "can we dim the lights", "could I get the lights off": the speaker asks, so it is no question about others.
+_MODAL_ASKERS = frozenset({"you", "u", "ya", "we", "i", "me", "us"})
 _QUESTION_STARTERS = frozenset({
     "is", "are", "was", "were", "did", "do", "does", "has", "have", "can", "could", "will", "would", "should",
 })
@@ -502,18 +515,32 @@ def _name_sequences(names: Tuple[str, ...]) -> Tuple[Tuple[str, ...], ...]:
     return tuple(sorted((s for s in seqs if s), key=len, reverse=True))
 
 
-def _content(words: Sequence[str]) -> List[str]:
+def _filler_count(words: Sequence[str]) -> int:
+    """How many leading words are interjections or joiners ("yeah", "thanks",
+    "thank you", "actually", "and then")."""
     i = 0
-    while i < len(words) and words[i] in _LEADING_FILLERS:
-        i += 1
-    return list(words[i:])
+    while i < len(words):
+        if words[i] in _LEADING_FILLERS:
+            i += 1
+        elif words[i] == "thank" and list(words[i + 1:i + 2]) == ["you"]:
+            i += 2
+        else:
+            break
+    return i
+
+
+def _content(words: Sequence[str]) -> List[str]:
+    return list(words[_filler_count(words):])
+
+
+_SCHEDULE_LEADS = frozenset({"at", "in", "by"})  # "in 5 minutes lock the door", "at 11 turn off the lights"
 
 
 def _unwrap_time_phrase(content: List[str]) -> Tuple[List[str], bool]:
-    """"before bed turn off the lights": a time phrase of up to three words
-    before a control verb is part of the command. Returns the words from the
+    """"before bed turn off the lights", "in 5 minutes lock the door": a time
+    phrase of up to three words before a control verb is part of the command. Returns the words from the
     verb on and whether a time phrase was there."""
-    if content and content[0] in _TIME_SUBORDINATORS:
+    if content and (content[0] in _TIME_SUBORDINATORS or content[0] in _SCHEDULE_LEADS):
         for k in (2, 3, 4):
             if len(content) > k and _CONTROL_VERB_RE.match(content[k]):
                 return content[k:], True
@@ -530,7 +557,63 @@ def _imperative_shape(content: Sequence[str]) -> bool:
     """Whether the clause's first content word is a control verb (after the
     request openers and the time phrase). No guard is applied here."""
     core, _ = _unwrap_time_phrase(list(content))
-    return bool(core) and _clause_is_imperative_open(" ".join(core))
+    return bool(core) and (_clause_is_imperative_open(" ".join(core)) or _room_first_command(core))
+
+
+@functools.lru_cache(maxsize=1)
+def _room_words() -> frozenset:
+    """The words of the generic room vocabulary (``room_context.COMMON_ROOM_WORDS``,
+    the one place room words live). Read at call time so this module keeps
+    importing on its own; with the vocabulary unavailable no word names a room,
+    which refuses a room-first command rather than guessing one. A house's own
+    room names are not here: "galley turn off the lights" is not recognised."""
+    try:
+        from orchestrator.room_context import COMMON_ROOM_WORDS
+    except Exception:
+        return frozenset()
+    return frozenset(w for phrase in COMMON_ROOM_WORDS for w in phrase.split())
+
+
+_ROOM_FIRST_VERBS = frozenset({
+    "turn", "switch", "dim", "brighten", "set", "lock", "unlock", "raise", "lower", "activate", "deactivate",
+    "enable", "disable", "start", "stop", "pause", "resume", "play", "open", "close", "shut",
+})
+_ROOM_FIRST_AFTER_ONOFF = frozenset({"and", "then"})  # "porch light on and set it to 50%"
+_SELF_ACTING_RE = re.compile(
+    r"\b(?:by itself|by themselves|on its own|on their own|all night|every night|every day|at night|"
+    r"all day|every morning|every evening)\b"
+)
+
+
+def _room_noun_phrase_length(ws: Sequence[str]) -> int:
+    """How many leading words are a room, a device or a colour with no
+    determiner ("kitchen lights", "living room lamp", "porch light")."""
+    n = 0
+    while n < min(len(ws), 4) and (
+        ws[n] in _room_words() or ws[n] in _COLOUR_BRIGHTNESS_WORDS or _DEVICE_NOUN_RE.fullmatch(ws[n])
+    ):
+        n += 1
+    return n
+
+
+def _room_first_command(ws: Sequence[str]) -> bool:
+    """A command that names its room or device first: "kitchen lights set to
+    50 percent", "bedroom lights turn off", "kitchen turn off the lights",
+    "living room lamp turn on", "porch light on and set it to 50%". The room
+    phrase carries no determiner ("the kitchen lights keep turning on" is
+    narration), the verb is one that changes a device, and "lights off at ten"
+    (a schedule, no verb) is left as it is."""
+    n = _room_noun_phrase_length(ws)
+    if n == 0 or n >= len(ws) or _SELF_ACTING_RE.search(" ".join(ws)):
+        return False
+    nxt = ws[n]
+    if nxt in _ROOM_FIRST_VERBS:
+        return nxt != "set" or ws[n + 1:n + 2] == ["to"]
+    if nxt in ("on", "off"):
+        # Only as the first half of two commands. "Office lights off please" stays
+        # the non-imperative request it always was (its fan-out limits still apply).
+        return n + 1 < len(ws) and ws[n + 1] in _ROOM_FIRST_AFTER_ONOFF
+    return False
 
 
 def _split_sentence(toks: Sequence[_Tok], seqs: Tuple[Tuple[str, ...], ...]) -> List[Tuple[List[_Tok], str]]:
@@ -722,6 +805,37 @@ def _bare_subject_narration(ws: Sequence[str]) -> bool:
     )
 
 
+_SCHEDULE_MARKERS = frozenset({
+    "at", "until", "by", "when", "whenever", "every", "sunset", "sunrise", "dusk", "dawn", "after", "before",
+})
+_REQUEST_MODALS = frozenset({"should", "must", "will", "needs", "ought"})
+
+
+def _device_subject_request(ws: Sequence[str]) -> bool:
+    """"the porch light should come on at sunset": a device (not a person) as
+    the subject of a modal, with a schedule or condition. A request to set up
+    an automation, not narration; and not for now."""
+    if not ws or ws[0] not in _DETERMINERS:
+        return False
+    n = _room_noun_phrase_length(ws[1:])
+    if n == 0 or len(ws) <= n + 1 or ws[n + 1] not in _REQUEST_MODALS:
+        return False
+    return any(w in _SCHEDULE_MARKERS for w in ws[n + 2:])
+
+
+_DEVICE_FIRST_VERBS = _FINITE_VERBS | _THIRD_PERSON_CONTROL_FORMS | frozenset({"go", "goes", "come", "comes"})
+
+
+def _device_first_narration(ws: Sequence[str]) -> bool:
+    """A room or device first, then a present-tense verb that is no command
+    ("lights go off at ten", "tv turns on by itself"). "Lights off at ten" has
+    no verb and is a schedule."""
+    n = _room_noun_phrase_length(ws)
+    if n == 0:
+        return False
+    return any(w in _DEVICE_FIRST_VERBS and w not in _COPULAS for w in ws[n:n + 3])
+
+
 def _determiner_narration(ws: Sequence[str]) -> bool:
     if not ws or ws[0] not in _DETERMINERS:
         return False
@@ -771,7 +885,7 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
     first = ws[0]
     if first in _SUBORDINATORS or (first in _TIME_SUBORDINATORS and not _unwrap_time_phrase(ws)[1]):
         return False, True, False
-    if first in _MODAL_STARTERS and len(ws) > 1 and ws[1] != "you":
+    if first in _MODAL_STARTERS and len(ws) > 1 and ws[1] not in _MODAL_ASKERS:
         return True, False, False  # "can the kids turn off the lights": a question about others
     if first in _QUESTION_STARTERS:
         return False, False, False  # a question: the state-question rules own it
@@ -790,6 +904,8 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
             return False, False, False
         # A copula lead-in ("we're home, turn on the lights") is no narrative lead (G4).
         return True, False, base in _NARRATIVE_SUBJECTS and not _copula_lead(ws)
+    if _device_subject_request(ws):
+        return False, True, False  # "the porch light should come on at sunset": an automation to set up
     if _determiner_narration(ws):
         # A copula lead-in ("the porch is lit, turn on the hall light") is no
         # narrative lead (G4); a finite verb of doing is.
@@ -807,7 +923,7 @@ def _statement_kind(content: Sequence[str]) -> Tuple[bool, bool, bool]:
         return True, False, False
     if _subject_before_strong_verb(ws):
         return True, False, True
-    if _bare_subject_narration(ws):
+    if _bare_subject_narration(ws) or _device_first_narration(ws):
         return True, False, True
     return False, False, False
 
@@ -820,6 +936,8 @@ def _automation_shaped(content: Sequence[str]) -> bool:
     turn on the lights"): a control verb after the condition, and no subject
     and verb after that command ("if I turn off the lights it flickers" is a
     statement about the lights, and a question word opens a question)."""
+    if _device_subject_request(content):
+        return True
     if not content or content[0] in _QUESTION_WORDS:
         return False
     verbs = [i for i, w in enumerate(content) if i >= 2 and _CONTROL_VERB_RE.match(w)]
@@ -869,7 +987,7 @@ def _analyze_sentence(
         quoted = any(t.quoted for t in toks)
         if sep == "named":
             narrative = False
-        start, end = toks[0].start, toks[-1].end
+        start, end = toks[_filler_count(words) if content else 0].start, toks[-1].end
         if not content:
             out.append(Clause(start, end, words, sep, False, False, False, False, True, True, False))
             continue
@@ -1104,6 +1222,7 @@ def _classify(query: Optional[str], names: Tuple[str, ...]) -> UtteranceClassifi
             _AUX_INITIAL_RE.match(first_clause) is not None
             and _strip_request_prefixes(first_clause) is None
             and _GERUND_FRAME_RE.match(first_clause) is None
+            and _CAUSATIVE_RE.match(first_clause) is None
         )
 
         # Rule 2: IMPERATIVE.

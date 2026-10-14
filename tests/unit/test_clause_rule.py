@@ -76,6 +76,11 @@ NARRATION = [
     "Mike puts Netflix on every night",
     "can the kids turn off the lights",
     "I like the lights blue",
+    # A device first, then a present-tense verb that is no command (the over-refusal round).
+    "lights go off at ten",
+    "tv turns on by itself",
+    "the kitchen lights keep turning on",
+    "kitchen lights turn on by themselves",
 ]
 # A condition: not immediate. No controller write; the agent route is as at base.
 CONDITIONAL = ["if it gets dark, turn on the porch light"]
@@ -122,6 +127,8 @@ COMMANDS = [
     ("you're right, turn it off", IMPERATIVE, "turn it off"),
     ("I'm back, turn on the lights", IMPERATIVE, "turn on the lights"),
     ("porch light off", IMPERATIVE, "porch light off"),
+    ("then at 11 turn off all the lights", IMPERATIVE, "at 11 turn off all the lights"),
+    ("kitchen lights on and turn them blue", IMPERATIVE, "kitchen lights on and turn them blue"),
     ('I said "turn off the lights"', IMPERATIVE, "I said turn off the lights"),
     ("turn the lights on, I love it", IMPERATIVE, "turn the lights on"),
     ("can you turn off the lights", IMPERATIVE, "can you turn off the lights"),
@@ -149,7 +156,6 @@ UNKNOWN_REQUESTS = [
     ("lights please", "light", "turn_on"),
     ("blue lights in the den", "light", "set_color"),
     ("lights cool white please", "light", "set_color"),
-    ("then at 11 turn off all the lights", "light", "turn_off"),
     ("I'd like the lights blue", "light", "set_color"),
     ("I would like the lights blue", "light", "set_color"),
     # First-person requests (UNKNOWN + the T-S exemption).
@@ -212,8 +218,8 @@ def test_only_the_command_clauses_carry_the_cue_even_when_the_whole_utterance_is
 
 
 def test_a_conjunction_splits_only_after_a_command():
-    # "lights on" is no command, so "and turn them blue" stays in its clause.
-    uk = classify_utterance("kitchen lights on and turn them blue")
+    # "lights" alone is no command, so "and turn them blue" stays in its clause.
+    uk = classify_utterance("lights and turn them blue")
     assert (uk.kind, uk.command_text) == (UNKNOWN, None)
     uk = classify_utterance("turn on the kitchen lights and turn them blue")
     assert (uk.kind, uk.command_text) == (IMPERATIVE, "turn on the kitchen lights and turn them blue")
@@ -472,3 +478,144 @@ def test_a_command_still_reaches_a_domain_outside_the_device_kinds():
     args = {"domain": "input_boolean", "service": "turn_on", "entity_id": "input_boolean.thing"}
     h = _agent_calls_after("turn on the thing", "ha_service", args)
     assert h.client.call_service.await_count == 1
+
+
+# --- the over-refusal round: real commands that must work, and the rows that must not ----------
+
+# Exact strings the review named. Each must get past the write cue (never the
+# no-request refusal); the ones with a room the rig knows must also write.
+MUST_WORK = [
+    "kitchen lights set to 50 percent", "bedroom lights turn off", "kitchen turn off the lights",
+    "living room lamp turn on", "porch light on and set it to 50%",
+    "can we dim the lights", "could we turn it down", "can I get the lights off", "can u turn on the fan",
+    "yeah leave the lights on", "thanks turn off the lights", "sure keep it on", "actually turn on the fan",
+    "okay so turn on the fan", "in 5 minutes lock the door", "at 11 turn off the lights",
+]
+# The same kinds of command with a room the rig can write: the write must be observed.
+MUST_WRITE = [
+    ("kitchen lights set to 50 percent", "light.kitchen_lamp"),
+    ("kitchen turn off the lights", "light.kitchen_lamp"),
+    ("kitchen lights turn on", "light.kitchen_lamp"),
+    ("hall lights turn off", "light.hall_lamp"),
+    ("porch light on and set it to 50%", "light.porch_lamp"),
+    ("can we dim the hall lights", "light.hall_lamp"),
+    ("could we turn off the porch light", "light.porch_lamp"),
+    ("can I get the hall lights off", "light.hall_lamp"),
+    ("can u turn on the kitchen light", "light.kitchen_lamp"),
+    ("yeah leave the porch light on", "light.porch_lamp"),
+    ("thanks turn off the hall light", "light.hall_lamp"),
+    ("sure keep the porch light on", "light.porch_lamp"),
+    ("actually turn on the hall light", "light.hall_lamp"),
+    ("at 11 turn off the hall light", "light.hall_lamp"),
+]
+
+
+@pytest.mark.parametrize("utterance", MUST_WORK, ids=str)
+def test_a_real_command_is_not_narration_and_gets_a_cue(utterance):
+    from orchestrator.utterance_kind import has_narration
+    uk = classify_utterance(utterance, NAMES)
+    assert uk.kind == IMPERATIVE and uk.command_text, utterance
+    assert has_narration(utterance, NAMES) is False
+    assert write_cue_problem("light", "turn_on", uk.command_text, kind_hint=uk.kind) in (None, access_target.WRONG_DEVICE)
+
+
+@pytest.mark.parametrize("utterance", MUST_WORK, ids=str)
+def test_a_real_command_gets_past_the_write_cue_through_route_control(utterance):
+    state, _model, _client = drive_control(utterance, names=NAMES)
+    assert state.answer != NO_WRITE_CUE_TEXT, (utterance, state.answer)
+
+
+@pytest.mark.parametrize("utterance,entity", MUST_WRITE, ids=[u for u, _ in MUST_WRITE])
+def test_a_real_command_writes_through_route_control(utterance, entity):
+    state, _model, client = drive_control(utterance, names=NAMES)
+    assert writes(client) and {e for w in writes(client) for e in w[2]} == {entity}, (
+        utterance, writes(client), state.answer
+    )
+
+
+@pytest.mark.parametrize("utterance", MUST_WORK[:4] + MUST_WORK[5:9] + MUST_WORK[10:13], ids=str)
+def test_a_real_command_reaches_the_music_and_tv_nodes(utterance):
+    for intent in (IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL):
+        state, _raw, _h = drive_music(utterance, names=NAMES, intent=intent)
+        assert state.answer != NO_WRITE_CUE_TEXT, (utterance, intent)
+    state, _raw, _h = drive_tv(utterance, names=NAMES)
+    assert state.answer != NO_WRITE_CUE_TEXT, utterance
+
+
+def test_a_lock_with_a_time_phrase_is_a_command_for_the_agent_too():
+    args = {"domain": "lock", "service": "lock", "entity_id": "lock.front_door"}
+    h = _agent_calls_after("in 5 minutes lock the door", "ha_service", args)
+    assert h.client.call_service.await_count == 1
+
+
+def test_lights_off_at_ten_is_a_schedule_not_narration():
+    from orchestrator.utterance_kind import has_narration, is_narration
+    assert not has_narration("lights off at ten") and not is_narration("lights off at ten")
+    uk = classify_utterance("lights off at ten")
+    assert (uk.kind, uk.command_text) == (UNKNOWN, None)
+    assert write_cue_problem("light", "turn_off", "lights off at ten", kind_hint=uk.kind) is None
+
+
+AUTOMATION_REQUESTS = [
+    "have the lights turn on at sunset", "make the porch light come on at sunset", "let the fan run until 10",
+    "the porch light should come on at sunset",
+]
+
+
+@pytest.mark.parametrize("utterance", AUTOMATION_REQUESTS, ids=str)
+def test_an_automation_request_is_no_narration_and_the_agent_may_set_it_up(utterance):
+    from orchestrator.utterance_kind import has_narration, is_narration
+    assert not has_narration(utterance) and not is_narration(utterance)
+    assert classify_utterance(utterance).kind != UtteranceKind.STATE_QUESTION
+    create = ("create_automation", {"name": "Sunset", "trigger": {"type": "time", "time": "18:00"},
+                                    "actions": [{"type": "service", "entity_id": "light.office_0",
+                                                 "service": "turn_on"}]})
+    h = _agent_calls_after(utterance, *create)
+    assert h.client.create_automation.await_count == 1, utterance
+
+
+def test_the_causative_request_still_reaches_the_agent():
+    assert should_use_automation_agent("have the lights turn on at sunset") is True
+
+
+def test_a_scheduled_device_request_writes_nothing_now():
+    for utterance in ("the porch light should come on at sunset", "the kids should turn off the lights at ten"):
+        state, _model, client = drive_control(utterance)
+        assert writes(client) == [], (utterance, writes(client))
+
+
+def test_the_carried_cue_reads_the_configured_names():
+    from orchestrator.nodes import route_control as rc
+    from orchestrator.state import OrchestratorState
+    state = OrchestratorState(query="")
+    state.mode = "owner"
+    state.permissions = {"mode": "owner"}
+    state.caller_fingerprint = "fp-1"
+    params = {"write_cue": {"fp": "fp-1", "aud": rc._audience_class(state), "device_type": "light",
+                            "action": "turn_off", "query": "turn off the kitchen lights"}}
+    intent = {"device_type": "light", "action": "turn_off"}
+    state.query = "okay nebu hall lights turn off"
+    assert rc._carried_cue_query(params, intent, state, None, ("nebu",)) is not None
+    state.query = "they turn them off at night"
+    assert rc._carried_cue_query(params, intent, state, None, ("nebu",)) is None
+
+
+def test_a_modal_request_from_the_speaker_is_no_narration_even_without_a_control_verb():
+    from orchestrator.utterance_kind import has_narration
+    for text in ("can we have the lights on", "could I have the porch light off"):
+        assert not has_narration(text), text
+        assert write_cue_problem("light", "turn_on", text, kind_hint=classify_utterance(text).kind) is None, text
+
+
+def test_a_room_first_on_off_request_stays_non_imperative_unless_it_is_the_first_of_two_commands():
+    # Its fan-out limits are those of any non-imperative request.
+    assert classify_utterance("office lights off please").kind == UNKNOWN
+    assert classify_utterance("office lights off at ten").kind == UNKNOWN
+    assert classify_utterance("porch light on and set it to 50%").kind == IMPERATIVE
+
+
+def test_a_room_first_command_needs_a_room_the_generic_vocabulary_knows():
+    # Known limit: a house's own room name in first position is not recognised (it fails closed).
+    assert classify_utterance("kitchen turn off the lights").kind == IMPERATIVE
+    assert classify_utterance("kids turn off the lights").kind == UNKNOWN
+    assert classify_utterance("galley turn off the lights").kind == UNKNOWN

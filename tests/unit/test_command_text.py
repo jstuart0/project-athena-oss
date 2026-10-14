@@ -51,7 +51,11 @@ def command(text, names=NAMES):
     # Fillers and openers.
     ("so turn off the lights", "turn off the lights"),
     ("please turn off the lights", "please turn off the lights"),
-    ("just dim the lights", "just dim the lights"),
+    ("just dim the lights", "dim the lights"),
+    ("yeah leave the lights on", "leave the lights on"),
+    ("thank you turn off the lights", "turn off the lights"),
+    ("in 5 minutes lock the door", "in 5 minutes lock the door"),
+    ("at 11 turn off the lights", "at 11 turn off the lights"),
     ("could you turn off the lights", "could you turn off the lights"),
     # A time phrase before the verb belongs to the command.
     ("before bed turn off the lights", "before bed turn off the lights"),
