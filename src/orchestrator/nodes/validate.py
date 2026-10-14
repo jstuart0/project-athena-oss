@@ -15,6 +15,8 @@ from orchestrator.grounding import (
     evidence_summary,
     experience_claim,
     grounded,
+    knowledge_question,
+    local_business_cue,
     prior_tool_context,
 )
 from orchestrator.state import OrchestratorState, IntentCategory
@@ -144,8 +146,11 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
     # A first-person experience ("I've eaten there") is never true of the
     # assistant, whatever data the turn holds; a story told in the first person
-    # is the one exception (experience_claim reads the request).
-    if experience_claim(state.answer, state.query):
+    # is the one exception (experience_claim reads the request). Checked on a
+    # tool-node turn on every path; the streamed synthesis has no validation, so
+    # the check stays off for synthesized turns on the graph too, and the
+    # persona's fixed line carries them.
+    if state.tool_call_attempted and experience_claim(state.answer, state.query):
         state.validation_passed = False
         state.validation_reason = "Hallucination detected: first-person experience claim"
         state.validation_details = ["first-person experience"]
@@ -222,7 +227,7 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         and not state.retrieved_data
         and not state.base_knowledge_populated
         and state.intent != IntentCategory.WEBSEARCH
-        and state.intent not in TOOL_OWNED
+        and (state.intent not in TOOL_OWNED or prior_tool_context(state))
     )
     if is_training_knowledge_fallback:
         state.validation_passed = True
@@ -232,6 +237,15 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         if state.timing_tracker:
             state.timing_tracker.track_substage("graph", "validate", "training_knowledge_bypass", time.time() - start)
         logger.info("Validation bypassed for training-knowledge fallback", extra={"intent": state.intent.value if state.intent else None})
+        return state
+
+    # A definition, how-it-works or why question: its worked example (a company
+    # and a price) is not a claim about the world, whatever the intent.
+    if knowledge_question(state.query) and not local_business_cue(state.query):
+        state.validation_passed = True
+        state.validation_reason = None
+        state.node_timings["validate"] = time.time() - start
+        validation_counter.labels(passed="true", reason="knowledge_question").inc()
         return state
 
     # Layer 3: Check if we have data to support specific facts.

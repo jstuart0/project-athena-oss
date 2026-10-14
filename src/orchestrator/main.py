@@ -6830,6 +6830,7 @@ async def process_query(
             mode=current_mode,  # Use detected mode instead of request mode
             room=request.room,
             temperature=request.temperature,
+            request_location=request.location or None,
             session_id=session.session_id,
             conversation_history=conversation_history,
             history_summary=history_summary,  # Summarized context for summarized mode

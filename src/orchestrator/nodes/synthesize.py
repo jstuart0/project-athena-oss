@@ -9,7 +9,7 @@ import time
 
 import structlog
 
-from orchestrator.grounding import no_data_prompt, sports_status_rule, tool_owned_without_data
+from orchestrator.grounding import grounded, no_data_prompt, sports_status_rule, tool_owned_without_data
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
@@ -436,6 +436,11 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
                     context_entities["destination"] = state.entities.get("destination")
                     context_entities["travel_mode"] = state.entities.get("travel_mode", "driving")
                     context_entities["query_type"] = "directions"
+
+                # A follow-up on this turn's data keeps the conversation prompt
+                # (grounding.prior_tool_context reads this marker).
+                if grounded(state):
+                    context_params["grounded"] = True
 
                 # Store context for all RAG-based intents
                 await store_conversation_context(

@@ -144,6 +144,14 @@ def test_a_follow_up_on_this_intents_tool_results_is_not_forced():
     assert grounding.forced_tool_calls(state, offered=ALL_TOOLS, search_location="Anytown") == []
 
 
+def test_a_retrieve_path_turn_with_data_counts_as_prior_context():
+    previous = {"intent": "weather", "parameters": {"grounded": True, "last_data": {"current": {}}}, "response": "Sunny."}
+    state = _state("what about tomorrow", I.WEATHER, prev_context=previous)
+    assert grounding.prior_tool_context(state)
+    assert grounding.tool_owned_without_data(_state("what about tomorrow", I.WEATHER, prev_context=None))
+    assert not grounding.tool_owned_without_data(state)
+
+
 @pytest.mark.parametrize("previous", [
     None,
     {"intent": "weather", "parameters": {"tool_calls": ["get_weather"]}},
@@ -215,9 +223,15 @@ def test_a_place_the_user_named_is_used():
     assert grounding.resolve_search_location(state, "home") == ("Springfield", "classifier_entity")
 
 
-def test_a_request_location_that_is_not_in_the_words_is_used():
-    state = _state("an italian place", entities={"location": "47.6, -122.3"})
+def test_the_requests_own_location_is_used_when_it_is_not_in_the_words():
+    state = _state("an italian place", entities={"location": "47.6, -122.3"}, request_location="47.6, -122.3")
     assert grounding.resolve_search_location(state, "home") == ("47.6, -122.3", "request_entities")
+
+
+def test_an_entity_location_that_is_neither_in_the_words_nor_the_requests_own_is_dropped():
+    state = _state("an italian place", entities={"location": "Atlantis"}, request_location="47.6, -122.3")
+    assert grounding.resolve_search_location(state, "home") == ("home", "default")
+    assert grounding.resolve_search_location(_state("an italian place", entities={"location": "Atlantis"}), "home") == ("home", "default")
 
 
 # --- ungrounded answers -----------------------------------------------------------
@@ -242,6 +256,70 @@ def test_the_same_answer_with_tool_data_is_fine():
 ])
 def test_knowledge_and_plain_answers_are_never_ungrounded(answer, query, intent):
     assert not grounding.ungrounded_answer(answer, intent, query, False)
+
+
+KNOWLEDGE_WITH_EXAMPLES = [
+    ("what is a stock split", I.STOCKS,
+     "A stock split divides each share into more shares. If Acme Corp trades at $50 and splits 2 for 1, "
+     "you hold twice the shares at $25 each."),
+    ("what is a stock split", I.GENERAL_INFO,
+     "For example, Acme Corp at $50 becomes two shares of $25 after a 2 for 1 split."),
+    ("how does a dividend work", I.STOCKS, "Say Globex Holdings pays $2 a year; you receive $2 per share."),
+    ("explain what a game's point spread means", I.SPORTS,
+     "If Anytown Owls are favored by 3, they must win by more than 3 points. A $10 bet pays $19.10."),
+    ("why is the forecast sometimes wrong", I.WEATHER, "Forecast Models Inc. said 72 degrees at 3:30 PM but it was 65."),
+    ("how do airlines price tickets", I.FLIGHTS, "Sky Lines might charge $300 for a 9:15 AM seat and $150 at night."),
+    ("what is a prix fixe menu", I.DINING,
+     "At Chez Example Bistro a prix fixe dinner is $45 and served until 10 PM."),
+    ("what is a recipe for roux", I.RECIPES, "Cook equal parts butter and flour; Le Cordon Bleu says 5 minutes at $0 extra."),
+]
+
+
+@pytest.mark.parametrize("query,intent,answer", KNOWLEDGE_WITH_EXAMPLES,
+                         ids=[f"{q[:28]}|{i.value}" for q, i, _a in KNOWLEDGE_WITH_EXAMPLES])
+def test_a_knowledge_answer_with_a_worked_example_is_never_ungrounded(query, intent, answer):
+    assert not grounding.ungrounded_answer(answer, intent, query, False)
+
+
+def test_the_same_example_is_judged_when_the_request_is_for_a_business():
+    answer = "Try Luigi's Trattoria. It's open until 10 PM and pasta is $18."
+    assert grounding.ungrounded_answer(answer, I.STOCKS, "recommend an italian place near me", False)
+    assert grounding.ungrounded_answer(answer, I.DINING, "dinner ideas", False)
+
+
+@pytest.mark.parametrize("intent", [I.STOCKS, I.NEWS, I.SPORTS, I.WEATHER, I.RECIPES, I.STREAMING, I.AIRPORTS])
+def test_only_venue_intents_are_judged_for_an_invented_venue(intent):
+    answer = "Try Luigi's Trattoria. It's open until 10 PM and pasta is $18."
+    assert not grounding.ungrounded_answer(answer, intent, "tell me something", False)
+    assert grounding.ungrounded_answer(answer, I.DINING, "tell me something", False)
+    assert grounding.ungrounded_answer(answer, I.EVENTS, "tell me something", False)
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("what is a stock split", True), ("what's an index fund", True), ("how does a dividend work", True),
+    ("why is the sky blue", True), ("explain compound interest", True), ("define inflation", True),
+    ("what does a price to earnings ratio mean", True), ("the difference between a stock and a bond", True),
+    ("what is the weather", False), ("what's the score of the game", False), ("find an italian place", False),
+    ("what is a good restaurant near me", False), ("", False),
+])
+def test_knowledge_question(query, expected):
+    assert grounding.knowledge_question(query) is expected
+
+
+@pytest.mark.parametrize("answer,expected", [
+    ("I've had a great meal there last week.", True),
+    ("I went there last week and loved it.", True),
+    ("When I visited, the pasta was great.", True),
+    ("I've been to that place twice.", True),
+    ("I ate there with friends.", True),
+    ("My favorite cuisine is Thai.", False),
+    ("I'd try the pasta.", False),
+    ("My favorite spot for ideas is a library.", False),
+    ("I recommend the tasting menu.", False),
+    ("They say the pasta there is great.", False),
+])
+def test_experience_claim_targets_fabricated_visits_not_persona_preferences(answer, expected):
+    assert grounding.experience_claim(answer, "where should we eat") is expected
 
 
 def test_a_first_person_experience_is_ungrounded_for_any_intent():
@@ -288,11 +366,23 @@ def test_the_evidence_summary_of_a_retrieve_result_is_truncated():
     ("where can I get a good coffee shop", True),
     ("find a pizza place nearby", True),
     ("best brunch spots", True),
+    ("any good sushi in town", True),
+    ("book a table at a steakhouse tonight", True),
     ("what is a stock split", False),
     ("what's the capital of France", False),
     ("explain how a bar chart works", False),
     ("tell me a joke", False),
     ("", False),
+    # knowledge questions that mention a venue word
+    ("where did sushi originate", False),
+    ("a good brunch recipe", False),
+    ("what is happy hour", False),
+    ("what's the history of the diner", False),
+    ("how do i make a good pizza at home", False),
+    ("why is brunch so popular", False),
+    ("I like sushi", False),
+    ("sushi is my favorite food", False),
+    ("the pizza was cold", False),
 ])
 def test_local_business_cue(query, expected):
     assert grounding.local_business_cue(query) is expected
@@ -423,18 +513,30 @@ def test_invalidate_cache_removes_every_semantic_key_and_nothing_else(monkeypatc
     assert max(redis.unlinks) <= 500 and len(redis.unlinks) == 3
 
 
-def test_invalidate_cache_by_category(monkeypatch):
-    redis = _FakeRedis(["athena_semantic:weather_x:1:kv2", "athena_semantic:dining_x:1:kv2"])
-    _install(monkeypatch, redis)
-    assert asyncio.run(semantic_cache.invalidate_cache(category="weather")) == 1
-    assert redis.keys == {"athena_semantic:dining_x:1:kv2"}
-    assert redis.scans[0][0] == "athena_semantic:weather_*"
+def test_invalidate_cache_has_no_category_form():
+    """A category isn't a key prefix (recipes are recipe_*, general answers are a hash)."""
+    with pytest.raises(TypeError):
+        asyncio.run(semantic_cache.invalidate_cache(category="weather"))
 
 
 def test_invalidate_cache_with_a_pattern(monkeypatch):
-    redis = _FakeRedis(["athena_semantic:news_x:1:kv2", "athena_semantic:news_y:1:kv2"])
+    redis = _FakeRedis(["athena_semantic:news_x:1:kv2", "athena_semantic:news_y:1:kv2", "conversation:abc"])
     _install(monkeypatch, redis)
     assert asyncio.run(semantic_cache.invalidate_cache(pattern="athena_semantic:news_x:*")) == 1
+
+
+@pytest.mark.parametrize("given,scanned", [
+    ("recipe_*", "athena_semantic:recipe_*"),
+    ("*", "athena_semantic:*"),
+    (":weather_*", "athena_semantic:weather_*"),
+    ("conversation:*", "athena_semantic:conversation:*"),
+])
+def test_a_pattern_is_always_kept_under_the_semantic_prefix(monkeypatch, given, scanned):
+    redis = _FakeRedis(["athena_semantic:recipe_x:1:kv2", "conversation:abc", "athena:session:1"])
+    _install(monkeypatch, redis)
+    asyncio.run(semantic_cache.invalidate_cache(pattern=given))
+    assert redis.scans == [(scanned, 500)]
+    assert {"conversation:abc", "athena:session:1"} <= redis.keys
 
 
 def test_invalidate_cache_is_zero_when_redis_is_down(monkeypatch):

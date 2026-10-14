@@ -878,24 +878,27 @@ async def cache_response(
 INVALIDATE_BATCH = 500
 
 
-async def invalidate_cache(category: str = None, pattern: str = None) -> int:
+async def invalidate_cache(pattern: str = None) -> int:
     """
-    Remove cached responses: one category, a key pattern, or (no arguments) all.
+    Remove cached responses: every semantic key, or those matching ``pattern``.
 
-    The scan is a Redis SCAN over ``athena_semantic:{category}_*`` (or the given
-    pattern, or ``athena_semantic:*``) in batches of 500, and the removal is a
-    batched UNLINK. Returns the number of keys removed; 0 when Redis is
-    unavailable. Keys carry no version bump (constraint g): this is how a
-    release flushes entries written under the old rules.
+    The scan is a Redis SCAN over ``athena_semantic:*`` (or the pattern, always
+    kept under that prefix so it can't reach another feature's keys) in batches
+    of 500, and the removal is a batched UNLINK. Returns the number of keys
+    removed; 0 when Redis is unavailable. Keys carry no version bump (constraint
+    g): this is how a release flushes entries written under the old rules. There
+    is no per-category form: the normalized part of a key is not the TTL category
+    (recipes are ``recipe_*``, general answers are a hash).
     """
     client = getattr(get_cache_client(), "client", None)
     if client is None:
         return 0
 
-    if category:
-        pattern = f"athena_semantic:{category}_*"
-    elif not pattern:
-        pattern = "athena_semantic:*"
+    prefix = "athena_semantic:"
+    if not pattern:
+        pattern = prefix + "*"
+    elif not pattern.startswith(prefix):
+        pattern = prefix + pattern.lstrip(":")
 
     removed = 0
     batch: list = []

@@ -679,3 +679,140 @@ def test_an_entry_stored_under_a_no_longer_cacheable_intent_is_not_replayed(monk
     entry["intent"] = "websearch"
     _answer, graph = _ask(monkeypatch, cache, answer="FRESH")
     assert graph.calls == 1
+
+
+# --- knowledge questions in data intents (H1) ------------------------------------------------------------------------
+
+STOCK_SPLIT = ("A stock split divides each share into more shares. If Acme Corp trades at $50 and splits "
+               "2 for 1, you hold twice the shares at $25 each.")
+
+
+@pytest.mark.parametrize("intent", [I.STOCKS, I.NEWS, I.SPORTS, I.GENERAL_INFO])
+def test_a_definition_answered_with_a_worked_example_survives_the_tool_node(monkeypatch, intent):
+    out, execute, _ = _run_tool_node(
+        monkeypatch, _state("what is a stock split", intent), llm=h.CapturingLLM(content=STOCK_SPLIT),
+    )
+    assert _executed(execute) == [] and out.answer == STOCK_SPLIT and out.is_fallback is False
+
+
+@pytest.mark.parametrize("intent", [I.STOCKS, I.NEWS, I.SPORTS, I.GENERAL_INFO, I.WEATHER])
+def test_a_definition_with_a_worked_example_passes_validation_without_the_fact_check(intent):
+    state = _state("what is a stock split", intent, answer=STOCK_SPLIT, tool_call_attempted=True)
+    router = mock.Mock(generate=mock.AsyncMock(return_value={"response": '{"contains_hallucinations": true}'}))
+    h._runtime.set_llm_router(router)
+    out = _validate(state)
+    router.generate.assert_not_called()
+    assert out.validation_passed is True and out.answer == STOCK_SPLIT
+
+
+def test_a_stock_split_definition_is_stored_by_query_but_a_price_claim_is_still_checked():
+    """The control: the same example in answer to a request for a stock price is checked."""
+    state = _state("what is the price of Acme", I.STOCKS, answer="Acme Corp trades at $50 today.", tool_call_attempted=True)
+    router = mock.Mock(generate=mock.AsyncMock(return_value={"response": '{"contains_hallucinations": true, "reason": "x"}'}))
+    h._runtime.set_llm_router(router)
+    with mock.patch("orchestrator.nodes.validate.get_component_config", mock.AsyncMock(return_value={"model_name": "m"})):
+        out = _validate(state)
+    router.generate.assert_called_once()
+    assert out.validation_passed is False and out.answer == grounding.DECLINE_TEXT
+
+
+def test_a_definition_example_survives_on_query_and_the_streams(monkeypatch):
+    """/query: the tool node then validate; the streams: the runner's tool node then validate."""
+    h.patch_tool_call_dependencies(monkeypatch)
+    h._runtime.set_llm_router(h.CapturingLLM(content=STOCK_SPLIT))
+    state = _state("what is a stock split", I.STOCKS)
+    state = asyncio.run(h.main._tool_call_and_validate(state))
+    assert state.answer == STOCK_SPLIT and state.validation_passed is True
+
+
+# --- experience claims (M2): one rule on every path ------------------------------------------------------------
+
+def test_a_persona_preference_is_not_an_experience_claim_on_a_tool_turn():
+    for answer in ("My favorite cuisine is Thai, so I'd try the pad see ew.", "I'd try the pasta; it is a classic."):
+        out = _validate(_state("what should I order", I.GENERAL_INFO, answer=answer, tool_call_attempted=True))
+        assert out.validation_passed is True, answer
+
+
+def test_a_fabricated_visit_fails_on_a_tool_turn_and_is_left_to_the_prompt_elsewhere():
+    answer = "I went there last week and the soup was great."
+    tool_turn = _validate(_state("is it good", I.GENERAL_INFO, answer=answer, tool_call_attempted=True))
+    assert tool_turn.validation_passed is False and tool_turn.answer == grounding.DECLINE_TEXT
+    # a synthesized turn is not validated for it on the graph, as the stream's synthesis is not
+    synthesized = _validate(_state("is it good", I.GENERAL_INFO, answer=answer))
+    assert synthesized.validation_passed is True
+
+
+# --- follow-ups that reuse prior results (M5) --------------------------------------------------------------------------
+
+RETRIEVED_CONTEXT = {"intent": "weather", "query": "weather today", "response": "Sunny, 70.",
+                     "parameters": {"grounded": True, "last_data": {"current": {"temp": 70}}}}
+
+
+@pytest.mark.parametrize("builder", BUILDERS)
+def test_a_follow_up_on_retrieved_data_keeps_the_conversation_prompt(monkeypatch, builder):
+    state = _state("and what about the wind", I.WEATHER, conversation_history=HISTORY, prev_context=RETRIEVED_CONTEXT, answer=None)
+    text = BUILDERS[builder](monkeypatch, state)
+    assert "your built-in knowledge" in text and "You do NOT have access" not in text
+
+
+@pytest.mark.parametrize("builder", BUILDERS)
+def test_the_same_turn_without_prior_data_gets_the_strict_prompt(monkeypatch, builder):
+    state = _state("and what about the wind", I.WEATHER, conversation_history=HISTORY, answer=None)
+    text = BUILDERS[builder](monkeypatch, state)
+    assert "You do NOT have access" in text
+
+
+def test_a_follow_up_on_retrieved_data_keeps_the_training_knowledge_bypass():
+    state = _state("and what about the wind", I.WEATHER, answer="Winds are light, near 5 mph, gusting to 15 mph at 3:00 PM.",
+                   conversation_history=HISTORY, prev_context=RETRIEVED_CONTEXT)
+    router = mock.Mock(generate=mock.AsyncMock(return_value={"response": '{"contains_hallucinations": true}'}))
+    h._runtime.set_llm_router(router)
+    out = _validate(state)
+    router.generate.assert_not_called()
+    assert out.validation_passed is True
+
+
+def test_the_prior_data_bypass_is_the_reason_recorded():
+    state = _state("and what about the wind", I.WEATHER, answer="Winds are light, near 5 mph, gusting to 15 mph at 3:00 PM.",
+                   conversation_history=HISTORY, prev_context=RETRIEVED_CONTEXT)
+    counter = mock.MagicMock()
+    with mock.patch("orchestrator.nodes.validate.validation_counter", counter):
+        _validate(state)
+    assert counter.labels.call_args_list == [mock.call(passed="true", reason="training_knowledge_fallback")]
+
+
+def test_the_synthesis_stores_a_marker_when_the_turn_held_data(monkeypatch):
+    state = _state("weather today", I.WEATHER, retrieved_data={"current": {"temp": 70}}, answer=None, session_id="s1")
+    stored = mock.AsyncMock()
+    admin, _e, _k, _h = h.patch_tool_call_dependencies(monkeypatch)
+    monkeypatch.setattr(h.synthesize_module, "get_component_config", mock.AsyncMock(return_value={"model_name": "m", "backend_type": "ollama"}))
+    monkeypatch.setattr(h.synthesize_module, "store_conversation_context", stored)
+    h._runtime.set_llm_router(h.CapturingLLM(content="It is sunny and 70 degrees today."))
+    asyncio.run(h.synthesize_module.synthesize_node(state))
+    assert stored.await_args.kwargs["parameters"]["grounded"] is True
+    state2 = _state("weather today", I.WEATHER, retrieved_data={}, answer=None, session_id="s1")
+    stored.reset_mock()
+    asyncio.run(h.synthesize_module.synthesize_node(state2))
+    assert "grounded" not in stored.await_args.kwargs["parameters"]
+
+
+def test_the_request_location_is_carried_on_the_state(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    seen = []
+
+    class Capture(_Graph):
+        async def ainvoke(self, state):
+            seen.append(state)
+            return await super().ainvoke(state)
+
+    h.patch_conversation_config(monkeypatch)
+    monkeypatch.setattr(h.main, "_direct_general_info_response", lambda q: True)
+    h.install_mode_client(server_mode="owner")
+    monkeypatch.setattr(h.main, "get_admin_client", lambda: h.fake_admin_client())
+    monkeypatch.setattr(semantic_cache_module, "get_cache_client", lambda: _MemoryCache())
+    monkeypatch.setattr(h.main, "orchestrator_graph", Capture())
+    body = {"query": "an italian place", "caller_trust": "household", "interface_type": "chat", "location": "47.6, -122.3"}
+    assert TestClient(h.main.app).post("/query", json=body, headers=h.service_headers()).status_code == 200
+    assert seen[0].request_location == "47.6, -122.3" and seen[0].entities["location"] == "47.6, -122.3"
+    assert grounding.resolve_search_location(seen[0], "home")[0] == "47.6, -122.3"

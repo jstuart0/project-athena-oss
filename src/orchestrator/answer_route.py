@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import re
 
 from orchestrator.context import is_conversational_reference
 from orchestrator.grounding import local_business_cue, request_text
@@ -46,14 +47,23 @@ class Route(str, enum.Enum):
     NOTIFICATION_PREF = "notification_pref"
 
 
+# A phrase that can only be a request to the media library.
 MEDIA_REQUEST_KEYWORDS = (
     "request movie", "request show", "request the movie", "request the show",
     "add movie", "add the movie", "add show", "add the show", "add to plex", "add to jellyfin",
     "download movie", "download show", "download the movie", "download the show",
-    "want to watch", "my requests", "media requests", "pending requests", "my pending",
-    "is available on plex", "is available on jellyfin", "in the library", "on plex", "on jellyfin",
+    "my requests", "media requests", "pending requests", "my pending",
+    "is available on plex", "is available on jellyfin",
     "overseerr", "request status", "movie request", "show request", "tv request",
 )
+# Phrases that are also how a viewer or listener asks a device to play something.
+AMBIGUOUS_MEDIA_KEYWORDS = ("want to watch", "in the library", "on plex", "on jellyfin")
+# A device, an app or a room named in the request: a command, not a library request.
+_PLAYBACK_TARGET = re.compile(
+    r"\b(?:in|on|at) (?:the|my|our) [a-z][a-z ]{1,24}\b"
+    r"|\b(?:netflix|hulu|disney\+?|youtube|prime video|hbo|max|apple tv|roku|spotify|apple music|the tv|tv)\b"
+)
+_PLAYBACK_INTENTS = frozenset({IntentCategory.TV_CONTROL, IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL})
 
 # Data intents the tool node answers directly (the rest go through route_info).
 _TOOL_NODE_INTENTS = frozenset({
@@ -73,11 +83,20 @@ _HANDLER_ROUTES = {
 
 
 def is_media_request(state: OrchestratorState) -> bool:
-    """A media-library request, which only an owner-mode turn may make."""
+    """A media-library request, which only an owner-mode turn may make. A phrase
+    that is also how one asks a device to play ("I want to watch Netflix in the
+    den", "play it on plex in the living room") is a request only when no device,
+    app or room is named and the turn isn't already a playback command."""
     if state.mode == "guest":
         return False
     query = (state.query or "").lower()
-    return any(keyword in query for keyword in MEDIA_REQUEST_KEYWORDS)
+    if any(keyword in query for keyword in MEDIA_REQUEST_KEYWORDS):
+        return True
+    if not any(keyword in query for keyword in AMBIGUOUS_MEDIA_KEYWORDS):
+        return False
+    for keyword in AMBIGUOUS_MEDIA_KEYWORDS:  # the phrase itself ("in the library") names no target
+        query = query.replace(keyword, " ")
+    return state.intent not in _PLAYBACK_INTENTS and not _PLAYBACK_TARGET.search(query)
 
 
 def has_conversation(state: OrchestratorState) -> bool:

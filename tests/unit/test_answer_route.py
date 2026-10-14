@@ -151,6 +151,25 @@ ROWS = {
         intent=I.UNKNOWN, query="add the movie to plex", work=["tool_call_node", "validate_node"], route=Route.TOOL_CALL),
     "a: guest mode keeps control": dict(
         intent=I.CONTROL, query="show my pending requests", mode="guest", work=["route_control_node"], route=Route.CONTROL),
+    # media phrasings that are also device commands reach the device nodes
+    "m4: watch an app in a room": dict(
+        intent=I.TV_CONTROL, query="I want to watch Netflix in the den", work=["route_tv_node"], route=Route.TV),
+    "m4: watch an app in a room, unclassified": dict(
+        intent=I.UNKNOWN, query="I want to watch Netflix in the den", work=[], route=Route.FINALIZE),
+    "m4: put on music in a room": dict(
+        intent=I.MUSIC_PLAY, query="put on jazz in the kitchen", work=["route_music_node"], route=Route.MUSIC),
+    "m4: play on plex in a room": dict(
+        intent=I.TV_CONTROL, query="play the show on plex in the living room", work=["route_tv_node"], route=Route.TV),
+    "m4: plex phrase with a room, control intent": dict(
+        intent=I.CONTROL, query="play it on plex in the living room", work=["route_control_node"], route=Route.CONTROL),
+    "m4: music intent with a plex phrase": dict(
+        intent=I.MUSIC_PLAY, query="want to watch it on plex", work=["route_music_node"], route=Route.MUSIC),
+    "m4: library question with no target": dict(
+        intent=I.UNKNOWN, query="is the movie in the library", work=["tool_call_node", "validate_node"], route=Route.TOOL_CALL),
+    "m4: want to watch a title with no target": dict(
+        intent=I.UNKNOWN, query="I want to watch the movie Inception", work=["tool_call_node", "validate_node"], route=Route.TOOL_CALL),
+    "m4: strong request phrase beats a room": dict(
+        intent=I.CONTROL, query="request the movie in the den", work=["tool_call_node", "validate_node"], route=Route.TOOL_CALL),
     # (b) general info without a trigger synthesizes; with one it uses tools
     "b: general info": dict(intent=I.GENERAL_INFO, query="what is a stock split", work=[], route=Route.SYNTHESIZE),
     "b: general info with trigger": dict(

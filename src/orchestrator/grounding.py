@@ -100,7 +100,8 @@ def prior_tool_context(state: Any) -> bool:
     if previous.get("intent") != getattr(intent, "value", intent):
         return False
     parameters = previous.get("parameters") or {}
-    return bool(parameters.get("tool_calls")) and not parameters.get("direct_answer")
+    held_data = bool(parameters.get("tool_calls") or parameters.get("grounded"))
+    return held_data and not parameters.get("direct_answer")
 
 
 def evidence_summary(state: Any, limit: int = EVIDENCE_LIMIT) -> str:
@@ -123,31 +124,58 @@ def evidence_summary(state: Any, limit: int = EVIDENCE_LIMIT) -> str:
 
 # --- the local-business cue ---------------------------------------------------
 
-_PROXIMITY = re.compile(r"\b(?:near me|nearby|around here|close by|in my area|around me|closest|nearest)\b")
+_PROXIMITY = re.compile(r"\b(?:near me|nearby|around here|close by|in my area|around me|closest|nearest|in town|in the area)\b")
 _VENUE = re.compile(
     r"\b(?:restaurants?|cafes?|coffee shops?|diners?|bakery|bakeries|pizzerias?|pizza places?|"
     r"breweries|brewery|steakhouses?|sushi|brunch|takeout|take-out|bistro|pubs?|taverns?|"
-    r"places? to (?:eat|drink|grab)|somewhere to eat|something to eat|(?:sports|wine|cocktail|dive) bars?)\b"
+    r"places? to (?:eat|drink|grab)|somewhere to eat|something to eat|(?:sports|wine|cocktail|dive) bars?|"
+    r"happy hour)\b"
 )
-_VENUE_VERB = re.compile(
-    r"\b(?:recommend|suggest|good|great|best|find|looking for|where|open|hours|phone|address|menu|"
-    r"reservations?|table|spot|place)\b"
+_PLACE_WORD = re.compile(r"\b(?:place|spot|food|eat|drink|shop|store|bar)s?\b")
+# A request to find, pick or book something: without one a venue word is a topic.
+_FIND_INTENT = re.compile(
+    r"\b(?:recommend|suggest|find|looking for|look for|any|is there|are there|where (?:can|should|to|do)|"
+    r"book|reserve|reservations?|open (?:now|late|today|tonight|tomorrow)|best|good|great|top|"
+    r"take me|get me|hungry)\b"
 )
-_STANDALONE_CUE = re.compile(r"\b(?:happy hour|reservations?|open now|open late)\b")
+# Knowledge about a venue word: recipes, origins, meanings, history.
+_TOPIC_QUESTION = re.compile(
+    r"\b(?:recipes?|originat\w*|origins?|history|invented|ingredients?|calories|nutrition|etymology|meaning|"
+    r"how (?:do|to|does|did) (?:i |you |we )?(?:make|cook|bake|prepare)|why)\b"
+    r"|^\s*(?:what|who|when)(?:'s| is| are| was| were)\s+(?:a |an |the )?(?:happy hour|brunch|sushi|bistro|diner|pub)\b"
+)
 
 
 def local_business_cue(query: Optional[str]) -> bool:
-    """The request asks for a local business or place: a venue word together with
-    a recommendation word or a nearness phrase, or a cue that is one on its own."""
+    """The request asks to find, pick or book a local business or place: a venue
+    word with a find-or-recommend intent or a nearness phrase, or a nearness
+    phrase with a place word. A knowledge question that mentions a venue word
+    ("where did sushi originate", "a good brunch recipe", "what is happy hour")
+    is not one."""
     text = (query or "").lower()
-    if not text:
+    if not text or _TOPIC_QUESTION.search(text):
         return False
-    if _STANDALONE_CUE.search(text):
+    proximity = bool(_PROXIMITY.search(text))
+    if _VENUE.search(text) and (proximity or _FIND_INTENT.search(text)):
         return True
-    venue = _VENUE.search(text)
-    return bool(venue and (_PROXIMITY.search(text) or _VENUE_VERB.search(text))) or bool(
-        _PROXIMITY.search(text) and re.search(r"\b(?:place|spot|food|eat|drink|shop|store|bar)s?\b", text)
-    )
+    return proximity and bool(_PLACE_WORD.search(text))
+
+
+_KNOWLEDGE_QUESTION = re.compile(
+    r"^\s*(?:what(?:'s| is| are| does| do)\s+(?:a|an)\s+\w+|what (?:does|do)\b.+\bmean|define\b|explain\b|"
+    r"how (?:does|do|is|are)\b.+\b(?:work|works|calculated|determined|made|different)|"
+    r"why (?:is|are|do|does|did)\b|what(?:'s| is) the (?:difference|meaning)\b|"
+    r"(?:tell me )?(?:the )?difference between\b|what (?:is|are) .+ (?:for|used for)\b)",
+    re.IGNORECASE,
+)
+
+
+def knowledge_question(query: Optional[str]) -> bool:
+    """A definition, how-it-works or why question: its answer may carry worked
+    examples (a company and a price) that no tool could supply. A request to find
+    a business is never one."""
+    text = (query or "").strip()
+    return bool(text) and bool(_KNOWLEDGE_QUESTION.search(text)) and not local_business_cue(text)
 
 
 # --- location -------------------------------------------------------------------
@@ -192,19 +220,19 @@ def resolve_search_location(state: Any, default: str) -> "tuple[str, str]":
 
     A ``location_override`` (the device's position, or a place the user gave as a
     correction) wins. Otherwise the entities' location is used when the user's
-    own words name a place (``plausible_location``) or when it isn't in the words
-    at all (the request's browser location, or a classifier-normalised name). A
-    relative or amenity phrase the classifier read as a place ("outdoor
-    seating") is dropped. Otherwise ``default`` (the home address)."""
+    own words name a place (``plausible_location``) or when it is the request's
+    own browser location (``request_location``). Anything else the classifier read
+    as a place ("outdoor seating", a name that isn't in the words) is dropped.
+    Otherwise ``default`` (the home address)."""
     override = _override_text((_field(state, "context") or {}).get("location_override"))
     if override:
         return override, "location_override"
     entity = (_field(state, "entities") or {}).get("location")
     if isinstance(entity, str) and entity.strip():
-        query = request_text(state)
-        if entity.strip().lower() not in query.lower():
+        request_location = _field(state, "request_location")
+        if isinstance(request_location, str) and entity.strip() == request_location.strip():
             return entity, "request_entities"
-        if plausible_location(entity, query):
+        if plausible_location(entity, request_text(state)):
             return entity, "classifier_entity"
     return default, "default"
 
@@ -282,6 +310,8 @@ def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: st
         tool = LOCAL_BUSINESS_TOOL
     if tool is None or tool not in set(offered) or prior_tool_context(state):
         return []
+    if knowledge_question(text):  # a definition is answered, not looked up
+        return []
     arguments = _forced_arguments(tool, state, text, search_location)
     return [_tool_call(0, tool, arguments)] if arguments else []
 
@@ -289,10 +319,11 @@ def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: st
 # --- ungrounded answers -----------------------------------------------------------
 
 _EXPERIENCE_CLAIM = re.compile(
-    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|to)|eaten|tried|visited|dined|stayed at|gone to)\b"
-    r"|\bI\s+(?:personally\s+)?(?:ate|went to|dined at|visited)\b"
+    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|here|to)|eaten|tried|visited|dined|stayed at|gone to)\b"
+    r"|\bI\s+(?:personally\s+)?(?:ate|went|dined|visited|stayed|got)\s+(?:to |at )?(?:there|here)\b"
+    r"|\bI\s+(?:personally\s+)?(?:ate at|went to|dined at|visited|stayed at)\b"
+    r"|\bI(?:'ve| have)? had (?:a|an|the|some)\b[^.?!]{0,40}\b(?:there|here)\b"
     r"|\b(?:when|last time|the time) I (?:visited|went|ate|tried|was there)\b"
-    r"|\bmy (?:favorite|favourite|go-to) (?:spot|place|restaurant|order)\b"
     r"|\bI (?:love|enjoy) (?:going|eating|ordering) (?:there|at)\b",
     re.IGNORECASE,
 )
@@ -336,16 +367,24 @@ def _has_venue_with_detail(answer: str) -> bool:
     return False
 
 
+# Intents whose answer names businesses or venues: only these (and a request to
+# find a local business) are judged for an invented venue with details.
+VENUE_INTENTS: FrozenSet[IntentCategory] = frozenset({IntentCategory.DINING, IntentCategory.EVENTS})
+
+
 def ungrounded_answer(answer: Optional[str], intent: Any, query: Optional[str], is_grounded: bool) -> bool:
     """True when the turn holds no tool data and the answer still claims what
-    only data could give: a first-person experience, or (for a tool-owned or
+    only data could give: a first-person experience, or (for a venue intent or a
     local-business request) a named venue with hours, a time, a price, an address
-    or a phone number. A knowledge answer never matches."""
+    or a phone number. A knowledge answer never matches: a definition or how-it-works
+    question may carry a worked example (a company and a price) whatever its intent."""
     if is_grounded or not answer:
         return False
     if experience_claim(answer, query):
         return True
-    if intent in TOOL_OWNED or local_business_cue(query):
+    if knowledge_question(query):
+        return False
+    if intent in VENUE_INTENTS or local_business_cue(query):
         return _has_venue_with_detail(answer)
     return False
 
@@ -379,7 +418,7 @@ def sports_status_rule(state: Any) -> str:
 def tool_owned_without_data(state: Any) -> bool:
     """A data intent with nothing fetched: its synthesis must not use the
     built-in-knowledge prompt, which permits specifics the turn never had."""
-    return _field(state, "intent") in TOOL_OWNED and not grounded(state)
+    return _field(state, "intent") in TOOL_OWNED and not grounded(state) and not prior_tool_context(state)
 
 
 def no_data_prompt(query: str) -> str:

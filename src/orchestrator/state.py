@@ -117,6 +117,7 @@ class OrchestratorState(BaseModel):
     intent: Optional[IntentCategory] = None
     confidence: float = 0.0
     entities: Dict[str, Any] = Field(default_factory=dict)
+    request_location: Optional[str] = Field(None, description="The location the request itself carried (the browser's); the only entity location accepted when it isn't in the user's words")
     complexity: Optional[str] = Field(None, description="Query complexity: simple, complex, super_complex")
 
     # Model selection

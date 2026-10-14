@@ -78,12 +78,18 @@ def test_a_no_argument_flush_removes_every_semantic_key_and_only_those(redis_url
     assert remaining == sorted(OTHER_KEYS)
 
 
-def test_a_category_flush_removes_only_that_category(redis_url):
-    removed, remaining = asyncio.run(_flush(redis_url, category="weather"))
+def test_a_pattern_flush_removes_only_matching_semantic_keys(redis_url):
+    removed, remaining = asyncio.run(_flush(redis_url, pattern="weather_*"))
     assert removed == SEMANTIC_KEYS // 2
     assert sum(k.startswith("athena_semantic:dining_") for k in remaining) == SEMANTIC_KEYS - SEMANTIC_KEYS // 2
     assert not any(k.startswith("athena_semantic:weather_") for k in remaining)
     assert set(OTHER_KEYS) <= set(remaining)
+
+
+def test_a_bare_wildcard_pattern_cannot_reach_other_keys(redis_url):
+    removed, remaining = asyncio.run(_flush(redis_url, pattern="*"))
+    assert removed == SEMANTIC_KEYS
+    assert remaining == sorted(OTHER_KEYS)
 
 
 def test_a_flush_on_an_unreachable_server_is_zero():
