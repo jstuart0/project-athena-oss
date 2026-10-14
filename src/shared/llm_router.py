@@ -12,6 +12,7 @@ import contextvars
 import functools
 import httpx
 import json
+import os
 import time
 from contextlib import aclosing, contextmanager
 from dataclasses import dataclass

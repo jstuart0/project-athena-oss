@@ -2761,10 +2761,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.entities = {"device": "light"}
 
         # Extract room if present
-        for room in room_names:
-            if room in query_lower:
-                state.entities["room"] = room
-                break
+        if has_room:
+            state.entities["room"] = room_context.room_values(room_mention)[0]
 
         # Cache the classification
         try:

@@ -5204,7 +5204,10 @@ Do NOT mention rooms that have no current or recent motion."""
                 names = ", ".join(on_list[:3]) + f" and {len(on_list) - 3} more"
             return f"{len(on_list)} of {len(matched)} {nouns} are on: {names}."
         except Exception as e:
-            logger.error(f"Entity state query error ({domain}): {e}")
+            import structlog
+            structlog.get_logger(__name__).error(
+                "entity_state_query_error", domain=domain, error_type=type(e).__name__
+            )
             return f"I couldn't check the {noun} status right now."
 
     # -- doors: locks and the covers that let someone in --------------------

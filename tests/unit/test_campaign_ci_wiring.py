@@ -138,6 +138,7 @@ PREEXISTING_UNWIRED: Dict[str, str] = {
 # Files that stub an absent module at import (``if name not in sys.modules``) and
 # already share an orchestrator-behaviour step at the base commit without harm.
 PREEXISTING_SHARED_STATE: Dict[str, str] = {
+    "tests/unit/test_extract_intent_room_mentions.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_ha_permission_guard.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_ha_permission_wiring.py": "stubs langgraph and prometheus_client only when absent",
     "tests/unit/test_gateway_speaker_room.py": "stubs prometheus_client only when absent",

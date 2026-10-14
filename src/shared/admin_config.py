@@ -4,6 +4,7 @@ Admin Configuration Client
 Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
+import os
 import re
 import time
 import urllib.parse

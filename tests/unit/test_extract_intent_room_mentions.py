@@ -343,6 +343,26 @@ def test_classify_does_not_treat_a_house_room_as_a_room_when_the_house_lacks_it(
     assert state.entities.get("room") != "galley"
 
 
+def test_classify_reads_a_plain_light_command_with_the_room_key(monkeypatch):
+    # The "turn on/off ... lights" fast path kept a reference to the removed
+    # room list, so every such command raised NameError in classify_node.
+    use(HOUSE_A)
+    from orchestrator.state import IntentCategory
+
+    state = _classify("turn off the galley lights", monkeypatch)
+    assert state.intent == IntentCategory.CONTROL
+    assert state.entities.get("device") == "light" and state.entities.get("room") == "galley", state.entities
+
+
+def test_classify_reads_a_plain_light_command_without_a_room(monkeypatch):
+    use(HOUSE_A)
+    from orchestrator.state import IntentCategory
+
+    state = _classify("turn on the lights", monkeypatch)
+    assert state.intent == IntentCategory.CONTROL
+    assert "room" not in state.entities, state.entities
+
+
 def test_the_multi_intent_splitter_keeps_rooms_joined_by_and_together():
     from orchestrator.search_providers.intent_classifier import IntentClassifier
 

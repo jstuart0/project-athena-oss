@@ -300,6 +300,8 @@ def get_complexity_with_override(
 
 # Quick test examples
 if __name__ == "__main__":
+    import logging
+
     logging.basicConfig(level=logging.INFO)
 
     test_queries = [
