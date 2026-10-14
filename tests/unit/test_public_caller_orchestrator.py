@@ -208,8 +208,10 @@ def test_web_public_literal_single_site():
 
 
 # resolve_addressee asks is_public_audience before it reaches _owner_name, and
-# load_visible_knowledge fetches nothing for a public audience (no visible tiers).
-AUDIENCE_GUARDED = {("helpers.py", "_owner_name")}
+# load_visible_knowledge fetches nothing for a public audience (no visible tiers);
+# configured_assistant_names takes the KnowledgeAudience itself, which is public
+# exactly when it has no visible tiers (tests/unit/test_identity_answer.py).
+AUDIENCE_GUARDED = {("helpers.py", "_owner_name"), ("helpers.py", "configured_assistant_names")}
 
 
 def test_base_knowledge_sites_guarded():

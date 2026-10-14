@@ -8,6 +8,7 @@ import hashlib
 import os
 from typing import List, Dict, Any, Optional
 import structlog
+from shared.assistant_profile import clean_guest_name
 from shared.config import get_config
 from shared.knowledge_tiers import OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
 from shared.local_time import local_now
@@ -231,6 +232,18 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
     return _DEFAULT_LOCATION
 
 
+def extract_property_address(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
+    """The ``property``/``address`` row's value from already-filtered entries,
+    or None. Unlike ``extract_home_address`` there is no default-location
+    fallback: only a stored address counts as the home address."""
+    for entry in knowledge_entries or []:
+        if _category(entry) == "property" and entry.get("key") == "address":
+            value = str(entry.get("value") or "").strip()
+            if value:
+                return value
+    return None
+
+
 def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
     """The owner's name from already-filtered entries.
 
@@ -250,6 +263,19 @@ def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]
         return None
     best = min(candidates, key=lambda e: (tier_rank[e["applies_to"]], -(e.get("priority") or 0)))
     return best["value"].strip()
+
+
+def assistant_name_from(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
+    """The assistant's name from already-filtered ``general`` rows whose key
+    contains ``assistant_name``, cleaned like a guest name (letters, marks and
+    ``. - '``, at most 4 words / 64 characters); the first row that passes wins.
+    None when no visible row gives a clean name."""
+    for entry in knowledge_entries or []:
+        if _category(entry) == "general" and "assistant_name" in str(entry.get("key", "")):
+            name = clean_guest_name(entry.get("value"))
+            if name:
+                return name
+    return None
 
 
 async def load_visible_knowledge(admin_client, *, audience: KnowledgeAudience) -> List[Dict[str, Any]]:

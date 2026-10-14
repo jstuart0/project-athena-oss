@@ -1248,7 +1248,7 @@ class TestConfiguredAssistantNameRouting:
     def test_configured_name_question_takes_the_read_path(self, monkeypatch):
         from orchestrator.nodes import route_control as rc
 
-        async def _names():
+        async def _names(audience=None):
             return ("Friday",)
 
         monkeypatch.setattr(rc, "_configured_assistant_names", _names)

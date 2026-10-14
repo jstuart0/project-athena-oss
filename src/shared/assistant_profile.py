@@ -231,6 +231,18 @@ def clean_guest_name(value: Optional[str]) -> Optional[str]:
     return name
 
 
+# Fixed text, not part of the admin-editable profile: a saved profile can't
+# drop either line.
+TOOL_DEFAULTS_POLICY = (
+    "When a tool can answer, act with sensible defaults; ask at most one short question, "
+    "only when a required value can't be defaulted."
+)
+SPEAKER_UNKNOWN_POLICY = (
+    "You don't know who is speaking. Don't assume they are the property owner, a guest, or you, "
+    "and never tell them a name or home address is theirs."
+)
+
+
 async def build_core_assistant_prompt(
     include_voice_formatting: bool = True,
     guest_name: Optional[str] = None,
@@ -238,8 +250,13 @@ async def build_core_assistant_prompt(
     interface_type: Optional[str] = None,
     household_first_name: Optional[str] = None,
     long_form: bool = False,
+    assistant_name: Optional[str] = None,
 ) -> str:
     """Build the canonical assistant persona/system prompt.
+
+    `assistant_name` is a visible base-knowledge name row, already cleaned
+    (`base_knowledge_utils.assistant_name_from`); it wins over the profile's
+    name so the persona line and the "Your Name" row agree.
 
     `long_form` marks a recipe, directions, itinerary or step-by-step turn: its
     spoken answer is allowed to run past the short-answer sentence limit.
@@ -254,7 +271,7 @@ async def build_core_assistant_prompt(
     guardrails = await get_guardrails()
 
     lines = [
-        f'You are {profile["assistant_name"]}, {profile["identity"]}.',
+        f'You are {assistant_name or profile["assistant_name"]}, {profile["identity"]}.',
         "",
         "Personality:",
     ]
@@ -301,6 +318,7 @@ async def build_core_assistant_prompt(
         "",
         "When you have retrieved data, use it accurately. When you do not have data for a factual question, acknowledge that honestly rather than guessing.",
     ])
+    lines.append(TOOL_DEFAULTS_POLICY)
 
     if owner_name:
         lines.extend([
@@ -325,6 +343,8 @@ async def build_core_assistant_prompt(
             f"first_name: {json.dumps(household_first_name, ensure_ascii=False)}",
             "Use it only to address the user by name. This person is a member of the household, not the guest.",
         ])
+    else:
+        lines.extend(["", SPEAKER_UNKNOWN_POLICY])
 
     return "\n".join(lines)
 

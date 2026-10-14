@@ -366,16 +366,21 @@ def _synthesize_owner_turn(*, proven_owner):
     return admin_client
 
 
+def _requested_tiers(admin_client):
+    return [set(call.kwargs["tiers"]) for call in admin_client.get_base_knowledge.await_args_list]
+
+
 def test_proven_owner_calls_get_base_knowledge_with_owner_tier():
-    """Only a proven owner is addressed by name, so only then is owner_name looked up."""
+    """Only a proven owner is addressed by name, so only then is the owner tier read."""
     admin_client = _synthesize_owner_turn(proven_owner=True)
-    admin_client.get_base_knowledge.assert_awaited_once()
-    assert "owner" in admin_client.get_base_knowledge.await_args.kwargs["tiers"]
+    assert any("owner" in tiers for tiers in _requested_tiers(admin_client))
 
 
 def test_unproven_owner_mode_does_not_look_up_the_owner_name():
+    """The prompt's visible rows (assistant name, identity backstop) are read for the
+    audience, which never includes the owner tier without proof."""
     admin_client = _synthesize_owner_turn(proven_owner=False)
-    admin_client.get_base_knowledge.assert_not_awaited()
+    assert all("owner" not in tiers for tiers in _requested_tiers(admin_client))
 
 
 # ---------------------------------------------------------------------------

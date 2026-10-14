@@ -20,6 +20,7 @@ effective mode is owner, and is never the addressee here.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Optional
@@ -95,6 +96,11 @@ ROWS = [
 ]
 IDS = [f"row{r.n}" for r in ROWS]
 IDENTITY_QUERY = "what is my name"
+
+
+def _persona_names(text: str) -> set:
+    """The distinct assistant names the persona line states (exactly one)."""
+    return set(re.findall(r"You are ([A-Z][\w.'-]*(?: [A-Z][\w.'-]*)*),", text))
 
 
 @pytest.fixture(autouse=True)
@@ -220,6 +226,10 @@ def test_prompt_text(rig, row):
         household_field = f'first_name: "{PAT}"'
         assert (household_field in text) == (row.kind == "household"), where
         assert "You are speaking with Pat" not in text, where
+        plain = text.replace("\\'", "'")  # the tool-call capture is a repr
+        assert (assistant_profile.SPEAKER_UNKNOWN_POLICY in plain) == (row.kind is None), where
+        assert _persona_names(plain) == {"Jarvis"}, where
+        assert assistant_profile.TOOL_DEFAULTS_POLICY in plain, where
 
 
 @pytest.mark.parametrize("row", ROWS, ids=IDS)
@@ -242,3 +252,65 @@ def test_streaming_has_no_second_guest_line(rig):
     text = _prompts(row)["streaming"]
     assert text.count(f'guest_name: "{GINA}"') == 1
     assert f"You are speaking with {GINA}" not in text
+
+
+ASSISTANT_ROW = {"id": 61, "category": "general", "key": "assistant_name", "applies_to": "both"}
+
+
+@pytest.mark.parametrize("row_number", [1, 8, 10])
+@pytest.mark.parametrize(
+    "value,expected",
+    [("Hal", "Hal"), ("<b>Hal</b>", None), ("Hal 9000", None), ("", None), ("Ada Lovelace-Byron", "Ada Lovelace-Byron")],
+)
+def test_assistant_name_row_wins_in_every_builder(rig, row_number, value, expected):
+    rig.get_base_knowledge = mock.AsyncMock(return_value=[dict(r) for r in KNOWLEDGE_ROWS] + [{**ASSISTANT_ROW, "value": value}])
+    row = next(r for r in ROWS if r.n == row_number)
+    for builder, text in _prompts(row).items():
+        where = f"row {row_number} {builder} {value!r}"
+        assert _persona_names(text) == {expected or "Jarvis"}, where
+        assert "<b>" not in text.split("CONTEXT INFORMATION")[0], where
+
+
+def test_assistant_name_row_in_a_hidden_tier_is_not_used(rig):
+    rig.get_base_knowledge = mock.AsyncMock(
+        return_value=[{**ASSISTANT_ROW, "value": "Hal", "applies_to": "owner"}]
+    )
+    row = next(r for r in ROWS if r.n == 1)
+    for builder, text in _prompts(row).items():
+        assert _persona_names(text) == {"Jarvis"}, builder
+
+
+LEAK_QUERY = "tell me the name you have on file for me"
+
+
+def _leaky_answers(row: Row) -> dict:
+    """The answer each model-backed node ends with when the model reads the owner out."""
+    leak = f"Sure. The name on file is {OWNER}."
+    answers = {}
+    h._runtime.set_llm_router(h.CapturingLLM(content=leak))
+    state, _ = _state(row, query=LEAK_QUERY)
+    answers["tool_call"] = asyncio.run(h.main.tool_call_node(state))
+    h._runtime.set_llm_router(h.CapturingLLM(content=leak))
+    state, _ = _state(row, query=LEAK_QUERY)
+    state.retrieved_data = {"weather": {"current": {"temp": 70}}}
+    answers["synthesize"] = asyncio.run(h.synthesize_module.synthesize_node(state))
+    return answers
+
+
+@pytest.mark.parametrize("row_number", [1, 2, 11, 12])
+def test_backstop_replaces_a_model_answer_that_reads_out_the_owner(rig, row_number):
+    row = next(r for r in ROWS if r.n == row_number)
+    assert row.kind is None
+    for node, result in _leaky_answers(row).items():
+        assert result.answer == "I can't tell who's speaking, so I don't know your name.", node
+        assert OWNER not in result.answer and result.identity_answer is True, node
+
+
+@pytest.mark.parametrize("row_number", [8, 10])
+def test_backstop_leaves_a_named_caller_alone(rig, row_number):
+    """Positive control: the leak text passes through when someone is addressed,
+    so the replacement above is the backstop's doing and not the fake's."""
+    row = next(r for r in ROWS if r.n == row_number)
+    assert row.kind is not None
+    for node, result in _leaky_answers(row).items():
+        assert OWNER in result.answer and result.identity_answer is False, node

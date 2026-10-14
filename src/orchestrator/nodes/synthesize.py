@@ -26,7 +26,14 @@ from orchestrator.helpers import (
 from orchestrator.utils.constants import DEFAULT_CITY
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
-from shared.base_knowledge_utils import get_knowledge_context_for_user
+from shared.base_knowledge_utils import (
+    assistant_name_from,
+    extract_property_address,
+    extract_owner_name,
+    get_knowledge_context_for_user,
+    load_visible_knowledge,
+)
+from orchestrator import identity_answer
 from orchestrator.mode_permission import is_public_audience
 from sms.content_detector import detect_textable_content, extract_sms_content
 
@@ -186,11 +193,17 @@ Respond honestly about your limitations.
 Response:"""
 
         addressee = await resolve_addressee(state, get_admin_client())
+        visible_knowledge = (
+            []
+            if is_public_audience(state.permissions)
+            else await load_visible_knowledge(get_admin_client(), audience=state.knowledge_audience)
+        )
 
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=state.interface_type != "chat",
             interface_type=state.interface_type,
             long_form=is_long_form_turn(state.intent, state.query),
+            assistant_name=assistant_name_from(visible_knowledge),
             **addressee.prompt_kwargs(),
         ) + "\n"
 
@@ -313,6 +326,14 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
         state.answer = finish_spoken_answer(
             result.get("response", ""), state.interface_type, result, synthesis_max_tokens, stage="synthesize"
         )
+        identity_reply = identity_answer.backstop(
+            state.query, state.answer, addressee.kind,
+            extract_owner_name(visible_knowledge), extract_property_address(visible_knowledge),
+        )
+        if identity_reply:
+            state.answer = identity_reply
+            state.identity_answer = True
+            logger.info("identity_backstop_replaced", node="synthesize")
 
         # Capture token metrics for frontend display
         llm_duration = time.time() - llm_start_time
