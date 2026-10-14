@@ -637,3 +637,74 @@ def test_config_fields_read_the_environment(monkeypatch):
     monkeypatch.setenv("ATHENA_DEFAULT_MODEL", "def:2b")
     config = AthenaConfig(_env_file=None)
     assert (config.gateway_fallback_model, config.athena_default_model) == ("fb:1b", "def:2b")
+
+
+# ---------------------------------------------------------------------------
+# Error accounting and config validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failure", ("status_500", "status_503", "connect_error"))
+def test_a_turn_answered_with_the_phrase_is_counted_as_an_error_not_a_success(rig, seam, failure):
+    seam(failure)
+    _client().post("/v1/chat/completions", json=_chat_body(False))
+    _client().post("/v1/responses", json=_responses_body(False))
+    _client().post("/ha/conversation", json={"text": "hi", "device_id": "kitchen"})
+
+    for endpoint in ("chat_completions", "responses_api", "ha_conversation"):
+        assert (("endpoint", endpoint), ("status", "error")) in rig.counter.incs
+        assert (("endpoint", endpoint), ("status", "success")) not in rig.counter.incs
+
+
+def test_a_real_answer_is_still_counted_as_a_success(rig, monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+
+    monkeypatch.setattr(
+        gw, "orchestrator_client",
+        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://orchestrator.invalid"),
+    )
+    _client().post("/v1/chat/completions", json=_chat_body(False))
+
+    assert (("endpoint", "chat_completions"), ("status", "success")) in rig.counter.incs
+
+
+def test_a_4xx_increments_the_orchestrator_error_counter_but_not_the_breaker(rig, monkeypatch):
+    breaker = CircuitBreaker(failure_threshold=1)
+    monkeypatch.setattr(gw, "orchestrator_circuit_breaker", breaker)
+    monkeypatch.setattr(gw, "gateway_config", {"circuit_breaker_enabled": True})
+    monkeypatch.setattr(gw, "orchestrator_client", httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(422, json={})), base_url="http://orchestrator.invalid"))
+
+    assert _client().post("/v1/chat/completions", json=_chat_body(False)).status_code == 502
+
+    assert (("endpoint", "orchestrator"), ("status", "error")) in rig.counter.incs
+    assert breaker.state is CircuitState.CLOSED
+
+
+@pytest.mark.parametrize("value", ("bad model", "x" * 129, "m;rm -rf", "über:1b", "a\nb"))
+@pytest.mark.parametrize("field,env,default", (
+    ("athena_default_model", "ATHENA_DEFAULT_MODEL", None),
+    ("gateway_fallback_model", "GATEWAY_FALLBACK_MODEL", ""),
+))
+def test_an_invalid_model_tag_warns_once_and_falls_back(monkeypatch, caplog, value, field, env, default):
+    from shared.config import AthenaConfig
+
+    monkeypatch.delenv("ATHENA_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("GATEWAY_FALLBACK_MODEL", raising=False)
+    expected = default if default is not None else AthenaConfig(_env_file=None).athena_default_model
+    monkeypatch.setenv(env, value)
+    with caplog.at_level("WARNING", logger="shared.config"):
+        config = AthenaConfig(_env_file=None)
+
+    assert getattr(config, field) == expected
+    warnings = [r for r in caplog.records if "model_tag_invalid" in r.getMessage()]
+    assert len(warnings) == 1
+    assert value not in warnings[0].getMessage()
+
+
+def test_a_valid_model_tag_is_stripped_and_kept(monkeypatch):
+    from shared.config import AthenaConfig
+
+    monkeypatch.setenv("GATEWAY_FALLBACK_MODEL", "  hf.co/org/model-GGUF:Q4_K_M  ")
+    assert AthenaConfig(_env_file=None).gateway_fallback_model == "hf.co/org/model-GGUF:Q4_K_M"

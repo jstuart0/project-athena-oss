@@ -1337,13 +1337,22 @@ ORCHESTRATOR_ERROR_DETAIL = "Orchestrator error"
 BREAKER_FAILURE_STATUSES = frozenset({502, 503, 504})
 
 
+class SpokenFailureCompletion(ChatCompletionResponse):
+    """A completion that carries the spoken failure, not an answer: callers
+    count the turn as an error, whatever HTTP status they return."""
+
+
+def _turn_status(response: ChatCompletionResponse) -> str:
+    return "error" if isinstance(response, SpokenFailureCompletion) else "success"
+
+
 def _failure_completion(
     request: ChatCompletionRequest, *, return_session_id: bool = False, session_id: Optional[str] = None
 ) -> Union[ChatCompletionResponse, tuple]:
     """The spoken failure as a completion. With return_session_id it is the
     (completion, session_id) tuple /ha/conversation unpacks; the device keeps
     the session it had, so a failed turn doesn't drop its context."""
-    completion = ChatCompletionResponse(
+    completion = SpokenFailureCompletion(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
         created=int(time.time()),
         model=request.model,
@@ -1415,9 +1424,9 @@ async def _answer_orchestrator_failure(
     """
     status = _failure_status(exc)
     _log_orchestrator_failure(exc, status)
+    request_counter.labels(endpoint="orchestrator", status="error").inc()
     if status is not None and status < 500:
         raise HTTPException(status_code=502, detail=ORCHESTRATOR_ERROR_DETAIL)
-    request_counter.labels(endpoint="orchestrator", status="error").inc()
     counts_for_breaker = status is None or status in BREAKER_FAILURE_STATUSES
     if counts_for_breaker and breaker_enabled and orchestrator_circuit_breaker:
         await orchestrator_circuit_breaker.record_failure()
@@ -1557,7 +1566,7 @@ async def route_to_orchestrator(
             e, request, channel=OutputChannel.SPEECH, breaker_enabled=circuit_breaker_enabled,
         )
         if return_session_id:
-            spoke_failure = answer.choices[0].message.content == SPOKEN_FAILURE_TEXT
+            spoke_failure = isinstance(answer, SpokenFailureCompletion)
             return answer, (session_id if spoke_failure and session_id else f"session-{uuid.uuid4().hex[:8]}")
         return answer
 
@@ -2026,7 +2035,7 @@ async def chat_completions(
             trusted_voice=trusted_voice,
         )
 
-        request_counter.labels(endpoint="chat_completions", status="success").inc()
+        request_counter.labels(endpoint="chat_completions", status=_turn_status(response)).inc()
         return response
 
     except HTTPException:
@@ -2204,7 +2213,7 @@ async def responses_api(
 
         responses_response = _responses_from_completion(response)
 
-        request_counter.labels(endpoint="responses_api", status="success").inc()
+        request_counter.labels(endpoint="responses_api", status=_turn_status(response)).inc()
         return responses_response
 
     except HTTPException:
@@ -3054,7 +3063,7 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
         if should_continue:
             logger.info("ha_conversation_continue_enabled")
 
-        request_counter.labels(endpoint="ha_conversation", status="success").inc()
+        request_counter.labels(endpoint="ha_conversation", status=_turn_status(chat_response)).inc()
         logger.info("ha_conversation_completed", has_session=bool(orchestrator_session_id))
 
         return ha_response
