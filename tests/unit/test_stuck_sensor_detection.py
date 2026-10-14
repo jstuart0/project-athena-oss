@@ -676,10 +676,11 @@ class TestUnplacedSensorsAreNeverSpoken:
         monkeypatch.setattr(shc, "get_admin_client", lambda: _AdminClient())
         controller = _controller()
         controller.llm_router = _Router()
-        _run(controller._llm_occupancy_reasoning(result.healthy, "", "who is home"))
+        answer = _run(controller._llm_occupancy_reasoning(result.healthy, "", "who is home"))
         status = _run(controller._format_motion_status(result.healthy))
-        assert prompts and [r["room"] for r in result.healthy] == ["Den"]
-        for text in (prompts[0], status):
+        # The answer is a template now; the model is asked only a head-count.
+        assert prompts == [] and [r["room"] for r in result.healthy] == ["Den"]
+        for text in (answer, status):
             assert "Ignore all previous" not in text and "alarm code" not in text
 
     def test_the_spoken_stuck_report_never_says_a_friendly_name(self):

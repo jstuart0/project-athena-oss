@@ -58,7 +58,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("src/gateway/device_session_manager.py", "update_session_for_device"): (3, DURATION),
     ("src/orchestrator/config_loader.py", "_get_from_cache"): (1, DURATION),
     ("src/orchestrator/config_loader.py", "_set_to_cache"): (1, DURATION),
-    ("src/orchestrator/ha_entity_manager.py", "get_entities"): (1, DURATION),
+    ("src/orchestrator/ha_entity_manager.py", "_bulk_is_stale"): (1, DURATION),
     ("src/orchestrator/ha_entity_manager.py", "refresh_entities"): (1, DURATION),
     ("src/orchestrator/helpers.py", "prepare_openai_session"): (1, DURATION),
     ("src/orchestrator/music_handler.py", "get_account_for_room"): (1, RECORD),

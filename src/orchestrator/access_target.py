@@ -184,6 +184,35 @@ def is_access_cover(entity_id: str, attributes: Optional[Mapping]) -> bool:
     )
 
 
+# A lock that is not a door: a child lock on an appliance, a keypad, a safe.
+NON_DOOR_LOCK_DEVICE_CLASSES: FrozenSet[str] = frozenset({"child_lock", "keypad", "panel", "safe"})
+NON_DOOR_LOCK_WORDS: FrozenSet[str] = frozenset({
+    "child", "kid", "kids", "keypad", "panel", "safe", "minisplit", "display", "buttons",
+})
+
+
+def is_access_lock(entity_id: str, attributes: Optional[Mapping]) -> bool:
+    """Whether a lock is a door. A device class or a name saying child lock,
+    keypad, panel, safe or a mini-split's lock makes it something else; an
+    unnamed or unclassified lock is a door. A summary of "all the locks" and a
+    write to an unnamed or "all" target use only these (fail closed); a read
+    of a lock the user names does not need this test (fail open)."""
+    attrs = attributes if isinstance(attributes, Mapping) else {}
+    device_class = attrs.get("device_class")
+    if isinstance(device_class, str) and device_class.strip().lower() in NON_DOOR_LOCK_DEVICE_CLASSES:
+        return False
+    name = attrs.get("friendly_name")
+    if not isinstance(name, str) or not name.strip():
+        name = entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    spoken = tokens(name)
+    if "mini" in spoken and "split" in spoken:
+        return False
+    for i, word in enumerate(spoken):
+        if word in NON_DOOR_LOCK_WORDS and not (word == "safe" and spoken[i + 1:i + 2] == ("room",)):
+            return False
+    return True
+
+
 def entity_domain(entity_id: Any) -> Optional[str]:
     if not isinstance(entity_id, str) or "." not in entity_id:
         return None
