@@ -227,6 +227,7 @@ _DECIDED_DOMAINS = {
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
 SKIPPED_STEP_NOTE = "I couldn't check that one."
+NO_WRITE_CUE_TEXT = "I'm not sure what you'd like me to change. Say what to turn on or off, for example 'turn on the lights'."
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -2424,6 +2425,14 @@ Return ONLY valid JSON."""
                 return ("I can control smart home devices like lights, thermostats, locks, and media players. "
                        "For detailed IoT device status, network diagnostics, or protocol-specific queries, "
                        "please check your Home Assistant dashboard or network management tools.")
+
+            # A command changes a device only when the words ask for it: a
+            # room the words mention, the speaker's room or a model's guess
+            # never makes a write on its own.
+            if access_target.lacks_write_cue(device_type, action, original_query):
+                import logging
+                logging.getLogger(__name__).info("write_without_cue_refused")
+                return NO_WRITE_CUE_TEXT
 
             # Where the command acts is decided once, here, and recorded on
             # the intent (decided_room and friends): replays and follow-ups

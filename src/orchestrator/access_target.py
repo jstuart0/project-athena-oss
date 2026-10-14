@@ -274,6 +274,41 @@ def _says_a_temperature(toks: Sequence[str]) -> bool:
     )
 
 
+# A command that changes a device must carry a cue in the user's words (the
+# server never infers a write from a room, a speaker position or a model's
+# guess alone): a device word for its kind, an on/off word, or a colour or
+# brightness action. Doors keep their own rules (opening verb plus a name).
+WRITE_CUE_ACTIONS: FrozenSet[str] = frozenset({"set_color", "set_brightness", "set_level", "increase", "decrease"})
+_WRITE_CUE_WORDS = frozenset({
+    "on", "off", "lit", "kill", "dim", "dimmer", "brighten", "brighter", "dark", "darker", "darken",
+})
+_MEDIA_CUE_WORDS = frozenset({"pause", "resume", "stop", "skip", "next", "previous", "louder", "quieter", "unmute"})
+_CUE_CHECKED_KINDS = frozenset({"light", "fan", "switch", "media", "climate"})
+
+
+def lacks_write_cue(device_type: Any, action: Any, query: Optional[str]) -> bool:
+    """Whether a device-changing command has no cue in the user's words. Only
+    the kinds in ``_CUE_CHECKED_KINDS`` are judged; a read never lacks one, and
+    a command with no words (an internal caller, planned elsewhere) is not
+    judged."""
+    kind = device_kind(device_type)
+    if kind not in _CUE_CHECKED_KINDS or query is None:
+        return False
+    if isinstance(action, str) and action.strip().lower() in (READ_ONLY_ACTIONS | WRITE_CUE_ACTIONS):
+        return False
+    toks = tokens(query)
+    spoken = frozenset(toks)
+    if spoken & _WRITE_CUE_WORDS or spoken & DEVICE_WORDS[kind]:
+        return False
+    if kind == "light" and room_context.is_explicit_whole_house(query):
+        return False  # "get everything dark": the whole-house wording is the scope of a light command
+    if kind == "media" and spoken & _MEDIA_CUE_WORDS:
+        return False
+    if kind == "climate" and _says_a_temperature(toks):
+        return False
+    return True
+
+
 def names_device(text: Optional[str]) -> bool:
     """Whether the words name a device of any kind in the table."""
     spoken = frozenset(tokens(text or ""))

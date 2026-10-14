@@ -485,7 +485,7 @@ def test_whole_house_gate_counts_leaves_not_direct_members(monkeypatch):
 def test_the_room_path_over_the_threshold_confirms_on_the_leaf_count(monkeypatch):
     rig = Rig(monkeypatch, registry=False, states=_nested_states(), exclude="[]",
               threshold=5, groups='{"nested": "light.n_top"}')
-    answer = rig.run(light("nested"), "please")
+    answer = rig.run(light("nested"), "on please")
     assert rig.written == [], "7 leaves is over a threshold of 5; 3 direct members would not be"
     assert "say:" in answer or "?" in answer
 
@@ -639,7 +639,7 @@ def test_a_multi_room_command_that_names_its_rooms_is_an_explicit_scope(monkeypa
 def test_a_multi_room_command_that_does_not_name_two_rooms_is_gated(monkeypatch):
     states = {s["entity_id"]: s for s in [_state(f"light.den_{i}") for i in range(4)] + [_state(f"light.living_room_{i}") for i in range(4)]}
     rig = Rig(monkeypatch, registry=False, states=states, threshold=3, exclude="[]")
-    rig.run(light("multi_room", rooms=["den", "living_room"]), "please")
+    rig.run(light("multi_room", rooms=["den", "living_room"]), "on please")
     assert rig.written == []
 
 

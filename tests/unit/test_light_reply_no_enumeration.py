@@ -174,14 +174,14 @@ def living_room_rig(monkeypatch, threshold):
 
 def test_the_gate_prompt_speaks_the_spoken_label_not_the_key(monkeypatch):
     rig = living_room_rig(monkeypatch, threshold=2)
-    answer = rig.run(light("living_room_2"), "please")
+    answer = rig.run(light("living_room_2"), "on please")
     assert rig.written == []
     assert "living room 2" in answer and "living_room_2" not in answer and not ENTITY_ID.search(answer), answer
 
 
 def test_the_rewording_speaks_the_spoken_label_not_the_key(monkeypatch):
     rig = living_room_rig(monkeypatch, threshold=2)
-    answer = rig.run(light("living_room_2"), "please")
+    answer = rig.run(light("living_room_2"), "on please")
     block_text = answer
     assert "say:" in block_text.lower() or "?" in block_text
     assert "living_room_2" not in block_text
