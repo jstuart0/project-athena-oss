@@ -362,6 +362,14 @@ class RoomDirectory:
         entry = self._entries.get(key)
         return entry.ref() if entry else None
 
+    def name_keys(self, key: str) -> Tuple[str, ...]:
+        """The ``room_key`` form of every name a room answers to (its own
+        and each alias), for matching a room to an id slug."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return ()
+        return tuple(dict.fromkeys(["_".join(phrase) for phrase in entry.phrases] + [entry.key]))
+
     def members_of(self, key: str) -> Tuple[str, ...]:
         entry = self._entries.get(key)
         return entry.members if entry else ()
@@ -721,6 +729,18 @@ def _room_like(words: Sequence[str]) -> bool:
     return bool(words) and not any(
         w in _NON_ROOM_TOKENS or w in _NOT_A_ROOM_WORD or w in _DEVICE_NOUNS or w.isdigit() for w in words
     )
+
+
+# A room given as a place relative to the speaker names no room of its own;
+# the speaker's room answers it (decide_room).
+_SPEAKER_RELATIVE_PHRASES = frozenset({
+    ("my", "room"), ("this", "room"), ("the", "room"), ("here",), ("in", "here"), ("my", "current", "room"),
+})
+
+
+def is_speaker_relative(phrase: Optional[str]) -> bool:
+    """Whether a model-supplied room is "my room" or "here" rather than a name."""
+    return tokens(phrase or "") in _SPEAKER_RELATIVE_PHRASES
 
 
 def unknown_room_phrase(query: Optional[str], directory: Optional[RoomDirectory]) -> str:

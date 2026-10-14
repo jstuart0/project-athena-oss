@@ -9,6 +9,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 from . import access_target, room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
@@ -21,6 +22,7 @@ from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
 from shared.ha_registry import room_key, tokens as _words
+from shared.ha_registry import tokens as _name_tokens
 
 
 _jarvis_key_warned = False
@@ -192,11 +194,35 @@ WHOLE_HOUSE_ACTIONS = frozenset({"turn_on", "turn_off", "set_color"})
 SEVERAL_ROOMS_UNSUPPORTED = "I can't do that for several rooms at once yet. Name one room."
 
 
+# Motion control is discovered, not configured: a room has it when Home
+# Assistant holds ``input_boolean.<room>_motion_disable`` (see
+# SmartHomeController._motion_control_rooms). Not an HA domain: the pseudo
+# domain _decide_intent_room uses for the device type.
+MOTION_CONTROL_DOMAIN = "motion_control"
+MOTION_DISABLE_SUFFIX = "_motion_disable"
+_INPUT_BOOLEAN = "input_boolean."
+
+# The helpers each action writes or reads, beside the always-present
+# ``<room>_motion_disable``: (domain, name after the room) pairs.
+_MOTION_ACTION_HELPERS = {
+    "leave_lights_on": (("input_number", "leave_lights_on_minutes"), ("input_boolean", "leave_lights_on")),
+    "leave_lights_off": (("input_number", "leave_lights_off_minutes"), ("input_boolean", "leave_lights_off")),
+    "disable_motion": (),
+    "enable_motion": (
+        ("input_boolean", "leave_lights_on"), ("input_boolean", "leave_lights_off"),
+        ("input_boolean", "brightness_override"),
+    ),
+    "set_brightness_override": (("input_number", "override_brightness"), ("input_boolean", "brightness_override")),
+    "keep_current_brightness": (("input_number", "override_brightness"), ("input_boolean", "brightness_override")),
+}
+MOTION_NOT_SET_UP = "Motion control isn't set up for that room."
+
 # The device types whose room is decided by room_context.decide_room, and the
 # HA domain each writes.
 _DECIDED_DOMAINS = {
     "light": "light", "fan": "fan", "switch": "switch",
     "media": "media_player", "media_player": "media_player", "tv": "media_player", "speaker": "media_player",
+    "motion_control": MOTION_CONTROL_DOMAIN,
 }
 _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
@@ -523,6 +549,8 @@ RECONCILE_LAST_CHANGED_MAX = 64
 RECONCILE_MAX_STUCK = 500
 RECONCILE_MAX_HEALTHY = 5000
 RECONCILE_UNKNOWN_ROOM = "Unknown room"
+# How a stuck sensor with no area and no known room is spoken.
+NO_ROOM_PHRASE = "A sensor with no room"
 
 
 class MotionClassification(NamedTuple):
@@ -542,6 +570,99 @@ class MotionScan(NamedTuple):
     stuck: List[Dict]
     reconcile: Optional[Dict]
     entities_seen: int
+
+
+_OUTDOOR_PHRASES = tuple(tuple(p.split('_')) for p in OUTDOOR_SENSOR_PATTERNS)
+_SENSOR_KIND_WORDS = ('motion', 'presence', 'occupancy', 'pir')
+class SensorSite(NamedTuple):
+    """Where an indoor occupancy sensor is. `room` is its Home Assistant area,
+    else the one room of the deployment's vocabulary its name says, else None.
+    A friendly name is never a room: it is free text that Home Assistant lets
+    anyone rename, and a room is spoken and handed to a model. A sensor with
+    no room is still watched for being stuck, but no answer can say where it
+    is. `outdoor` marks a sensor that says nothing about who is home: never
+    stuck-flagged and never in an answer, but a reading from it still counts
+    as seen healthy, so an alert opened before it was recognised as outdoor
+    (an area change, say) can be cleared."""
+    room: Optional[str]
+    outdoor: bool = False
+
+    @property
+    def placed(self) -> bool:
+        return self.room is not None
+
+
+def _hours_since(last_changed: str, now) -> Optional[float]:
+    """Hours between an ISO timestamp and `now`, or None when it is missing
+    or unparseable."""
+    if not last_changed:
+        return None
+    try:
+        changed = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+        return (now - changed).total_seconds() / 3600
+    except Exception:
+        return None
+
+
+def _has_phrase(toks: Tuple[str, ...], phrase: Tuple[str, ...]) -> bool:
+    n = len(phrase)
+    return any(toks[i:i + n] == phrase for i in range(len(toks) - n + 1))
+
+
+def is_outdoor_sensor(entity_id: str, friendly_name: str) -> bool:
+    """True when the id or the friendly name carries an OUTDOOR_SENSOR_PATTERNS
+    phrase as whole words: "deck" matches "Deck Motion", not "decker_motion"."""
+    for text in (entity_id, friendly_name):
+        toks = _name_tokens(text)
+        if any(_has_phrase(toks, phrase) for phrase in _OUTDOOR_PHRASES):
+            return True
+    return False
+
+
+def sensor_room(entity_id: str, friendly_name: str, snapshot, directory) -> Optional[str]:
+    """The room a sensor is in, or None. Home Assistant's area registry wins
+    (the entity's own area, else its device's). Without one, the room is the
+    single room of the deployment's vocabulary that the entity id and the
+    friendly name name; two different rooms, or a phrase that fits several
+    rooms, is no answer."""
+    if snapshot is not None:
+        area = snapshot.area_for(entity_id)
+        if area is not None and area.name:
+            return area.name
+    object_id = entity_id.split('.', 1)[-1].replace('_', ' ')
+    found = {}
+    for text in (object_id, friendly_name):
+        for mention in room_context.find_room_mentions(text, directory):
+            if len(mention.candidates) != 1:
+                return None
+            ref = mention.candidates[0]
+            found[ref.key] = ref.label
+    if len(found) != 1:
+        return None
+    return ' '.join(word.capitalize() for word in next(iter(found.values())).split())
+
+
+def motion_sensor_site(entity_id: str, state: Dict, room_of) -> Optional[SensorSite]:
+    """The one answer to "is this an indoor occupancy sensor, and where?",
+    for both the stuck-sensor scan and the occupancy answers. None for
+    anything else (not a binary_sensor of a motion kind, a tamper switch).
+    An outdoor sensor (by its id, its name or its room) comes back with
+    `outdoor` set. `room_of(entity_id, friendly_name)` is `sensor_room`
+    bound to what the caller read, so this stays pure."""
+    if not entity_id.startswith('binary_sensor.'):
+        return None
+    entity_lower = entity_id.lower()
+    if not any(kind in entity_lower for kind in _SENSOR_KIND_WORDS):
+        return None
+    friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
+    if 'tamper' in entity_lower:
+        return None
+    if is_outdoor_sensor(entity_id, friendly_name):
+        return SensorSite(None, outdoor=True)
+    room = room_of(entity_id, friendly_name) or None
+    if room is not None and is_outdoor_sensor(room, ''):
+        return SensorSite(None, outdoor=True)
+    return SensorSite(room)
 
 
 class SmartHomeController:
@@ -951,7 +1072,7 @@ class SmartHomeController:
             }
 
         # MOTION CONTROL: Detect motion/lighting automation override requests
-        # These control Node-RED motion flow variables for bedrooms/office
+        # These set a room's motion-flow helpers in Home Assistant
         motion_control_patterns = [
             # Leave lights on patterns
             'leave the lights on', 'keep the lights on', 'lights stay on',
@@ -2606,6 +2727,12 @@ Return ONLY valid JSON."""
             lt = await self._finalize_light_targets(matches, per_light=True)
             return bool(lt.write_ids)
         scope = current_ha_scope()
+        if domain == MOTION_CONTROL_DOMAIN:
+            slug = (await self._motion_control_rooms()).get(key)
+            if slug is None:
+                return None
+            disable = f"{_INPUT_BOOLEAN}{slug}{MOTION_DISABLE_SUFFIX}"
+            return True if scope is None else check_entity_permission(disable, scope.permissions)
         spoken = key.replace('_', ' ')
         entities = await self.entity_manager.get_entities()
         ids = [
@@ -3111,6 +3238,8 @@ Return ONLY valid JSON."""
         lights = domain == 'light'
         directory = self._directory()
         given = intent.get('room')
+        if room_context.is_speaker_relative(given):
+            given = None
         if given == 'multi_room' and intent.get('rooms'):
             keys = list(dict.fromkeys(room_key(r) for r in intent['rooms'] if r))
             decision = room_context.Rooms(tuple(keys), tuple(self._spoken_room(k) for k in keys))
@@ -3919,7 +4048,7 @@ Return ONLY valid JSON."""
                 return "I couldn't access the motion sensors to estimate occupancy."
 
             if not healthy_sensors and stuck_sensors:
-                stuck_rooms = [s['room'] for s in stuck_sensors]
+                stuck_rooms = [s['room'] or NO_ROOM_PHRASE for s in stuck_sensors]
                 return f"All motion sensors appear to be stuck and have been excluded. Affected sensors: {', '.join(stuck_rooms)}. I can't estimate occupancy until the sensors are fixed."
 
             # Log if we excluded any stuck sensors
@@ -3997,54 +4126,6 @@ Return ONLY valid JSON."""
             logger.error(f"Window sensor query error: {e}")
             return "I had trouble checking the window sensors. Please try again."
 
-    async def _get_all_motion_sensors(self) -> List[Dict]:
-        """Fetch all motion/presence sensors from Home Assistant with their states and timestamps."""
-        import logging
-        from datetime import datetime
-        logger = logging.getLogger(__name__)
-
-        try:
-            # Get all entity states from HA via entity manager
-            all_entities = await self.entity_manager.get_entities()
-
-            motion_sensors = []
-            for entity_id, state in all_entities.items():
-
-                # Filter for motion/presence/occupancy sensors
-                # Exclude tamper sensors, Ring cameras (outdoor), and other non-indoor sensors
-                entity_lower = entity_id.lower()
-                if 'tamper' in entity_lower:
-                    continue  # Skip tamper sensors
-                if 'ring' in entity_lower:
-                    continue  # Skip Ring camera/doorbell motion (outdoor)
-
-                if any(x in entity_lower for x in ['motion', 'presence', 'occupancy', 'pir']):
-                    if entity_id.startswith('binary_sensor.'):
-                        # Extract room name from entity_id or friendly_name
-                        friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
-                        room = self._extract_room_from_entity(entity_id, friendly_name)
-
-                        # Skip sensors without a recognized room (e.g., generic "Presence Sensor 1")
-                        if room is None:
-                            logger.debug(f"Skipping sensor with unknown room: {entity_id} [{friendly_name}]")
-                            continue
-
-                        motion_sensors.append({
-                            'entity_id': entity_id,
-                            'room': room,
-                            'state': state.get('state'),  # 'on' or 'off'
-                            'last_changed': state.get('last_changed'),
-                            'friendly_name': friendly_name
-                        })
-                        logger.debug(f"Motion sensor: {entity_id} -> state: {state.get('state')}")
-
-            logger.info(f"Found {len(motion_sensors)} motion sensors")
-            return motion_sensors
-
-        except Exception as e:
-            logger.error(f"Error fetching motion sensors: {e}")
-            return []
-
     async def _get_all_motion_sensors_with_stuck_detection(
         self, force_refresh: bool = False
     ) -> Tuple[List[Dict], List[Dict]]:
@@ -4073,16 +4154,26 @@ Return ONLY valid JSON."""
         from datetime import datetime, timezone
         all_entities = await self.entity_manager.get_entities(force_refresh=force_refresh)
         observed_at = datetime.now(timezone.utc) if force_refresh else self.entity_manager.entities_fetched_at()
-        result = self.classify_motion_sensors(all_entities, datetime.now(timezone.utc))
+        result = self.classify_motion_sensors(
+            all_entities, datetime.now(timezone.utc), self._sensor_room_resolver())
         reconcile = None
         if all_entities and result.classified:
             reconcile = await self._reconcile_stuck_alerts(result.stuck, result.seen_healthy, observed_at)
         return MotionScan(result.healthy, result.stuck, reconcile, len(all_entities))
 
-    def classify_motion_sensors(self, all_entities: Dict, now) -> MotionClassification:
+    def _sensor_room_resolver(self):
+        """`sensor_room` over the area registry and room directory as they
+        are now, read once for a whole scan."""
+        snapshot = self._registry_snapshot()
+        directory = self._directory()
+        return lambda entity_id, friendly_name: sensor_room(entity_id, friendly_name, snapshot, directory)
+
+    def classify_motion_sensors(self, all_entities: Dict, now, room_of=None) -> MotionClassification:
         """
         Split the motion/presence sensors in `all_entities` into healthy and
         stuck, and list the ones positively seen healthy. Pure: no I/O.
+        `room_of(entity_id, friendly_name)` names a sensor's room (see
+        `sensor_room`); without it only the generic room words apply.
 
         SENSOR HIERARCHY (most reliable to least):
         1. presence/occupancy sensors (mmWave radar) - most accurate for actual human presence
@@ -4112,100 +4203,99 @@ Return ONLY valid JSON."""
         seen_healthy = []
         classified = 0
 
+        if room_of is None:
+            room_of = lambda entity_id, friendly_name: sensor_room(entity_id, friendly_name, None, None)
+
+        room_labels = {}  # room key -> the label shown for it
+
         for entity_id, state in all_entities.items():
+            site = motion_sensor_site(entity_id, state, room_of)
+            if site is None:
+                continue
+            if site.outdoor:
+                classified += 1
+                if state.get('state') in ('on', 'off') and _hours_since(state.get('last_changed', ''), now) is not None:
+                    seen_healthy.append(entity_id)
+                continue
             entity_lower = entity_id.lower()
             friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
-            friendly_lower = friendly_name.lower()
+            room = room_labels.setdefault(room_key(site.room), site.room) if site.placed else None
+            classified += 1
+            sensor_state = state.get('state')
+            last_changed = state.get('last_changed', '')
 
-            # Skip tamper and Ring sensors
-            if 'tamper' in entity_lower or 'ring' in entity_lower:
-                continue
+            # Determine sensor type for prioritization
+            # SENSOR HIERARCHY (most to least reliable):
+            # 1. mmWave radar presence sensors - most accurate
+            # 2. Generic occupancy sensors - may be PIR-based, less reliable
+            # 3. PIR motion sensors - can give false positives from HVAC
+            #
+            # IMPORTANT: Check PIR first because some entities have both
+            # e.g., "motion_presence_nursery_pir_detection" contains both
+            # "_presence" (from device name) AND "_pir" (sensor type)
+            #
+            # mmWave indicators: "mm_", "_mm_", "fp2", "_presence_sensor"
+            # PIR indicators: "_pir", "pir_detection"
+            # Generic occupancy: ends with "_occupancy" but no mmWave indicator
 
-            # Skip outdoor/exterior sensors (check both entity_id and friendly_name)
-            # These sensors detect external activity, not home presence
-            if any(x in entity_lower or x in friendly_lower for x in OUTDOOR_SENSOR_PATTERNS):
-                continue
+            is_mmwave = any(x in entity_lower for x in ['mm_', '_mm_', 'fp2', '_presence_sensor'])
+            is_pir = '_pir' in entity_lower or 'pir_detection' in entity_lower
 
-            if any(x in entity_lower for x in ['motion', 'presence', 'occupancy', 'pir']):
-                if entity_id.startswith('binary_sensor.'):
-                    room = self._extract_room_from_entity(entity_id, friendly_name)
+            if is_pir:
+                sensor_type = 'pir'  # Low priority - can have false positives
+            elif is_mmwave or entity_lower.endswith('_presence'):
+                sensor_type = 'presence'  # High priority - mmWave/radar
+            elif entity_lower.endswith('_occupancy'):
+                # Generic occupancy without mmWave indicator - treat as medium priority
+                # Could be PIR-based, so not as reliable as true mmWave
+                sensor_type = 'occupancy'  # Medium priority - might be PIR-based
+            elif '_presence' in entity_lower or '_occupancy' in entity_lower:
+                # Has presence/occupancy in name - check for mmWave markers
+                sensor_type = 'presence' if is_mmwave else 'occupancy'
+            else:
+                sensor_type = 'motion'  # Generic motion sensor
 
-                    if room is None:
-                        continue
+            # Calculate time since last change
+            is_stuck = False
+            timestamp_parsed = False
+            hours_unchanged = 0
 
-                    classified += 1
-                    sensor_state = state.get('state')
-                    last_changed = state.get('last_changed', '')
+            if last_changed:
+                try:
+                    changed_time = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                    delta = now - changed_time
+                    hours_unchanged = delta.total_seconds() / 3600
+                    timestamp_parsed = True
 
-                    # Determine sensor type for prioritization
-                    # SENSOR HIERARCHY (most to least reliable):
-                    # 1. mmWave radar presence sensors - most accurate
-                    # 2. Generic occupancy sensors - may be PIR-based, less reliable
-                    # 3. PIR motion sensors - can give false positives from HVAC
-                    #
-                    # IMPORTANT: Check PIR first because some entities have both
-                    # e.g., "motion_presence_alpha_pir_detection" contains both
-                    # "_presence" (from device name) AND "_pir" (sensor type)
-                    #
-                    # mmWave indicators: "mm_", "_mm_", "fp2", "_presence_sensor"
-                    # PIR indicators: "_pir", "pir_detection"
-                    # Generic occupancy: ends with "_occupancy" but no mmWave indicator
+                    # Only flag as stuck if sensor is ON for too long
+                    # Being OFF for a long time is normal (vacation, travel, etc.)
+                    if sensor_state == 'on' and hours_unchanged > STUCK_ON_HOURS_BY_TYPE[sensor_type]:
+                        is_stuck = True
+                except Exception as e:
+                    logger.debug(f"Error parsing a sensor timestamp: {type(e).__name__}")
 
-                    is_mmwave = any(x in entity_lower for x in ['mm_', '_mm_', 'fp2', '_presence_sensor'])
-                    is_pir = '_pir' in entity_lower or 'pir_detection' in entity_lower
+            sensor_data = {
+                'entity_id': entity_id,
+                'room': room,
+                'state': sensor_state,
+                'last_changed': last_changed,
+                'friendly_name': friendly_name,
+                'hours_unchanged': hours_unchanged,
+                'sensor_type': sensor_type
+            }
 
-                    if is_pir:
-                        sensor_type = 'pir'  # Low priority - can have false positives
-                    elif is_mmwave or entity_lower.endswith('_presence'):
-                        sensor_type = 'presence'  # High priority - mmWave/radar
-                    elif entity_lower.endswith('_occupancy'):
-                        # Generic occupancy without mmWave indicator - treat as medium priority
-                        # Could be PIR-based, so not as reliable as true mmWave
-                        sensor_type = 'occupancy'  # Medium priority - might be PIR-based
-                    elif '_presence' in entity_lower or '_occupancy' in entity_lower:
-                        # Has presence/occupancy in name - check for mmWave markers
-                        sensor_type = 'presence' if is_mmwave else 'occupancy'
-                    else:
-                        sensor_type = 'motion'  # Generic motion sensor
-
-                    # Calculate time since last change
-                    is_stuck = False
-                    timestamp_parsed = False
-                    hours_unchanged = 0
-
-                    if last_changed:
-                        try:
-                            changed_time = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
-                            delta = now - changed_time
-                            hours_unchanged = delta.total_seconds() / 3600
-                            timestamp_parsed = True
-
-                            # Only flag as stuck if sensor is ON for too long
-                            # Being OFF for a long time is normal (vacation, travel, etc.)
-                            if sensor_state == 'on' and hours_unchanged > STUCK_ON_HOURS_BY_TYPE[sensor_type]:
-                                is_stuck = True
-                        except Exception as e:
-                            logger.debug(f"Error parsing a sensor timestamp: {type(e).__name__}")
-
-                    sensor_data = {
-                        'entity_id': entity_id,
-                        'room': room,
-                        'state': sensor_state,
-                        'last_changed': last_changed,
-                        'friendly_name': friendly_name,
-                        'hours_unchanged': hours_unchanged,
-                        'sensor_type': sensor_type
-                    }
-
-                    if is_stuck:
-                        stuck_sensors.append(sensor_data)
-                    else:
-                        if sensor_state in ('on', 'off') and timestamp_parsed:
-                            seen_healthy.append(entity_id)
-                        # Group healthy sensors by room and type
-                        if room not in sensors_by_room:
-                            sensors_by_room[room] = {'presence': [], 'occupancy': [], 'pir': [], 'motion': []}
-                        sensors_by_room[room][sensor_type].append(sensor_data)
+            if is_stuck:
+                stuck_sensors.append(sensor_data)
+            else:
+                if sensor_state in ('on', 'off') and timestamp_parsed:
+                    seen_healthy.append(entity_id)
+                # A sensor whose name says no place can't speak for a room
+                if not site.placed:
+                    continue
+                # Group healthy sensors by room and type
+                if room_key(room) not in sensors_by_room:
+                    sensors_by_room[room_key(room)] = {'presence': [], 'occupancy': [], 'pir': [], 'motion': []}
+                sensors_by_room[room_key(room)][sensor_type].append(sensor_data)
 
         # Build final healthy_sensors list with prioritization
         # Sensor priority: presence (mmWave) > occupancy > PIR > motion
@@ -4213,7 +4303,7 @@ Return ONLY valid JSON."""
         pir_false_positives = []
         occupancy_deprioritized = []
 
-        for room, sensor_types in sensors_by_room.items():
+        for sensor_types in sensors_by_room.values():
             presence_sensors = sensor_types['presence']
             occupancy_sensors = sensor_types.get('occupancy', [])
             pir_sensors = sensor_types['pir']
@@ -4360,7 +4450,7 @@ Return ONLY valid JSON."""
             "stuck": [
                 {
                     "entity_id": s['entity_id'],
-                    "room": s['room'],
+                    "room": s['room'] or RECONCILE_UNKNOWN_ROOM,
                     "friendly_name": s['friendly_name'],
                     "sensor_type": s['sensor_type'],
                     "hours_on": round(s['hours_unchanged'], 1),
@@ -4401,7 +4491,7 @@ Return ONLY valid JSON."""
                     time_str = f"{days:.1f} days"
 
                 stuck_details.append(
-                    f"- {sensor['room']}: {sensor['friendly_name']} has been '{sensor['state']}' for {time_str}"
+                    f"- {sensor['room'] or NO_ROOM_PHRASE}: {sensor['sensor_type']} sensor has been '{sensor['state']}' for {time_str}"
                 )
 
             response = f"Found {len(stuck_sensors)} stuck sensor(s) out of {total_sensors} total:\n"
@@ -4413,70 +4503,6 @@ Return ONLY valid JSON."""
         except Exception as e:
             logger.error(f"Error checking stuck sensors: {e}")
             return "I had trouble checking the sensor status. Please try again."
-
-    def _extract_room_from_entity(self, entity_id: str, friendly_name: str = None) -> str:
-        """Extract room name from motion sensor entity ID or friendly name."""
-        # IMPORTANT: Order matters! More specific patterns must come first
-        # Patterns are checked in order, first match wins
-        room_patterns = [
-            # Specific bathroom patterns (before 'master' or 'bath')
-            ('master_bath', 'Master Bathroom'),
-            ('master bath', 'Master Bathroom'),
-            ('masterbath', 'Master Bathroom'),
-            ('main_bath', 'Main Bathroom'),
-            ('main bath', 'Main Bathroom'),
-            ('mainbath', 'Main Bathroom'),
-            ('powder', 'Powder Room'),
-            ('basement_bath', 'Basement Bathroom'),
-            ('basement bath', 'Basement Bathroom'),
-            # Master bedroom (after master bath patterns)
-            ('master_bed', 'Master Bedroom'),
-            ('master bed', 'Master Bedroom'),
-            ('masterbed', 'Master Bedroom'),
-            ('master_closet', 'Master Closet'),
-            ('master closet', 'Master Closet'),
-            ('underbed', 'Master Bedroom'),
-            # Other bedrooms
-            ('alpha', 'Alpha'),
-            ('beta', 'Beta'),
-            # Living areas
-            ('living', 'Living Room'),
-            ('dining', 'Dining Room'),
-            ('kitchen', 'Kitchen'),
-            ('office', 'Office'),
-            # Hallways (be specific)
-            ('basement_hall', 'Basement Hallway'),
-            ('basement hall', 'Basement Hallway'),
-            ('hallway_front', 'Front Hallway'),
-            ('front_hall', 'Front Hallway'),
-            ('hall', 'Hallway'),
-            # Basement
-            ('basement_stair', 'Basement Stairs'),
-            ('basement stair', 'Basement Stairs'),
-            ('basement', 'Basement'),
-            # Generic patterns (after specific ones)
-            ('master', 'Master Bedroom'),  # Fallback if no bath/bed specified
-            ('shower', 'Master Bathroom'),
-            ('front_door', 'Front Door'),
-            ('front door', 'Front Door'),
-            ('back_door', 'Back Door'),
-            ('entrance', 'Entrance'),
-        ]
-
-        # Combine entity_id and friendly_name for matching
-        entity_lower = entity_id.lower().replace('binary_sensor.', '')
-        search_text = entity_lower
-        if friendly_name:
-            search_text = f"{entity_lower} {friendly_name.lower()}"
-
-        # Check patterns in order (first match wins)
-        for pattern, room_name in room_patterns:
-            if pattern in search_text:
-                return room_name
-
-        # No known room pattern matched - return None to skip this sensor
-        # This filters out generic sensors like "Presence Sensor 1" with hex codes
-        return None
 
     async def _format_motion_status(self, motion_data: List[Dict], is_last_motion_query: bool = False) -> str:
         """
@@ -4501,8 +4527,8 @@ Return ONLY valid JSON."""
 
         # For rooms with presence sensors, exclude other sensor types
         # This avoids reporting PIR/occupancy false positives as actual presence
-        rooms_with_presence = set(s['room'] for s in presence_sensors)
-        filtered_other = [s for s in other_sensors if s['room'] not in rooms_with_presence]
+        rooms_with_presence = set(room_key(s['room']) for s in presence_sensors)
+        filtered_other = [s for s in other_sensors if room_key(s['room']) not in rooms_with_presence]
 
         # Combine: presence sensors + other sensors for rooms without presence
         sensors_to_use = presence_sensors + filtered_other
@@ -4536,7 +4562,8 @@ Return ONLY valid JSON."""
                     minutes_ago = int(seconds_ago / 60)
 
                     if state == 'on':
-                        active_rooms.append(room)
+                        if room_key(room) not in {room_key(r) for r in active_rooms}:
+                            active_rooms.append(room)
                         last_motion_info.append({
                             'room': room,
                             'time': changed_time,
@@ -6401,11 +6428,10 @@ Do NOT mention rooms that have no current or recent motion."""
     async def _extract_motion_control_intent(self, query: str, device_room: str = None) -> Dict:
         """
         Use LLM to extract motion control intent from natural language.
-        Controls Node-RED motion flow variables for bedrooms and office.
+        Controls a room's motion-flow helpers in Home Assistant. Which rooms
+        have them is discovered (see _motion_control_rooms), never listed here.
 
-        Rooms with motion control: office, alpha, beta, master_bedroom
-
-        Variables per room:
+        Helpers per room (``<room>`` is the room's key):
         - input_boolean.<room>_leave_lights_on: Keep lights on after motion stops
         - input_boolean.<room>_leave_lights_off: Keep lights off (nap mode)
         - input_boolean.<room>_brightness_override: Use custom brightness
@@ -6440,9 +6466,7 @@ AVAILABLE ACTIONS:
 - "set_brightness_override": Lock brightness at a specific level when motion triggers lights.
 - "keep_current_brightness": Lock brightness at current level (will query current brightness).
 
-ROOMS WITH MOTION CONTROL: office, alpha, beta, master_bedroom
-- "alpha" and "beta" are guest bedrooms
-- "master_bedroom" can also be called "bedroom", "master", "my room"
+ROOM: the room the user names, as they say it; null when they name none (the speaker's room is used).
 
 Return JSON with this structure:
 {{
@@ -6459,7 +6483,7 @@ Return JSON with this structure:
 Examples:
 "leave the lights on for 2 hours" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_on", "parameters": {{"duration_minutes": 120}}, "reason": "Lights will stay on for 2 hours"}}
 "keep the lights off, I'm taking a nap" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_off", "parameters": {{"duration_minutes": 180}}, "reason": "Lights will stay off for your nap"}}
-"disable motion in the office" -> {{"device_type": "motion_control", "room": "office", "action": "disable_motion", "parameters": {{}}, "reason": "Motion detection disabled, use switch only"}}
+"disable motion in the nursery" -> {{"device_type": "motion_control", "room": "nursery", "action": "disable_motion", "parameters": {{}}, "reason": "Motion detection disabled, use switch only"}}
 "turn motion back on" -> {{"device_type": "motion_control", "room": null, "action": "enable_motion", "parameters": {{}}, "reason": "Motion detection resumed"}}
 "keep the room at this brightness" -> {{"device_type": "motion_control", "room": null, "action": "keep_current_brightness", "parameters": {{}}, "reason": "Brightness locked at current level"}}
 "set motion brightness to 50%" -> {{"device_type": "motion_control", "room": null, "action": "set_brightness_override", "parameters": {{"brightness_percent": 50}}, "reason": "Motion will set lights to 50%"}}
@@ -6510,7 +6534,7 @@ Return ONLY the JSON, no other text."""
             if not whole_prompt_guaranteed and classify_utterance(query).kind != UtteranceKind.IMPERATIVE:
                 logger.info("smart_home_retried_motion_unverified query_len=%d", len(query))
                 return room_context.unprocessable_intent("unverified")
-            logger.info("Motion control intent extracted: key_count=%d", len(intent))
+            logger.info("motion_control_intent_extracted action=%s has_room=%s", intent.get("action"), bool(intent.get("room")))
             return intent
 
         except ModelOutputNotObject:
@@ -6521,50 +6545,142 @@ Return ONLY the JSON, no other text."""
             logger.error(f"Failed to parse motion control intent: {e}")
             return room_context.unprocessable_intent("unparseable")
 
+    async def _motion_control_rooms(self) -> Dict[str, str]:
+        """The rooms that have motion control, from the states Home
+        Assistant reports: ``{room key: slug}`` for every
+        ``input_boolean.<slug>_motion_disable``. A slug belongs to a room
+        when it is ``room_key`` of the room's name or of one of its Home
+        Assistant area aliases (``nb`` for "North Wing"); the room's own
+        name wins over another room's alias. A slug two rooms claim only by
+        alias, or a room with two alias slugs, is skipped. A slug no room
+        claims is keyed by itself. That one helper is what makes a room
+        count; the others an action needs are checked when it runs. Entity
+        ids are always built from the slug, labels from the room key."""
+        entities = await self.entity_manager.get_entities()
+        slugs = set()
+        for entity_id in entities:
+            if entity_id.startswith(_INPUT_BOOLEAN) and entity_id.endswith(MOTION_DISABLE_SUFFIX):
+                slug = entity_id[len(_INPUT_BOOLEAN):-len(MOTION_DISABLE_SUFFIX)]
+                if slug and room_key(slug) == slug:
+                    slugs.add(slug)
+        directory = self._directory()
+        room_keys = directory.keys() if directory is not None else ()
+        rooms: Dict[str, str] = {key: key for key in room_keys if key in slugs}
+        by_alias: Dict[str, List[str]] = {}
+        claimed_slugs = set(rooms.values())
+        for key in room_keys:
+            if key in rooms:
+                continue
+            claimed = [n for n in directory.name_keys(key) if n in slugs and n not in rooms.values()]
+            claimed_slugs.update(claimed)
+            if len(set(claimed)) == 1:
+                by_alias.setdefault(claimed[0], []).append(key)
+            elif claimed:
+                by_alias.setdefault("", []).append(key)
+        skipped = len(by_alias.pop("", []))
+        for slug, claimants in by_alias.items():
+            if len(claimants) == 1:
+                rooms[claimants[0]] = slug
+            else:
+                skipped += len(claimants)
+        for slug in slugs - claimed_slugs:
+            rooms.setdefault(slug, slug)
+        if skipped:
+            import structlog
+            structlog.get_logger(__name__).info("motion_control_ambiguous_slugs", skipped=skipped)
+        return rooms
+
+    async def _motion_rooms_reply(self, rooms: Dict[str, str]) -> str:
+        """The reply for a room without motion control: only the rooms the
+        request may use are named, so a denied caller learns of none."""
+        usable = [
+            key for key in rooms
+            if await self._room_has_permitted_target(MOTION_CONTROL_DOMAIN, key) is True
+        ]
+        if not usable:
+            return MOTION_NOT_SET_UP
+        labels = sorted(self._spoken_room(key) for key in usable)
+        return f"{MOTION_NOT_SET_UP} It's set up for {_join_spoken(labels)}."
+
+    @staticmethod
+    def _motion_write_set(slug: str, action: str) -> List[str]:
+        """Every entity an action writes, whether or not Home Assistant has it."""
+        ids = [f"{domain}.{slug}_{name}" for domain, name in _MOTION_ACTION_HELPERS.get(action, ())]
+        if action in ("disable_motion", "enable_motion"):
+            ids.append(f"{_INPUT_BOOLEAN}{slug}{MOTION_DISABLE_SUFFIX}")
+        return ids
+
+    async def _current_room_brightness(self, room: str) -> Optional[int]:
+        """The room's lights' brightness (0-100) when any is on, from the
+        entity states; None when none is on."""
+        entities = await self.entity_manager.get_entities()
+        for match in await self._resolve_room_lights(room):
+            state = entities.get(match['entity_id']) or {}
+            if state.get('state') == 'on':
+                level = (state.get('attributes') or {}).get('brightness', 255)
+                return int((level / 255) * 100)
+        return None
+
     async def _handle_motion_control_intent(self, action: str, parameters: Dict, ha_client, room: str = None, original_query: str = None) -> str:
         """
-        Handle motion control commands by setting Node-RED motion flow variables.
+        Handle motion control commands by setting the room's motion-flow
+        helpers in Home Assistant. ``room`` is the room the command acts on
+        (decided upstream: the one named, else the speaker's).
 
-        Rooms with motion control helpers:
-        - office: input_boolean.office_*, input_number.office_*
-        - alpha: input_boolean.alpha_*, input_number.alpha_*
-        - beta: input_boolean.beta_*, input_number.beta_*
-        - master_bedroom: input_boolean.master_bedroom_*, input_number.master_bedroom_*
+        A room has motion control when ``input_boolean.<room>_motion_disable``
+        exists, where ``<room>`` is the room's key (``sun_room`` for
+        "Sun Room"). The other helpers, named for the room the same way,
+        are what each action writes:
+        input_boolean ``_leave_lights_on``, ``_leave_lights_off``,
+        ``_brightness_override``; input_number ``_leave_lights_on_minutes``,
+        ``_leave_lights_off_minutes``, ``_override_brightness``.
         """
         from orchestrator.mode_permission import ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
-        # Normalize room name to match HA entity naming
-        room_map = {
-            "office": "office",
-            "alpha": "alpha",
-            "beta": "beta",
-            "master_bedroom": "master_bedroom",
-            "master bedroom": "master_bedroom",
-            "bedroom": "master_bedroom",
-            "master": "master_bedroom",
-            "my room": "master_bedroom",
-            "my bedroom": "master_bedroom"
-        }
-
-        normalized_room = room_map.get(room.lower() if room else "", None)
-
+        motion_rooms = await self._motion_control_rooms()
+        key = room_key(room or "")
+        normalized_room = motion_rooms.get(key)
         if not normalized_room:
-            # Check if room has motion control
-            valid_rooms = ["office", "alpha", "beta", "master_bedroom"]
-            return f"Motion control is only available in: {', '.join(valid_rooms)}. Which room would you like to control?"
+            logger.info("motion_control_room_unsupported room_given=%s rooms_with_helpers=%d", bool(room), len(motion_rooms))
+            return await self._motion_rooms_reply(motion_rooms)
+        spoken_room = self._spoken_room(key)
 
-        # Build entity names
+        # Authorize the whole write set before saying anything about the
+        # room's helpers, so a denied caller learns nothing about them.
+        from orchestrator.mode_permission import (
+            check_entity_permission, current_ha_scope, permission_refusal_message, record_precheck_denial,
+        )
+        scope = current_ha_scope()
+        denied_ids = [] if scope is None else [
+            eid for eid in self._motion_write_set(normalized_room, action)
+            if not check_entity_permission(eid, scope.permissions)
+        ]
+        if scope is not None and (
+            denied_ids or not check_entity_permission(f"{_INPUT_BOOLEAN}{normalized_room}{MOTION_DISABLE_SUFFIX}", scope.permissions)
+        ):
+            logger.info("motion_control_denied action=%s denied=%d", action, len(denied_ids))
+            record_precheck_denial(scope, "input_boolean", action or "change", denied_ids or [f"{_INPUT_BOOLEAN}{normalized_room}{MOTION_DISABLE_SUFFIX}"])
+            return permission_refusal_message((_INPUT_BOOLEAN.rstrip("."),), scope)
+
+        entities = await self.entity_manager.get_entities()
+        missing = [
+            f"{domain}.{normalized_room}_{name}" for domain, name in _MOTION_ACTION_HELPERS.get(action, ())
+            if f"{domain}.{normalized_room}_{name}" not in entities
+        ]
+        if missing:
+            logger.info("motion_control_helpers_missing action=%s missing=%d", action, len(missing))
+            return f"Motion control in the {spoken_room} isn't fully set up for that. Some of its Home Assistant helpers are missing."
+
         leave_on_bool = f"input_boolean.{normalized_room}_leave_lights_on"
         leave_off_bool = f"input_boolean.{normalized_room}_leave_lights_off"
         brightness_override_bool = f"input_boolean.{normalized_room}_brightness_override"
-        motion_disable_bool = f"input_boolean.{normalized_room}_motion_disable"
+        motion_disable_bool = f"input_boolean.{normalized_room}{MOTION_DISABLE_SUFFIX}"
         leave_on_minutes = f"input_number.{normalized_room}_leave_lights_on_minutes"
         leave_off_minutes = f"input_number.{normalized_room}_leave_lights_off_minutes"
         override_brightness = f"input_number.{normalized_room}_override_brightness"
-        light_entity = f"light.{normalized_room}"
 
         duration = parameters.get("duration_minutes", 60)
         brightness = parameters.get("brightness_percent")
@@ -6595,7 +6711,7 @@ Return ONLY the JSON, no other text."""
                 time_str = f"{hours} hour{'s' if hours != 1 else ''}" if hours > 0 else ""
                 if mins > 0:
                     time_str += f" {mins} minute{'s' if mins != 1 else ''}" if time_str else f"{mins} minute{'s' if mins != 1 else ''}"
-                return f"Lights will stay on in the {normalized_room.replace('_', ' ')} for {time_str}."
+                return f"Lights will stay on in the {spoken_room} for {time_str}."
 
             elif action == "leave_lights_off":
                 # Set duration first, then enable the boolean
@@ -6612,7 +6728,7 @@ Return ONLY the JSON, no other text."""
                 time_str = f"{hours} hour{'s' if hours != 1 else ''}" if hours > 0 else ""
                 if mins > 0:
                     time_str += f" {mins} minute{'s' if mins != 1 else ''}" if time_str else f"{mins} minute{'s' if mins != 1 else ''}"
-                return f"Lights will stay off in the {normalized_room.replace('_', ' ')} for {time_str}."
+                return f"Lights will stay off in the {spoken_room} for {time_str}."
 
             elif action == "disable_motion":
                 # Disable motion detection - only physical switch works
@@ -6620,7 +6736,7 @@ Return ONLY the JSON, no other text."""
                     "input_boolean", "turn_on",
                     {"entity_id": motion_disable_bool}
                 )
-                return f"Motion detection disabled in the {normalized_room.replace('_', ' ')}. Use the light switch to control lights."
+                return f"Motion detection disabled in the {spoken_room}. Use the light switch to control lights."
 
             elif action == "enable_motion":
                 # Reset all overrides and enable motion
@@ -6630,7 +6746,7 @@ Return ONLY the JSON, no other text."""
                     ha_client.call_service("input_boolean", "turn_off", {"entity_id": leave_off_bool}),
                     ha_client.call_service("input_boolean", "turn_off", {"entity_id": brightness_override_bool})
                 )
-                return f"Motion detection resumed in the {normalized_room.replace('_', ' ')}. All overrides cleared."
+                return f"Motion detection resumed in the {spoken_room}. All overrides cleared."
 
             elif action == "set_brightness_override":
                 if brightness is None:
@@ -6644,17 +6760,13 @@ Return ONLY the JSON, no other text."""
                     "input_boolean", "turn_on",
                     {"entity_id": brightness_override_bool}
                 )
-                return f"Motion will set lights to {brightness}% brightness in the {normalized_room.replace('_', ' ')}."
+                return f"Motion will set lights to {brightness}% brightness in the {spoken_room}."
 
             elif action == "keep_current_brightness":
-                # Query current brightness from the light
+                # Read the room's current brightness from the entity states
                 try:
-                    light_state = await ha_client.get_state(light_entity)
-                    if light_state and light_state.get("state") == "on":
-                        current_brightness = light_state.get("attributes", {}).get("brightness", 255)
-                        # Convert from 0-255 to 0-100 percent
-                        brightness_percent = int((current_brightness / 255) * 100)
-
+                    brightness_percent = await self._current_room_brightness(key)
+                    if brightness_percent is not None:
                         await ha_client.call_service(
                             "input_number", "set_value",
                             {"entity_id": override_brightness, "value": brightness_percent}
@@ -6663,9 +6775,9 @@ Return ONLY the JSON, no other text."""
                             "input_boolean", "turn_on",
                             {"entity_id": brightness_override_bool}
                         )
-                        return f"Brightness locked at {brightness_percent}% in the {normalized_room.replace('_', ' ')}."
+                        return f"Brightness locked at {brightness_percent}% in the {spoken_room}."
                     else:
-                        return f"The {normalized_room.replace('_', ' ')} lights are off. Please turn them on first or specify a brightness level."
+                        return f"The {spoken_room} lights are off. Please turn them on first or specify a brightness level."
                 except Exception as e:
                     logger.error(f"Error getting current brightness: {e}")
                     return "I couldn't determine the current brightness. Please specify a level like 'set motion brightness to 50 percent'."

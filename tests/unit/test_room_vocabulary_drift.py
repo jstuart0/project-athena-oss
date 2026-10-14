@@ -40,9 +40,6 @@ ALLOWLIST = {
         "sensor_room_tokens: name fragments of occupancy sensors (motion, out of scope)",
     ("src/orchestrator/smart_home_controller.py", "OUTDOOR_SENSOR_PATTERNS"):
         "names of exterior motion sensors to skip (motion, out of scope)",
-    ("src/orchestrator/smart_home_controller.py", "_handle_motion_control_intent"):
-        "valid_rooms: the rooms with motion-control helpers in a house's HA (motion, out of scope; "
-        "still names a house's rooms and needs its own follow-up)",
     # Generic-noun hints in classifiers. They decide which pipeline a
     # sentence goes down, never which lights a command writes, and hold no
     # house names. Follow-up: route them through COMMON_ROOM_WORDS.

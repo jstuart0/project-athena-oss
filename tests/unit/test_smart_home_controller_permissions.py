@@ -57,6 +57,7 @@ _ENTITIES = {
     "lock.back_door": {"state": "locked", "attributes": {"friendly_name": "Back Door"}},
     "cover.garage_door": {"state": "closed", "attributes": {"friendly_name": "Garage Door"}},
     "fan.office": {"state": "off", "attributes": {"friendly_name": "Office Fan"}},
+    "input_boolean.office_motion_disable": {"state": "off", "attributes": {"friendly_name": "Office motion disable"}},
     "light.kitchen": {"state": "off", "attributes": {"friendly_name": "Kitchen Light"}},
     "media_player.living_room": {"state": "off", "attributes": {"friendly_name": "Living Room"}},
     "script.leaving": {"state": "off", "attributes": {"friendly_name": "Leaving"}},

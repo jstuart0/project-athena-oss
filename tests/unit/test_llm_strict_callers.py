@@ -274,6 +274,12 @@ def test_positive_control_the_same_queries_act_when_the_model_answers_whole(monk
     ):
         llm = Scripted(("reply", reply, "stop"))
         chat = light_chat(monkeypatch, llm)
+        if expected == "input_boolean":
+            # Motion control works in a room that has its Home Assistant
+            # helpers (origin/main): the study gets them here.
+            from .test_motion_control_rooms import helper_states
+            chat.rig.manager._entities_cache.update(helper_states("study"))
+            chat.rig.manager._build_indexes()
         out = chat.turn(query)
         assert out.answer != room_context.UNPROCESSABLE_TEXT
         assert any(domain == expected for domain, _ in writes(chat)), (query, writes(chat))

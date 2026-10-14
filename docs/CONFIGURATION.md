@@ -2094,6 +2094,26 @@ the missing key.
 | `TMDB_API_KEY` | 1M/month | [themoviedb.org](https://www.themoviedb.org/settings/api) |
 | `TICKETMASTER_API_KEY` | 5,000/day | [developer.ticketmaster.com](https://developer.ticketmaster.com/) |
 
+### Media requests (Overseerr / Seerr / Jellyseerr)
+
+The media requests service (`athena-rag-media`, owner mode only) searches
+and requests movies and shows through your Overseerr-compatible server,
+which hands approved requests to Radarr and Sonarr.
+
+- **Preferred:** save an External API Key named `overseerr` with the
+  server's API key (Settings → General in Overseerr) and its address as the
+  endpoint URL, with or without `/api/v1`
+  (`http://overseerr.example.lan:5055/api/v1`).
+- **Fallback:** `OVERSEERR_URL` and `OVERSEERR_API_KEY`. A saved key wins
+  over both. There is no built-in address; with neither set, the assistant
+  says media requests aren't set up.
+- Unlike the other RAG keys, this service re-reads the saved key every 60
+  seconds, so a change needs no restart, and keeps the last value it read
+  while admin-backend is down.
+- Requests are made as the key's owner (normally Overseerr's admin), so
+  they are approved automatically. A TV request asks for every season.
+- `GET /health` reports `overseerr_configured` and `overseerr_connected`.
+
 ### News & Information
 
 News reads its key from the admin key store only — its own code has no
@@ -2889,6 +2909,22 @@ rather than guessing a device/room your HA instance doesn't have. See
 | `HA_AREAS` | `auto` | `auto` reads Home Assistant's area, device and entity registries over its WebSocket API (read-only, in the background; needs `HA_URL` and `HA_TOKEN`). `off` never connects. Any other value logs an error and reads `off`. See "Which room Athena assumes". |
 | `HA_DEVICE_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs or addresses of clients whose Home Assistant device id the gateway believes, for the speaker's room, per-device sessions and follow-ups. A request that presents the gateway's own API key is trusted too. Empty and no gateway key: a device id is ignored. Keep it narrow (Home Assistant's address as `/32`); an entry wider than /24 (IPv4) or /64 (IPv6) logs `ha_device_client_networks_wide`, and one overlapping `TRUSTED_PROXY_CIDRS` is ignored with an error. |
 | `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS` | `false` | `true` lets an owner's "all the lights" also reach lights that have no Home Assistant area. Never for a guest or any other audience. |
+
+### Motion control helpers
+
+"Leave the lights on for two hours", "keep the lights off, I'm napping", "disable motion" and similar commands set helper entities that your own motion automation reads. Athena finds the rooms that have them in Home Assistant's states; there is no setting to list them.
+
+A room has motion control when Home Assistant holds `input_boolean.<room>_motion_disable`. `<room>` is the room's name in lower case with words joined by underscores (`Master Bedroom` is `master_bedroom`, `Nursery` is `nursery`), or the same form of one of the area's aliases: name the helpers after the area, or after one of its aliases (an area `Master Bedroom` with the alias `MBR` can use `mbr_motion_disable`). The room's own name wins over another room's alias; if two rooms claim one alias, or a room has helpers under two of its aliases, those helpers are skipped, so give each room one. The other helpers use that same prefix, and an action needs the ones it writes:
+
+| Action | Helpers it writes |
+|---|---|
+| Leave the lights on | `input_number.<room>_leave_lights_on_minutes`, `input_boolean.<room>_leave_lights_on` |
+| Leave the lights off | `input_number.<room>_leave_lights_off_minutes`, `input_boolean.<room>_leave_lights_off` |
+| Disable motion | `input_boolean.<room>_motion_disable` |
+| Resume motion | `input_boolean.<room>_leave_lights_on`, `_leave_lights_off`, `_brightness_override` (turned off), and `_motion_disable` |
+| Set or keep the brightness | `input_number.<room>_override_brightness`, `input_boolean.<room>_brightness_override` |
+
+A room missing one of the helpers an action needs gets a plain reply and nothing is written. "Keep this brightness" reads the room's lights (the same lights a room light command uses) for the current level. The room comes from the words in the request, else the speaker's room, like any other room command; a room Home Assistant has no area for is still found by its helpers' name. Writes are permission-checked and gated like every other device write.
 
 ### jarvis-web appliance and media entities
 
