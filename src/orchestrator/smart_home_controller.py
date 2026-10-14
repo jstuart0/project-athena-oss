@@ -9,6 +9,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 from . import room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
@@ -19,7 +20,7 @@ from shared.config import get_config
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
-from shared.ha_registry import room_key
+from shared.ha_registry import room_key, tokens as _name_tokens
 
 
 _jarvis_key_warned = False
@@ -298,6 +299,8 @@ RECONCILE_LAST_CHANGED_MAX = 64
 RECONCILE_MAX_STUCK = 500
 RECONCILE_MAX_HEALTHY = 5000
 RECONCILE_UNKNOWN_ROOM = "Unknown room"
+# How a stuck sensor with no area and no known room is spoken.
+NO_ROOM_PHRASE = "A sensor with no room"
 
 
 class MotionClassification(NamedTuple):
@@ -317,6 +320,99 @@ class MotionScan(NamedTuple):
     stuck: List[Dict]
     reconcile: Optional[Dict]
     entities_seen: int
+
+
+_OUTDOOR_PHRASES = tuple(tuple(p.split('_')) for p in OUTDOOR_SENSOR_PATTERNS)
+_SENSOR_KIND_WORDS = ('motion', 'presence', 'occupancy', 'pir')
+class SensorSite(NamedTuple):
+    """Where an indoor occupancy sensor is. `room` is its Home Assistant area,
+    else the one room of the deployment's vocabulary its name says, else None.
+    A friendly name is never a room: it is free text that Home Assistant lets
+    anyone rename, and a room is spoken and handed to a model. A sensor with
+    no room is still watched for being stuck, but no answer can say where it
+    is. `outdoor` marks a sensor that says nothing about who is home: never
+    stuck-flagged and never in an answer, but a reading from it still counts
+    as seen healthy, so an alert opened before it was recognised as outdoor
+    (an area change, say) can be cleared."""
+    room: Optional[str]
+    outdoor: bool = False
+
+    @property
+    def placed(self) -> bool:
+        return self.room is not None
+
+
+def _hours_since(last_changed: str, now) -> Optional[float]:
+    """Hours between an ISO timestamp and `now`, or None when it is missing
+    or unparseable."""
+    if not last_changed:
+        return None
+    try:
+        changed = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+        return (now - changed).total_seconds() / 3600
+    except Exception:
+        return None
+
+
+def _has_phrase(toks: Tuple[str, ...], phrase: Tuple[str, ...]) -> bool:
+    n = len(phrase)
+    return any(toks[i:i + n] == phrase for i in range(len(toks) - n + 1))
+
+
+def is_outdoor_sensor(entity_id: str, friendly_name: str) -> bool:
+    """True when the id or the friendly name carries an OUTDOOR_SENSOR_PATTERNS
+    phrase as whole words: "deck" matches "Deck Motion", not "decker_motion"."""
+    for text in (entity_id, friendly_name):
+        toks = _name_tokens(text)
+        if any(_has_phrase(toks, phrase) for phrase in _OUTDOOR_PHRASES):
+            return True
+    return False
+
+
+def sensor_room(entity_id: str, friendly_name: str, snapshot, directory) -> Optional[str]:
+    """The room a sensor is in, or None. Home Assistant's area registry wins
+    (the entity's own area, else its device's). Without one, the room is the
+    single room of the deployment's vocabulary that the entity id and the
+    friendly name name; two different rooms, or a phrase that fits several
+    rooms, is no answer."""
+    if snapshot is not None:
+        area = snapshot.area_for(entity_id)
+        if area is not None and area.name:
+            return area.name
+    object_id = entity_id.split('.', 1)[-1].replace('_', ' ')
+    found = {}
+    for text in (object_id, friendly_name):
+        for mention in room_context.find_room_mentions(text, directory):
+            if len(mention.candidates) != 1:
+                return None
+            ref = mention.candidates[0]
+            found[ref.key] = ref.label
+    if len(found) != 1:
+        return None
+    return ' '.join(word.capitalize() for word in next(iter(found.values())).split())
+
+
+def motion_sensor_site(entity_id: str, state: Dict, room_of) -> Optional[SensorSite]:
+    """The one answer to "is this an indoor occupancy sensor, and where?",
+    for both the stuck-sensor scan and the occupancy answers. None for
+    anything else (not a binary_sensor of a motion kind, a tamper switch).
+    An outdoor sensor (by its id, its name or its room) comes back with
+    `outdoor` set. `room_of(entity_id, friendly_name)` is `sensor_room`
+    bound to what the caller read, so this stays pure."""
+    if not entity_id.startswith('binary_sensor.'):
+        return None
+    entity_lower = entity_id.lower()
+    if not any(kind in entity_lower for kind in _SENSOR_KIND_WORDS):
+        return None
+    friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
+    if 'tamper' in entity_lower:
+        return None
+    if is_outdoor_sensor(entity_id, friendly_name):
+        return SensorSite(None, outdoor=True)
+    room = room_of(entity_id, friendly_name) or None
+    if room is not None and is_outdoor_sensor(room, ''):
+        return SensorSite(None, outdoor=True)
+    return SensorSite(room)
 
 
 class SmartHomeController:
@@ -3171,7 +3267,7 @@ Return ONLY valid JSON."""
                 return "I couldn't access the motion sensors to estimate occupancy."
 
             if not healthy_sensors and stuck_sensors:
-                stuck_rooms = [s['room'] for s in stuck_sensors]
+                stuck_rooms = [s['room'] or NO_ROOM_PHRASE for s in stuck_sensors]
                 return f"All motion sensors appear to be stuck and have been excluded. Affected sensors: {', '.join(stuck_rooms)}. I can't estimate occupancy until the sensors are fixed."
 
             # Log if we excluded any stuck sensors
@@ -3249,54 +3345,6 @@ Return ONLY valid JSON."""
             logger.error(f"Window sensor query error: {e}")
             return "I had trouble checking the window sensors. Please try again."
 
-    async def _get_all_motion_sensors(self) -> List[Dict]:
-        """Fetch all motion/presence sensors from Home Assistant with their states and timestamps."""
-        import logging
-        from datetime import datetime
-        logger = logging.getLogger(__name__)
-
-        try:
-            # Get all entity states from HA via entity manager
-            all_entities = await self.entity_manager.get_entities()
-
-            motion_sensors = []
-            for entity_id, state in all_entities.items():
-
-                # Filter for motion/presence/occupancy sensors
-                # Exclude tamper sensors, Ring cameras (outdoor), and other non-indoor sensors
-                entity_lower = entity_id.lower()
-                if 'tamper' in entity_lower:
-                    continue  # Skip tamper sensors
-                if 'ring' in entity_lower:
-                    continue  # Skip Ring camera/doorbell motion (outdoor)
-
-                if any(x in entity_lower for x in ['motion', 'presence', 'occupancy', 'pir']):
-                    if entity_id.startswith('binary_sensor.'):
-                        # Extract room name from entity_id or friendly_name
-                        friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
-                        room = self._extract_room_from_entity(entity_id, friendly_name)
-
-                        # Skip sensors without a recognized room (e.g., generic "Presence Sensor 1")
-                        if room is None:
-                            logger.debug(f"Skipping sensor with unknown room: {entity_id} [{friendly_name}]")
-                            continue
-
-                        motion_sensors.append({
-                            'entity_id': entity_id,
-                            'room': room,
-                            'state': state.get('state'),  # 'on' or 'off'
-                            'last_changed': state.get('last_changed'),
-                            'friendly_name': friendly_name
-                        })
-                        logger.debug(f"Motion sensor: {entity_id} -> state: {state.get('state')}")
-
-            logger.info(f"Found {len(motion_sensors)} motion sensors")
-            return motion_sensors
-
-        except Exception as e:
-            logger.error(f"Error fetching motion sensors: {e}")
-            return []
-
     async def _get_all_motion_sensors_with_stuck_detection(
         self, force_refresh: bool = False
     ) -> Tuple[List[Dict], List[Dict]]:
@@ -3325,16 +3373,26 @@ Return ONLY valid JSON."""
         from datetime import datetime, timezone
         all_entities = await self.entity_manager.get_entities(force_refresh=force_refresh)
         observed_at = datetime.now(timezone.utc) if force_refresh else self.entity_manager.entities_fetched_at()
-        result = self.classify_motion_sensors(all_entities, datetime.now(timezone.utc))
+        result = self.classify_motion_sensors(
+            all_entities, datetime.now(timezone.utc), self._sensor_room_resolver())
         reconcile = None
         if all_entities and result.classified:
             reconcile = await self._reconcile_stuck_alerts(result.stuck, result.seen_healthy, observed_at)
         return MotionScan(result.healthy, result.stuck, reconcile, len(all_entities))
 
-    def classify_motion_sensors(self, all_entities: Dict, now) -> MotionClassification:
+    def _sensor_room_resolver(self):
+        """`sensor_room` over the area registry and room directory as they
+        are now, read once for a whole scan."""
+        snapshot = self._registry_snapshot()
+        directory = self._directory()
+        return lambda entity_id, friendly_name: sensor_room(entity_id, friendly_name, snapshot, directory)
+
+    def classify_motion_sensors(self, all_entities: Dict, now, room_of=None) -> MotionClassification:
         """
         Split the motion/presence sensors in `all_entities` into healthy and
         stuck, and list the ones positively seen healthy. Pure: no I/O.
+        `room_of(entity_id, friendly_name)` names a sensor's room (see
+        `sensor_room`); without it only the generic room words apply.
 
         SENSOR HIERARCHY (most reliable to least):
         1. presence/occupancy sensors (mmWave radar) - most accurate for actual human presence
@@ -3364,100 +3422,99 @@ Return ONLY valid JSON."""
         seen_healthy = []
         classified = 0
 
+        if room_of is None:
+            room_of = lambda entity_id, friendly_name: sensor_room(entity_id, friendly_name, None, None)
+
+        room_labels = {}  # room key -> the label shown for it
+
         for entity_id, state in all_entities.items():
+            site = motion_sensor_site(entity_id, state, room_of)
+            if site is None:
+                continue
+            if site.outdoor:
+                classified += 1
+                if state.get('state') in ('on', 'off') and _hours_since(state.get('last_changed', ''), now) is not None:
+                    seen_healthy.append(entity_id)
+                continue
             entity_lower = entity_id.lower()
             friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
-            friendly_lower = friendly_name.lower()
+            room = room_labels.setdefault(room_key(site.room), site.room) if site.placed else None
+            classified += 1
+            sensor_state = state.get('state')
+            last_changed = state.get('last_changed', '')
 
-            # Skip tamper and Ring sensors
-            if 'tamper' in entity_lower or 'ring' in entity_lower:
-                continue
+            # Determine sensor type for prioritization
+            # SENSOR HIERARCHY (most to least reliable):
+            # 1. mmWave radar presence sensors - most accurate
+            # 2. Generic occupancy sensors - may be PIR-based, less reliable
+            # 3. PIR motion sensors - can give false positives from HVAC
+            #
+            # IMPORTANT: Check PIR first because some entities have both
+            # e.g., "motion_presence_nursery_pir_detection" contains both
+            # "_presence" (from device name) AND "_pir" (sensor type)
+            #
+            # mmWave indicators: "mm_", "_mm_", "fp2", "_presence_sensor"
+            # PIR indicators: "_pir", "pir_detection"
+            # Generic occupancy: ends with "_occupancy" but no mmWave indicator
 
-            # Skip outdoor/exterior sensors (check both entity_id and friendly_name)
-            # These sensors detect external activity, not home presence
-            if any(x in entity_lower or x in friendly_lower for x in OUTDOOR_SENSOR_PATTERNS):
-                continue
+            is_mmwave = any(x in entity_lower for x in ['mm_', '_mm_', 'fp2', '_presence_sensor'])
+            is_pir = '_pir' in entity_lower or 'pir_detection' in entity_lower
 
-            if any(x in entity_lower for x in ['motion', 'presence', 'occupancy', 'pir']):
-                if entity_id.startswith('binary_sensor.'):
-                    room = self._extract_room_from_entity(entity_id, friendly_name)
+            if is_pir:
+                sensor_type = 'pir'  # Low priority - can have false positives
+            elif is_mmwave or entity_lower.endswith('_presence'):
+                sensor_type = 'presence'  # High priority - mmWave/radar
+            elif entity_lower.endswith('_occupancy'):
+                # Generic occupancy without mmWave indicator - treat as medium priority
+                # Could be PIR-based, so not as reliable as true mmWave
+                sensor_type = 'occupancy'  # Medium priority - might be PIR-based
+            elif '_presence' in entity_lower or '_occupancy' in entity_lower:
+                # Has presence/occupancy in name - check for mmWave markers
+                sensor_type = 'presence' if is_mmwave else 'occupancy'
+            else:
+                sensor_type = 'motion'  # Generic motion sensor
 
-                    if room is None:
-                        continue
+            # Calculate time since last change
+            is_stuck = False
+            timestamp_parsed = False
+            hours_unchanged = 0
 
-                    classified += 1
-                    sensor_state = state.get('state')
-                    last_changed = state.get('last_changed', '')
+            if last_changed:
+                try:
+                    changed_time = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                    delta = now - changed_time
+                    hours_unchanged = delta.total_seconds() / 3600
+                    timestamp_parsed = True
 
-                    # Determine sensor type for prioritization
-                    # SENSOR HIERARCHY (most to least reliable):
-                    # 1. mmWave radar presence sensors - most accurate
-                    # 2. Generic occupancy sensors - may be PIR-based, less reliable
-                    # 3. PIR motion sensors - can give false positives from HVAC
-                    #
-                    # IMPORTANT: Check PIR first because some entities have both
-                    # e.g., "motion_presence_alpha_pir_detection" contains both
-                    # "_presence" (from device name) AND "_pir" (sensor type)
-                    #
-                    # mmWave indicators: "mm_", "_mm_", "fp2", "_presence_sensor"
-                    # PIR indicators: "_pir", "pir_detection"
-                    # Generic occupancy: ends with "_occupancy" but no mmWave indicator
+                    # Only flag as stuck if sensor is ON for too long
+                    # Being OFF for a long time is normal (vacation, travel, etc.)
+                    if sensor_state == 'on' and hours_unchanged > STUCK_ON_HOURS_BY_TYPE[sensor_type]:
+                        is_stuck = True
+                except Exception as e:
+                    logger.debug(f"Error parsing a sensor timestamp: {type(e).__name__}")
 
-                    is_mmwave = any(x in entity_lower for x in ['mm_', '_mm_', 'fp2', '_presence_sensor'])
-                    is_pir = '_pir' in entity_lower or 'pir_detection' in entity_lower
+            sensor_data = {
+                'entity_id': entity_id,
+                'room': room,
+                'state': sensor_state,
+                'last_changed': last_changed,
+                'friendly_name': friendly_name,
+                'hours_unchanged': hours_unchanged,
+                'sensor_type': sensor_type
+            }
 
-                    if is_pir:
-                        sensor_type = 'pir'  # Low priority - can have false positives
-                    elif is_mmwave or entity_lower.endswith('_presence'):
-                        sensor_type = 'presence'  # High priority - mmWave/radar
-                    elif entity_lower.endswith('_occupancy'):
-                        # Generic occupancy without mmWave indicator - treat as medium priority
-                        # Could be PIR-based, so not as reliable as true mmWave
-                        sensor_type = 'occupancy'  # Medium priority - might be PIR-based
-                    elif '_presence' in entity_lower or '_occupancy' in entity_lower:
-                        # Has presence/occupancy in name - check for mmWave markers
-                        sensor_type = 'presence' if is_mmwave else 'occupancy'
-                    else:
-                        sensor_type = 'motion'  # Generic motion sensor
-
-                    # Calculate time since last change
-                    is_stuck = False
-                    timestamp_parsed = False
-                    hours_unchanged = 0
-
-                    if last_changed:
-                        try:
-                            changed_time = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
-                            delta = now - changed_time
-                            hours_unchanged = delta.total_seconds() / 3600
-                            timestamp_parsed = True
-
-                            # Only flag as stuck if sensor is ON for too long
-                            # Being OFF for a long time is normal (vacation, travel, etc.)
-                            if sensor_state == 'on' and hours_unchanged > STUCK_ON_HOURS_BY_TYPE[sensor_type]:
-                                is_stuck = True
-                        except Exception as e:
-                            logger.debug(f"Error parsing a sensor timestamp: {type(e).__name__}")
-
-                    sensor_data = {
-                        'entity_id': entity_id,
-                        'room': room,
-                        'state': sensor_state,
-                        'last_changed': last_changed,
-                        'friendly_name': friendly_name,
-                        'hours_unchanged': hours_unchanged,
-                        'sensor_type': sensor_type
-                    }
-
-                    if is_stuck:
-                        stuck_sensors.append(sensor_data)
-                    else:
-                        if sensor_state in ('on', 'off') and timestamp_parsed:
-                            seen_healthy.append(entity_id)
-                        # Group healthy sensors by room and type
-                        if room not in sensors_by_room:
-                            sensors_by_room[room] = {'presence': [], 'occupancy': [], 'pir': [], 'motion': []}
-                        sensors_by_room[room][sensor_type].append(sensor_data)
+            if is_stuck:
+                stuck_sensors.append(sensor_data)
+            else:
+                if sensor_state in ('on', 'off') and timestamp_parsed:
+                    seen_healthy.append(entity_id)
+                # A sensor whose name says no place can't speak for a room
+                if not site.placed:
+                    continue
+                # Group healthy sensors by room and type
+                if room_key(room) not in sensors_by_room:
+                    sensors_by_room[room_key(room)] = {'presence': [], 'occupancy': [], 'pir': [], 'motion': []}
+                sensors_by_room[room_key(room)][sensor_type].append(sensor_data)
 
         # Build final healthy_sensors list with prioritization
         # Sensor priority: presence (mmWave) > occupancy > PIR > motion
@@ -3465,7 +3522,7 @@ Return ONLY valid JSON."""
         pir_false_positives = []
         occupancy_deprioritized = []
 
-        for room, sensor_types in sensors_by_room.items():
+        for sensor_types in sensors_by_room.values():
             presence_sensors = sensor_types['presence']
             occupancy_sensors = sensor_types.get('occupancy', [])
             pir_sensors = sensor_types['pir']
@@ -3612,7 +3669,7 @@ Return ONLY valid JSON."""
             "stuck": [
                 {
                     "entity_id": s['entity_id'],
-                    "room": s['room'],
+                    "room": s['room'] or RECONCILE_UNKNOWN_ROOM,
                     "friendly_name": s['friendly_name'],
                     "sensor_type": s['sensor_type'],
                     "hours_on": round(s['hours_unchanged'], 1),
@@ -3653,7 +3710,7 @@ Return ONLY valid JSON."""
                     time_str = f"{days:.1f} days"
 
                 stuck_details.append(
-                    f"- {sensor['room']}: {sensor['friendly_name']} has been '{sensor['state']}' for {time_str}"
+                    f"- {sensor['room'] or NO_ROOM_PHRASE}: {sensor['sensor_type']} sensor has been '{sensor['state']}' for {time_str}"
                 )
 
             response = f"Found {len(stuck_sensors)} stuck sensor(s) out of {total_sensors} total:\n"
@@ -3665,70 +3722,6 @@ Return ONLY valid JSON."""
         except Exception as e:
             logger.error(f"Error checking stuck sensors: {e}")
             return "I had trouble checking the sensor status. Please try again."
-
-    def _extract_room_from_entity(self, entity_id: str, friendly_name: str = None) -> str:
-        """Extract room name from motion sensor entity ID or friendly name."""
-        # IMPORTANT: Order matters! More specific patterns must come first
-        # Patterns are checked in order, first match wins
-        room_patterns = [
-            # Specific bathroom patterns (before 'master' or 'bath')
-            ('master_bath', 'Master Bathroom'),
-            ('master bath', 'Master Bathroom'),
-            ('masterbath', 'Master Bathroom'),
-            ('main_bath', 'Main Bathroom'),
-            ('main bath', 'Main Bathroom'),
-            ('mainbath', 'Main Bathroom'),
-            ('powder', 'Powder Room'),
-            ('basement_bath', 'Basement Bathroom'),
-            ('basement bath', 'Basement Bathroom'),
-            # Master bedroom (after master bath patterns)
-            ('master_bed', 'Master Bedroom'),
-            ('master bed', 'Master Bedroom'),
-            ('masterbed', 'Master Bedroom'),
-            ('master_closet', 'Master Closet'),
-            ('master closet', 'Master Closet'),
-            ('underbed', 'Master Bedroom'),
-            # Other bedrooms
-            ('alpha', 'Alpha'),
-            ('beta', 'Beta'),
-            # Living areas
-            ('living', 'Living Room'),
-            ('dining', 'Dining Room'),
-            ('kitchen', 'Kitchen'),
-            ('office', 'Office'),
-            # Hallways (be specific)
-            ('basement_hall', 'Basement Hallway'),
-            ('basement hall', 'Basement Hallway'),
-            ('hallway_front', 'Front Hallway'),
-            ('front_hall', 'Front Hallway'),
-            ('hall', 'Hallway'),
-            # Basement
-            ('basement_stair', 'Basement Stairs'),
-            ('basement stair', 'Basement Stairs'),
-            ('basement', 'Basement'),
-            # Generic patterns (after specific ones)
-            ('master', 'Master Bedroom'),  # Fallback if no bath/bed specified
-            ('shower', 'Master Bathroom'),
-            ('front_door', 'Front Door'),
-            ('front door', 'Front Door'),
-            ('back_door', 'Back Door'),
-            ('entrance', 'Entrance'),
-        ]
-
-        # Combine entity_id and friendly_name for matching
-        entity_lower = entity_id.lower().replace('binary_sensor.', '')
-        search_text = entity_lower
-        if friendly_name:
-            search_text = f"{entity_lower} {friendly_name.lower()}"
-
-        # Check patterns in order (first match wins)
-        for pattern, room_name in room_patterns:
-            if pattern in search_text:
-                return room_name
-
-        # No known room pattern matched - return None to skip this sensor
-        # This filters out generic sensors like "Presence Sensor 1" with hex codes
-        return None
 
     async def _format_motion_status(self, motion_data: List[Dict], is_last_motion_query: bool = False) -> str:
         """
@@ -3753,8 +3746,8 @@ Return ONLY valid JSON."""
 
         # For rooms with presence sensors, exclude other sensor types
         # This avoids reporting PIR/occupancy false positives as actual presence
-        rooms_with_presence = set(s['room'] for s in presence_sensors)
-        filtered_other = [s for s in other_sensors if s['room'] not in rooms_with_presence]
+        rooms_with_presence = set(room_key(s['room']) for s in presence_sensors)
+        filtered_other = [s for s in other_sensors if room_key(s['room']) not in rooms_with_presence]
 
         # Combine: presence sensors + other sensors for rooms without presence
         sensors_to_use = presence_sensors + filtered_other
