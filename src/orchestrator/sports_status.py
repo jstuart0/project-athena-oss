@@ -10,6 +10,7 @@ the final score, never taken from a provider field.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,10 @@ LIVE_LEAGUE_CODES: Dict[str, str] = {
     "hockey/nhl": "nhl",
 }
 
+# A league the table does not know is still looked up when it is an ESPN path
+# ("college-football/..." style): the scoreboard route accepts a path.
+_ESPN_PATH = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$", re.IGNORECASE)
+
 LIVE_STATE = "in"
 FINAL_STATE = "post"
 
@@ -41,6 +46,21 @@ FINAL_STATE = "post"
 def _game_state(game: Dict[str, Any]) -> str:
     """A scoreboard row without a state is treated as in progress."""
     return game.get("state") or LIVE_STATE
+
+
+def live_league_code(league: str) -> Optional[str]:
+    """The scoreboard league for a team's league: a known code, else a path-shaped value, else None."""
+    if league in LIVE_LEAGUE_CODES:
+        return LIVE_LEAGUE_CODES[league]
+    return league if _ESPN_PATH.match(league or "") else None
+
+
+def is_tie(home_score: Any, away_score: Any, provider_winner: Any = None) -> bool:
+    """Equal readable scores, or an explicit provider "Tie" when the scores are unreadable."""
+    h, a = _score(home_score), _score(away_score)
+    if h is not None and a is not None:
+        return h == a
+    return str(provider_winner or "").strip().lower() == "tie"
 
 
 def _score(value: Any) -> Optional[int]:
@@ -99,6 +119,7 @@ def status_headline(
             "state": "final",
             "summary": _scoreboard_line(g, "FINAL"),
             "winner": winner_from_scores(g.get("home_team"), g.get("away_team"), g.get("home_score"), g.get("away_score")),
+            "tie": is_tie(g.get("home_score"), g.get("away_score")),
         }
 
     played = [e for e in last_games if e.get("strHomeTeam")]
@@ -124,7 +145,27 @@ def _final_headline(event: Dict[str, Any]) -> Dict[str, Any]:
         "state": "final",
         "summary": f"{away} {as_} - {hs} {home} (final, {event.get('dateEvent', '')})",
         "winner": winner_from_scores(home, away, hs, as_),
+        "tie": is_tie(hs, as_, event.get("winner")),
     }
+
+
+def _final_event(g: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+    """A game finished today that the provider's last-games list does not carry yet."""
+    tie = is_tie(g.get("home_score"), g.get("away_score"))
+    event: Dict[str, Any] = {
+        "strEvent": g.get("event_name") or f"{g.get('away_team', '')} @ {g.get('home_team', '')}",
+        "dateEvent": now.date().isoformat(),
+        "strHomeTeam": g.get("home_team"),
+        "strAwayTeam": g.get("away_team"),
+        "intHomeScore": g.get("home_score"),
+        "intAwayScore": g.get("away_score"),
+        "winner": winner_from_scores(g.get("home_team"), g.get("away_team"), g.get("home_score"), g.get("away_score")),
+        "source": "scoreboard",
+    }
+    if tie:
+        event["tie"] = True
+        event["result"] = "tie"
+    return event
 
 
 def _ok(response: Any) -> bool:
@@ -147,7 +188,7 @@ async def team_events(
     team_id = team_data["idTeam"]
     full_name = team_data.get("strTeam") or team_name or ""
     league = team_data.get("strLeague", "")
-    live_league = LIVE_LEAGUE_CODES.get(league)
+    live_league = live_league_code(league)
 
     async def no_live() -> None:
         return None
@@ -193,9 +234,19 @@ async def team_events(
     for event in last_games:
         if "intHomeScore" not in event:
             continue
+        provider_winner = event.get("winner")
         event["winner"] = winner_from_scores(
             event.get("strHomeTeam"), event.get("strAwayTeam"), event.get("intHomeScore"), event.get("intAwayScore")
         )
+        if is_tie(event.get("intHomeScore"), event.get("intAwayScore"), provider_winner):
+            event["tie"] = True
+            event["result"] = "tie"
+
+    for g in scoreboard:
+        if _game_state(g) == FINAL_STATE and not any(
+            _same_matchup(e, g) and _is_today(e, now) for e in last_games
+        ):
+            last_games.insert(0, _final_event(g, now))
 
     data["last_games"] = last_games
     data["upcoming_games"] = next_games

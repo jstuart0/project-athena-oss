@@ -17,6 +17,8 @@ import time
 
 import structlog
 
+from shared.config import get_config
+
 from orchestrator.nodes._runtime import (
     get_rag_client,
     get_parallel_search_engine,
@@ -37,6 +39,11 @@ from orchestrator.helpers import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _sports_team(state: OrchestratorState) -> str:
+    """The team the query names, else the install's configured default (empty: none)."""
+    return state.entities.get("team") or get_config().sports_default_team
 
 
 # ---------------------------------------------------------------------------
@@ -322,14 +329,14 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # RAG service failed - fall back to web search
                     await _fallback_to_web_search(state, "Airports", str(e))
 
+        elif state.intent == IntentCategory.SPORTS and not _sports_team(state):
+            # No team named and no configured default: nothing to search. Empty
+            # data sends the turn to tool calling (by league) through the
+            # empty-RAG trigger.
+            state.retrieved_data = {}
+
         elif state.intent == IntentCategory.SPORTS:
-            team = state.entities.get("team")
-            if not team:
-                # No team named: nothing to search. Empty data sends the turn to
-                # tool calling (by league) through the empty-RAG trigger.
-                state.retrieved_data = {}
-                state.node_timings["retrieve"] = time.time() - start
-                return state
+            team = _sports_team(state)
 
             # Get dynamic RAG service URL and update client if needed
             service_url = await get_rag_service_url("sports")

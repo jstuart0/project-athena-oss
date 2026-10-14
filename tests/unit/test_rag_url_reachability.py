@@ -299,3 +299,104 @@ def test_link_local_addresses_are_forbidden_and_loopback_is_not():
             server.close()
 
     run(main())
+
+
+def test_a_cancelled_probe_caches_nothing_warns_nothing_and_does_not_poison_a_waiter(monkeypatch):
+    async def main():
+        server, live = await listener()
+        real_probe = h._probe_url
+        entered = asyncio.Event()
+        hang = True
+
+        async def probe(u):
+            nonlocal hang
+            if hang:
+                hang = False
+                entered.set()
+                await asyncio.sleep(30)
+            return await real_probe(u)
+
+        monkeypatch.setattr(h, "_probe_url", probe)
+        leader = asyncio.create_task(h._reachable(url(live)))
+        await entered.wait()
+        waiter = asyncio.create_task(h._reachable(url(live)))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        leader.cancel()
+        try:
+            assert await waiter is True  # re-probed on its own, not handed the leader's failure
+        finally:
+            server.close()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        assert h._reach_inflight == {}
+        assert h._reach_cache[f"http://127.0.0.1:{live}"][0] is True
+
+    run(main())
+    assert not h.logger.warning.called
+
+
+def test_a_cancelled_probe_leaves_no_negative_entry_and_no_warning():
+    async def main():
+        port = closed_port()
+        wire_url = url(port)
+        task = asyncio.create_task(h._reachable(wire_url))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert h._reach_cache == {} and h._reach_inflight == {}
+
+    run(main())
+    assert not h.logger.warning.called
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "169.254.169.254",
+        "::ffff:169.254.169.254",
+        "2002:a9fe:a9fe::1",  # 6to4 embedding 169.254.169.254
+        "64:ff9b::a9fe:a9fe",  # NAT64 embedding 169.254.169.254
+        "64:ff9b::169.254.169.254",
+        "2002:0000:0000::1",  # 6to4 embedding 0.0.0.0
+        "64:ff9b::e000:1",  # NAT64 embedding 224.0.0.1
+    ],
+)
+def test_embedded_forbidden_ipv4_addresses_are_forbidden(addr):
+    assert h._forbidden_probe_address(addr) is True
+
+
+@pytest.mark.parametrize("addr", ["127.0.0.1", "10.1.2.3", "::ffff:10.1.2.3", "2002:0a01:0203::1", "64:ff9b::a01:203", "::1"])
+def test_embedded_allowed_addresses_stay_allowed(addr):
+    assert h._forbidden_probe_address(addr) is False
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://169.254.169.254/x",
+        "http://[2002:a9fe:a9fe::1]:8080",
+        "http://[64:ff9b::a9fe:a9fe]:8080",
+        "http://[::ffff:169.254.169.254]/",
+        "ftp://example.test/x",
+    ],
+)
+def test_a_forbidden_candidate_is_never_returned_even_when_every_candidate_is_dead(monkeypatch, bad):
+    dead = url(closed_port())
+    wire(monkeypatch, override=bad, registry=bad, env=bad)
+    assert run(h.get_rag_service_url("weather")) is None
+    wire(monkeypatch, override=bad, registry=dead, env=bad)
+    assert run(h.get_rag_service_url("weather")) == dead  # first allowed candidate
+
+
+def test_a_forbidden_override_does_not_stop_a_working_registry(monkeypatch):
+    async def main():
+        server, live = await listener()
+        wire(monkeypatch, override="http://169.254.169.254/", registry=url(live), env=None)
+        try:
+            assert await h.get_rag_service_url("weather") == url(live)
+        finally:
+            server.close()
+
+    run(main())

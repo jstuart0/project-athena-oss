@@ -134,7 +134,7 @@ def test_an_unmapped_league_gets_no_live_lookup():
         calls.append(path)
         return SimpleNamespace(success=True, data={"events": []})
 
-    team = dict(TEAM, strLeague="rugby/unknown")
+    team = dict(TEAM, strLeague="Rugby Union")
     data = asyncio.run(ss.team_events(SimpleNamespace(get=get), team, now=NOW))
     assert not any("scores/live" in c for c in calls)
     assert data["live_games"] == [] and data["status"]["state"] == "none"
@@ -185,3 +185,86 @@ def test_a_row_the_provider_marks_in_progress_is_dropped_from_upcoming_whatever_
     pre = dict(row, game_state="pre")
     data = asyncio.run(ss.team_events(fake_client([], [pre], []), TEAM, now=NOW))
     assert len(data["upcoming_games"]) == 1  # positive control
+
+
+@pytest.mark.parametrize("league", ["football/college-football", "basketball/wnba", "soccer/uefa.champions"])
+def test_a_path_shaped_league_is_passed_through_to_the_live_lookup(league):
+    client = fake_client([], [], [game("in")])
+    asyncio.run(ss.team_events(client, dict(TEAM, strLeague=league), now=NOW))
+    assert client.get.live_params == {"league": league, "team": "Baltimore Ravens"}
+
+
+@pytest.mark.parametrize("league", ["", "Rugby Union", "a/b/c", "x/../y", "football/nfl?x=1"])
+def test_other_league_values_get_no_live_lookup(league):
+    assert ss.live_league_code(league) is None
+
+
+def test_a_game_finished_today_but_not_in_last_yet_is_data_and_final():
+    client = fake_client([last()], [], [game("post", "10", "27")])
+    data = asyncio.run(ss.team_events(client, TEAM, now=NOW))
+    assert data["last_games"][0]["dateEvent"] == TODAY
+    assert data["last_games"][0]["winner"] == "Kansas City Chiefs"
+    assert data["status"]["state"] == "final"
+
+
+def test_a_final_today_row_alone_makes_the_payload_non_empty_for_the_validator():
+    from orchestrator.rag_validator import ValidationResult, validator
+
+    data = asyncio.run(ss.team_events(fake_client([], [], [game("post", "10", "27")]), TEAM, now=NOW))
+    result, _reason, _ = validator.validate_sports_response(data, "did the ravens win")
+    assert result != ValidationResult.EMPTY
+    empty = asyncio.run(ss.team_events(fake_client([], [], []), TEAM, now=NOW))
+    assert validator.validate_sports_response(empty, "did the ravens win")[0] == ValidationResult.EMPTY  # control
+
+
+def test_a_final_today_row_already_in_last_is_not_duplicated():
+    row = dict(last(date=TODAY, hs="10", as_="27"), strAwayTeam="Kansas City Chiefs")
+    data = asyncio.run(ss.team_events(fake_client([row], [], [game("post", "10", "27")]), TEAM, now=NOW))
+    assert len(data["last_games"]) == 1
+
+
+def test_an_explicit_provider_tie_is_preserved_as_a_tie_not_a_missing_winner():
+    tied = dict(last(hs=None, as_=None), winner="Tie")
+    data = asyncio.run(ss.team_events(fake_client([tied], [], []), TEAM, now=NOW))
+    ev = data["last_games"][0]
+    assert ev["winner"] is None and ev["tie"] is True and ev["result"] == "tie"
+    unknown = asyncio.run(ss.team_events(fake_client([last(hs=None, as_=None)], [], []), TEAM, now=NOW))
+    assert "tie" not in unknown["last_games"][0]  # control: unknown score is not a tie
+
+
+def test_equal_scores_are_a_tie_in_events_and_headlines():
+    data = asyncio.run(ss.team_events(fake_client([last(hs="20", as_="20")], [], []), TEAM, now=NOW))
+    assert data["last_games"][0]["tie"] is True
+    out = ss.status_headline([], [], [game("post", "17", "17")], NOW)
+    assert out["tie"] is True and out["winner"] is None
+    assert ss.status_headline([], [], [game("post", "17", "3")], NOW)["tie"] is False
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, ""),  # unset: no default team
+        ("", ""),
+        ("  Real Madrid  ", "Real Madrid"),
+        ("St. Louis-Blues O'Neil", "St. Louis-Blues O'Neil"),
+        ("x" * 64, "x" * 64),
+        ("x" * 65, ""),
+        ("Team; drop table", ""),
+        ("Team\nnewline", ""),
+        ("<b>Team</b>", ""),
+    ],
+)
+def test_sports_default_team_is_stripped_validated_and_empty_by_default(monkeypatch, raw, expected):
+    from shared.config import AthenaConfig
+
+    if raw is None:
+        monkeypatch.delenv("SPORTS_DEFAULT_TEAM", raising=False)
+    else:
+        monkeypatch.setenv("SPORTS_DEFAULT_TEAM", raw)
+    assert AthenaConfig(_env_file=None).sports_default_team == expected
+
+
+def test_the_default_team_is_documented_and_never_named_in_code():
+    assert "SPORTS_DEFAULT_TEAM" in (ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+    assert "SPORTS_DEFAULT_TEAM=" in (ROOT / "config.env.example").read_text(encoding="utf-8")
+    assert '"Ravens"' not in (ROOT / "src/orchestrator/nodes/retrieve.py").read_text(encoding="utf-8")

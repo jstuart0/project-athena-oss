@@ -1434,7 +1434,7 @@ _REACH_WARNED_MAX = 256
 # Process-global reachability state. Tests reset it with ``_reset_reachability_state``.
 _reach_clock = time.monotonic
 _reach_cache: "OrderedDict[str, Tuple[bool, float]]" = OrderedDict()
-_reach_inflight: Dict[str, "asyncio.Future[bool]"] = {}
+_reach_inflight: Dict[str, "asyncio.Future[Optional[bool]]"] = {}
 _reach_warned: "OrderedDict[str, None]" = OrderedDict()
 
 
@@ -1458,10 +1458,24 @@ def _probe_origin(url: str) -> Optional[Tuple[str, int, str]]:
     return host, port, f"{parts.scheme}://{host}:{port}"
 
 
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip: "ipaddress.IPv6Address") -> Optional["ipaddress.IPv4Address"]:
+    if ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    if ip.sixtofour:
+        return ip.sixtofour
+    if ip in _NAT64_PREFIX:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
 def _forbidden_probe_address(addr: str) -> bool:
     """Link-local, cloud-metadata, multicast and unspecified targets are never probed.
 
-    Loopback and cluster-local names stay allowed (unlike
+    An IPv4 address embedded in an IPv6 one (mapped, 6to4, NAT64) is judged as
+    that IPv4 address. Loopback and cluster-local names stay allowed (unlike
     ``shared.url_safety.validate_service_host``): a RAG service legitimately
     lives on a Service DNS name or on the host itself.
     """
@@ -1469,9 +1483,23 @@ def _forbidden_probe_address(addr: str) -> bool:
         ip = ipaddress.ip_address(addr.split("%", 1)[0])
     except ValueError:
         return True
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(ip)
+        if embedded is not None:
+            return _forbidden_probe_address(str(embedded))
     return ip.is_link_local or ip.is_multicast or ip.is_unspecified
+
+
+def _candidate_refused(url: str) -> bool:
+    """A candidate that is not http/https, or whose literal IP host is forbidden, is never returned."""
+    target = _probe_origin(url)
+    if target is None:
+        return True
+    try:
+        ipaddress.ip_address(target[0])
+    except ValueError:
+        return False  # a hostname: its resolved addresses are checked when it is probed
+    return _forbidden_probe_address(target[0])
 
 
 async def _connect_probe(host: str, port: int) -> bool:
@@ -1518,22 +1546,27 @@ async def _reachable(url: str) -> bool:
 
     pending = _reach_inflight.get(key)
     if pending is not None:
-        return await asyncio.shield(pending)
+        outcome = await asyncio.shield(pending)
+        if outcome is None:  # the probing caller was cancelled: nothing was learned
+            return await _reachable(url)
+        return outcome
 
-    future: "asyncio.Future[bool]" = asyncio.get_running_loop().create_future()
+    future: "asyncio.Future[Optional[bool]]" = asyncio.get_running_loop().create_future()
     _reach_inflight[key] = future
-    ok = False
     try:
         ok = await _probe_url(url)
-    finally:
+    except BaseException:
         _reach_inflight.pop(key, None)
-        ttl = REACH_POSITIVE_TTL_SECONDS if ok else REACH_NEGATIVE_TTL_SECONDS
-        _reach_cache[key] = (ok, _reach_clock() + ttl)
-        _reach_cache.move_to_end(key)
-        while len(_reach_cache) > REACH_CACHE_MAX_ENTRIES:
-            _reach_cache.popitem(last=False)
         if not future.done():
-            future.set_result(ok)
+            future.set_result(None)
+        raise
+    _reach_inflight.pop(key, None)
+    ttl = REACH_POSITIVE_TTL_SECONDS if ok else REACH_NEGATIVE_TTL_SECONDS
+    _reach_cache[key] = (ok, _reach_clock() + ttl)
+    _reach_cache.move_to_end(key)
+    while len(_reach_cache) > REACH_CACHE_MAX_ENTRIES:
+        _reach_cache.popitem(last=False)
+    future.set_result(ok)
     return ok
 
 
@@ -1613,6 +1646,9 @@ async def get_rag_service_url(intent: str) -> Optional[str]:
     for source, lookup in sources:
         url = (await lookup(intent)) if lookup else (env_url() if env_url else None)
         if not url:
+            continue
+        if _candidate_refused(url):
+            _warn_unreachable_once(url, source, intent)
             continue
         if await _reachable(url):
             logger.info("rag_url_resolved", source=source, intent=intent)
