@@ -69,6 +69,9 @@ from shared.llm_context import MAX_BUCKET
 
 logger = logging.getLogger(__name__)
 
+MODEL_TAG_MAX_LENGTH = 128
+MODEL_TAG_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
 _FANOUT_CONFIRM_THRESHOLD_DEFAULT = 6
 _FANOUT_HARD_LIMIT_DEFAULT = 18
 _LLM_CONTEXT_GUARD_DEFAULT = "enforce"
@@ -131,6 +134,29 @@ class AthenaConfig(BaseSettings):
     # ------------------------------------------------------------------
     ollama_url: str = Field(default="http://localhost:11434")
     llm_service_url: str = Field(default="")
+    # athena_default_model: the model every component uses unless one is
+    #   configured for it (env ATHENA_DEFAULT_MODEL).
+    athena_default_model: str = Field(default="qwen3:4b-instruct-2507-q4_K_M")
+    # gateway_fallback_model: the Ollama model the gateway answers with when
+    #   the orchestrator can't, and the one an OpenAI "gpt-*" model name
+    #   resolves to. Empty (default) means use athena_default_model.
+    gateway_fallback_model: str = Field(default="")
+
+    @field_validator("athena_default_model", "gateway_fallback_model", mode="before")
+    @classmethod
+    def _validate_model_tag(cls, v: object, info) -> str:
+        default = "" if info.field_name == "gateway_fallback_model" else cls.model_fields[info.field_name].default
+        value = v.strip() if isinstance(v, str) else ""
+        if not value:
+            return default
+        if len(value) <= MODEL_TAG_MAX_LENGTH and MODEL_TAG_RE.fullmatch(value):
+            return value
+        logger.warning(
+            "model_tag_invalid: %s must be at most %d characters of letters, digits and . _ : / - "
+            "(got %d characters); using %s",
+            info.field_name.upper(), MODEL_TAG_MAX_LENGTH, len(value), default or "the default model",
+        )
+        return default
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -1,3 +1,5 @@
+# UNUSED LEGACY FILE: no gateway code or image reads this file. The gateway's
+# fallback model comes from GATEWAY_FALLBACK_MODEL / ATHENA_DEFAULT_MODEL.
 # LiteLLM Gateway Configuration
 # OpenAI-compatible API for Ollama models
 

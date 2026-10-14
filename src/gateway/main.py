@@ -306,9 +306,23 @@ _llm_backends_cache_time = 0
 # Model mapping (OpenAI -> Ollama) - Fallback if database is empty
 MODEL_MAPPING = {
     "gpt-3.5-turbo": "phi3:mini",
-    "gpt-4": "llama3.1:8b",
-    "gpt-4-32k": "llama3.1:8b",
 }
+
+
+def _fallback_model() -> str:
+    """The Ollama model the gateway answers with when it has to pick one:
+    GATEWAY_FALLBACK_MODEL, else ATHENA_DEFAULT_MODEL."""
+    config = _get_athena_config()
+    return config.gateway_fallback_model or config.athena_default_model
+
+
+def _resolve_ollama_model(requested: Optional[str]) -> str:
+    """An OpenAI name ("gpt-*") or an empty one resolves to an installed model;
+    a model the client named for Ollama passes through as sent."""
+    if not requested or requested.startswith("gpt-"):
+        return MODEL_MAPPING.get(requested or "") or _fallback_model()
+    return requested
+
 
 async def get_llm_backends():
     """
@@ -1313,6 +1327,114 @@ async def is_athena_query(messages: List[ChatMessage]) -> bool:
         return is_athena_query_keywords(messages)
 
 
+# What the caller hears when the orchestrator can't answer. A closed constant:
+# the gateway image has no orchestrator.model_safe_errors, and no upstream or
+# exception text may reach a client (test_gateway_spoken_failure.py).
+SPOKEN_FAILURE_TEXT = "Sorry, I couldn't finish that. Please try again in a moment."
+ORCHESTRATOR_ERROR_DETAIL = "Orchestrator error"
+# Statuses that say the orchestrator is unavailable. A deterministic 500 is a
+# bug in one request, not an outage, so it never counts toward the breaker.
+BREAKER_FAILURE_STATUSES = frozenset({502, 503, 504})
+
+
+class SpokenFailureCompletion(ChatCompletionResponse):
+    """A completion that carries the spoken failure, not an answer: callers
+    count the turn as an error, whatever HTTP status they return."""
+
+
+def _turn_status(response: ChatCompletionResponse) -> str:
+    return "error" if isinstance(response, SpokenFailureCompletion) else "success"
+
+
+def _failure_completion(
+    request: ChatCompletionRequest, *, return_session_id: bool = False, session_id: Optional[str] = None
+) -> Union[ChatCompletionResponse, tuple]:
+    """The spoken failure as a completion. With return_session_id it is the
+    (completion, session_id) tuple /ha/conversation unpacks; the device keeps
+    the session it had, so a failed turn doesn't drop its context."""
+    completion = SpokenFailureCompletion(
+        id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        created=int(time.time()),
+        model=request.model,
+        choices=[ChatChoice(
+            index=0,
+            message=ChatMessage(role="assistant", content=SPOKEN_FAILURE_TEXT),
+            finish_reason="stop",
+        )],
+        usage={
+            "prompt_tokens": sum(len(msg.content.split()) for msg in request.messages),
+            "completion_tokens": len(SPOKEN_FAILURE_TEXT.split()),
+            "total_tokens": sum(len(msg.content.split()) for msg in request.messages)
+            + len(SPOKEN_FAILURE_TEXT.split()),
+        },
+    )
+    if return_session_id:
+        return completion, session_id or f"session-{uuid.uuid4().hex[:8]}"
+    return completion
+
+
+def _failure_status(exc: BaseException) -> Optional[int]:
+    """The upstream HTTP status, when the failure is one; None for a transport error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    return None
+
+
+def _log_orchestrator_failure(exc: BaseException, status: Optional[int]) -> None:
+    """The status and the exception class, never the exception's text."""
+    logger.error("orchestrator_failure", status=status, error_type=type(exc).__name__)
+
+
+def _spoken_failure_chunk(request: ChatCompletionRequest) -> str:
+    """The spoken failure as one OpenAI stream delta (the caller sends [DONE])."""
+    data = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [{"index": 0, "delta": {"content": SPOKEN_FAILURE_TEXT}, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _ollama_or_spoken_failure(
+    request: ChatCompletionRequest, *, channel: OutputChannel
+) -> ChatCompletionResponse:
+    """The Ollama fallback, or the spoken failure when that is down too."""
+    try:
+        return await route_to_ollama(request, channel=channel)
+    except Exception as exc:
+        request_counter.labels(endpoint="ollama_fallback", status="error").inc()
+        logger.error("orchestrator_fallback_failed", error_type=type(exc).__name__)
+        return _failure_completion(request)
+
+
+async def _answer_orchestrator_failure(
+    exc: BaseException,
+    request: ChatCompletionRequest,
+    *,
+    channel: OutputChannel,
+    breaker_enabled: bool,
+) -> ChatCompletionResponse:
+    """What to answer when the orchestrator call failed.
+
+    A 4xx is the caller's to hear about and raises as it always has. A 5xx is
+    answered with the spoken failure (the breaker counts 502/503/504 only). A
+    transport error or timeout counts for the breaker and tries Ollama first.
+    """
+    status = _failure_status(exc)
+    _log_orchestrator_failure(exc, status)
+    request_counter.labels(endpoint="orchestrator", status="error").inc()
+    if status is not None and status < 500:
+        raise HTTPException(status_code=502, detail=ORCHESTRATOR_ERROR_DETAIL)
+    counts_for_breaker = status is None or status in BREAKER_FAILURE_STATUSES
+    if counts_for_breaker and breaker_enabled and orchestrator_circuit_breaker:
+        await orchestrator_circuit_breaker.record_failure()
+    if status is None:
+        return await _ollama_or_spoken_failure(request, channel=channel)
+    return _failure_completion(request)
+
+
 async def route_to_orchestrator(
     request: ChatCompletionRequest,
     device_id: Optional[str] = None,
@@ -1355,10 +1477,10 @@ async def route_to_orchestrator(
                 message="Falling back to Ollama due to circuit breaker"
             )
             # Fall back to Ollama immediately
+            fallback_response = await _ollama_or_spoken_failure(request, channel=OutputChannel.SPEECH)
             if return_session_id:
-                fallback_response = await route_to_ollama(request, channel=OutputChannel.SPEECH)
                 return fallback_response, f"session-{uuid.uuid4().hex[:8]}"
-            return await route_to_ollama(request, channel=OutputChannel.SPEECH)
+            return fallback_response
 
     try:
         # Extract user message
@@ -1374,7 +1496,7 @@ async def route_to_orchestrator(
                 "mode": "owner",  # Default to owner mode
                 "room": device_id or "unknown",  # Use device_id as room if available
                 "temperature": request.temperature,
-                "model": MODEL_MAPPING.get(request.model, "phi3:mini"),
+                "model": MODEL_MAPPING.get(request.model) or _fallback_model(),
                 # ATHENA-69 D24: set server-side only -- this gateway call is
                 # service-key-authenticated, never a value forwarded from an
                 # inbound request. Trusted for the orchestrator's owner-mode
@@ -1439,22 +1561,14 @@ async def route_to_orchestrator(
 
         return chat_response
 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Orchestrator error: {e}")
-        # Record failure with circuit breaker
-        if circuit_breaker_enabled and orchestrator_circuit_breaker:
-            await orchestrator_circuit_breaker.record_failure()
-        raise HTTPException(status_code=502, detail="Orchestrator error")
     except Exception as e:
-        logger.error(f"Failed to route to orchestrator: {e}", exc_info=True)
-        # Record failure with circuit breaker
-        if circuit_breaker_enabled and orchestrator_circuit_breaker:
-            await orchestrator_circuit_breaker.record_failure()
-        # Fall back to Ollama
+        answer = await _answer_orchestrator_failure(
+            e, request, channel=OutputChannel.SPEECH, breaker_enabled=circuit_breaker_enabled,
+        )
         if return_session_id:
-            fallback_response = await route_to_ollama(request, channel=OutputChannel.SPEECH)
-            return fallback_response, f"session-{uuid.uuid4().hex[:8]}"
-        return await route_to_ollama(request, channel=OutputChannel.SPEECH)
+            spoke_failure = isinstance(answer, SpokenFailureCompletion)
+            return answer, (session_id if spoke_failure and session_id else f"session-{uuid.uuid4().hex[:8]}")
+        return answer
 
 async def route_to_ollama(
     request: ChatCompletionRequest,
@@ -1472,8 +1586,7 @@ async def route_to_ollama(
     start_time = time.time()
 
     try:
-        # Map model name
-        ollama_model = MODEL_MAPPING.get(request.model, request.model)
+        ollama_model = _resolve_ollama_model(request.model)
 
         # Convert messages format
         messages = [
@@ -1556,14 +1669,14 @@ async def route_to_ollama(
         )
 
     except Exception as e:
-        logger.error(f"Ollama error: {e}", exc_info=True)
+        logger.error("ollama_error", error_type=type(e).__name__)
         raise HTTPException(status_code=500, detail="LLM service error")
 
 async def stream_response(request: ChatCompletionRequest) -> AsyncIterator[str]:
     """Stream response from Ollama (orchestrator doesn't support streaming yet)."""
     try:
         # Only Ollama supports streaming for now
-        ollama_model = MODEL_MAPPING.get(request.model, request.model)
+        ollama_model = _resolve_ollama_model(request.model)
         messages = [
             {"role": msg.role, "content": msg.content}
             for msg in request.messages
@@ -1597,7 +1710,7 @@ async def stream_response(request: ChatCompletionRequest) -> AsyncIterator[str]:
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        logger.error("ollama_stream_error", error=type(e).__name__, exc_info=True)
+        logger.error("ollama_stream_error", error_type=type(e).__name__)
         yield _stream_error_line()
 
 STREAM_ERROR_MESSAGE = "The request could not be completed."
@@ -1685,8 +1798,9 @@ async def route_chat_completion_to_orchestrator(
     via the same _orchestrator_openai_payload the streaming path uses, so
     both resolve the same OpenAI session (D11). Failure semantics match
     route_to_orchestrator exactly (3.5): an open breaker falls back to
-    Ollama; an HTTPStatusError records a breaker failure and raises 502;
-    any other exception records a breaker failure and falls back to Ollama.
+    Ollama; a 4xx raises 502; a 5xx is answered with the spoken failure and
+    counts toward the breaker only as 502/503/504; any other exception records
+    a breaker failure and falls back to Ollama, then to the spoken failure.
     """
     circuit_breaker_enabled = gateway_config.get("circuit_breaker_enabled", True) if gateway_config else True
 
@@ -1698,7 +1812,7 @@ async def route_chat_completion_to_orchestrator(
                 state=orchestrator_circuit_breaker.state.value,
                 message="Falling back to Ollama due to circuit breaker"
             )
-            return await route_to_ollama(request, channel=channel)
+            return await _ollama_or_spoken_failure(request, channel=channel)
 
     user_message = ""
     for msg in request.messages:
@@ -1742,16 +1856,10 @@ async def route_chat_completion_to_orchestrator(
             }
         )
 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Orchestrator error: {e}")
-        if circuit_breaker_enabled and orchestrator_circuit_breaker:
-            await orchestrator_circuit_breaker.record_failure()
-        raise HTTPException(status_code=502, detail="Orchestrator error")
     except Exception as e:
-        logger.error(f"Failed to route to orchestrator: {e}", exc_info=True)
-        if circuit_breaker_enabled and orchestrator_circuit_breaker:
-            await orchestrator_circuit_breaker.record_failure()
-        return await route_to_ollama(request, channel=channel)
+        return await _answer_orchestrator_failure(
+            e, request, channel=channel, breaker_enabled=circuit_breaker_enabled,
+        )
 
 
 async def stream_orchestrator_response(
@@ -1786,8 +1894,14 @@ async def stream_orchestrator_response(
                     yield f"{line}\n\n"
 
     except Exception as e:
-        logger.error("orchestrator_stream_error", error=type(e).__name__, exc_info=True)
-        yield _stream_error_line()
+        status = _failure_status(e)
+        _log_orchestrator_failure(e, status)
+        request_counter.labels(endpoint="orchestrator", status="error").inc()
+        if channel is OutputChannel.SPEECH and (status is None or status >= 500):
+            yield _spoken_failure_chunk(request)
+            yield "data: [DONE]\n\n"
+        else:
+            yield _stream_error_line()
 
 async def _check_new_conversation_limit(
     client_host: str,
@@ -1921,7 +2035,7 @@ async def chat_completions(
             trusted_voice=trusted_voice,
         )
 
-        request_counter.labels(endpoint="chat_completions", status="success").inc()
+        request_counter.labels(endpoint="chat_completions", status=_turn_status(response)).inc()
         return response
 
     except HTTPException:
@@ -1929,7 +2043,9 @@ async def chat_completions(
         raise
     except Exception as e:
         request_counter.labels(endpoint="chat_completions", status="error").inc()
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.error("chat_completions_unexpected_error", error_type=type(e).__name__)
+        if channel is OutputChannel.SPEECH:
+            return _failure_completion(request)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1988,6 +2104,32 @@ def _responses_to_chat_request(request: ResponsesAPIRequest) -> ChatCompletionRe
         max_tokens=request.max_output_tokens,
         user=request.user,
         session_id=request.session_id,
+    )
+
+
+def _responses_from_completion(response: ChatCompletionResponse) -> ResponsesAPIResponse:
+    """A ChatCompletionResponse as a Responses API response."""
+    response_text = ""
+    if response.choices:
+        response_text = response.choices[0].message.content or ""
+
+    return ResponsesAPIResponse(
+        id=f"resp_{response.id}",
+        object="response",
+        created_at=response.created,
+        status="completed",
+        model=response.model,
+        output=[
+            ResponsesAPIOutput(
+                type="message",
+                id=f"msg_{uuid.uuid4().hex[:8]}",
+                status="completed",
+                role="assistant",
+                content=[{"type": "output_text", "text": response_text}]
+            )
+        ],
+        output_text=response_text,
+        usage=response.usage
     )
 
 
@@ -2069,31 +2211,9 @@ async def responses_api(
             trusted_voice=trusted_voice,
         )
 
-        # Convert ChatCompletionResponse to ResponsesAPIResponse
-        response_text = ""
-        if response.choices:
-            response_text = response.choices[0].message.content or ""
+        responses_response = _responses_from_completion(response)
 
-        responses_response = ResponsesAPIResponse(
-            id=f"resp_{response.id}",
-            object="response",
-            created_at=response.created,
-            status="completed",
-            model=response.model,
-            output=[
-                ResponsesAPIOutput(
-                    type="message",
-                    id=f"msg_{uuid.uuid4().hex[:8]}",
-                    status="completed",
-                    role="assistant",
-                    content=[{"type": "output_text", "text": response_text}]
-                )
-            ],
-            output_text=response_text,
-            usage=response.usage
-        )
-
-        request_counter.labels(endpoint="responses_api", status="success").inc()
+        request_counter.labels(endpoint="responses_api", status=_turn_status(response)).inc()
         return responses_response
 
     except HTTPException:
@@ -2101,7 +2221,9 @@ async def responses_api(
         raise
     except Exception as e:
         request_counter.labels(endpoint="responses_api", status="error").inc()
-        logger.error(f"Responses API error: {e}", exc_info=True)
+        logger.error("responses_api_unexpected_error", error_type=type(e).__name__)
+        if channel is OutputChannel.SPEECH:
+            return _responses_from_completion(_failure_completion(_responses_to_chat_request(request)))
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2201,8 +2323,8 @@ async def stream_responses_api(
                         first_chunk = False
                     await result_queue.put(chunk)
             except Exception as e:
-                logger.error(f"Orchestrator stream error: {e}")
-                await result_queue.put(f"ERROR:{e}")
+                logger.error("orchestrator_stream_collect_error", error_type=type(e).__name__)
+                await result_queue.put(f"ERROR:{type(e).__name__}")
             finally:
                 await result_queue.put(None)  # Sentinel to signal end
 
@@ -2263,7 +2385,7 @@ async def stream_responses_api(
             if chunk is None:
                 break  # Sentinel - orchestrator stream finished
             if isinstance(chunk, str) and chunk.startswith("ERROR:"):
-                logger.error(f"Orchestrator error in parallel stream: {chunk}")
+                logger.error("orchestrator_parallel_stream_error", error_type=chunk[len("ERROR:"):])
                 break
             if chunk.startswith("data: "):
                 data = chunk[6:].strip()
@@ -2318,7 +2440,7 @@ async def stream_responses_api(
         yield _event({"type": "response.completed", "response": _response_object("completed", [final_item])})
 
     except Exception as e:
-        logger.error("responses_stream_error", error=type(e).__name__, exc_info=True)
+        logger.error("responses_stream_error", error=type(e).__name__)
         # Send error event: a generic message, never the exception text
         yield _event({"type": "error", "code": "server_error", "message": STREAM_ERROR_MESSAGE, "param": None})
 
@@ -2941,7 +3063,7 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
         if should_continue:
             logger.info("ha_conversation_continue_enabled")
 
-        request_counter.labels(endpoint="ha_conversation", status="success").inc()
+        request_counter.labels(endpoint="ha_conversation", status=_turn_status(chat_response)).inc()
         logger.info("ha_conversation_completed", has_session=bool(orchestrator_session_id))
 
         return ha_response
@@ -2951,8 +3073,13 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
         raise
     except Exception as e:
         request_counter.labels(endpoint="ha_conversation", status="error").inc()
-        logger.error(f"HA conversation error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error("ha_conversation_unexpected_error", error_type=type(e).__name__)
+        # HA conversation is always spoken.
+        return HAConversationResponse(
+            response=_ha_response_payload(SPOKEN_FAILURE_TEXT, request.language),
+            conversation_id=request.conversation_id or f"session-{uuid.uuid4().hex[:8]}",
+            continue_conversation=False,
+        )
 
 
 # =============================================================================
@@ -3056,6 +3183,14 @@ async def proxy_music_stream(uri: str, request: Request):
         raise HTTPException(status_code=502, detail="Failed to proxy music stream")
 
 
+# Closed details for the music routes: Music Assistant's and the exception's
+# text stay in the logs' error_type, never in a response.
+MUSIC_SEARCH_FAILED = "Music search failed."
+MUSIC_PLAYBACK_FAILED = "Music playback failed."
+MUSIC_SERVICE_UNAVAILABLE = "Music service unavailable."
+MUSIC_REQUEST_FAILED = "Music request failed."
+
+
 class MusicSearchRequest(BaseModel):
     query: str
     media_types: list[str] = ["track", "artist"]
@@ -3094,7 +3229,7 @@ async def music_search(request: MusicSearchRequest):
                 await ws.send(json.dumps(auth_msg))
                 auth_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 if "error" in auth_response:
-                    logger.error("music_search_auth_failed", error=auth_response.get("details"))
+                    logger.error("music_search_auth_failed")
 
             # Send search command
             search_msg = {
@@ -3118,8 +3253,8 @@ async def music_search(request: MusicSearchRequest):
                            artists=len(results.get("artists", [])))
                 return results
             elif "error" in response:
-                logger.error("music_search_ma_error", error=response.get("details"))
-                raise HTTPException(status_code=500, detail=response.get("details", "Search failed"))
+                logger.error("music_search_ma_error")
+                raise HTTPException(status_code=500, detail=MUSIC_SEARCH_FAILED)
             else:
                 return response
 
@@ -3127,11 +3262,13 @@ async def music_search(request: MusicSearchRequest):
         logger.error("music_search_timeout")
         raise HTTPException(status_code=504, detail="Search timeout")
     except websockets.exceptions.WebSocketException as e:
-        logger.error("music_search_ws_error", error=str(e))
-        raise HTTPException(status_code=502, detail=f"WebSocket error: {e}")
+        logger.error("music_search_ws_error", error_type=type(e).__name__)
+        raise HTTPException(status_code=502, detail=MUSIC_SERVICE_UNAVAILABLE)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("music_search_error", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("music_search_error", error_type=type(e).__name__)
+        raise HTTPException(status_code=500, detail=MUSIC_REQUEST_FAILED)
 
 
 class MusicPlayRequest(BaseModel):
@@ -3173,7 +3310,7 @@ async def music_play(request: MusicPlayRequest):
                 await ws.send(json.dumps(auth_msg))
                 auth_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 if "error" in auth_response:
-                    logger.error("music_play_auth_failed", error=auth_response.get("details"))
+                    logger.error("music_play_auth_failed")
                     raise HTTPException(status_code=401, detail="MA authentication failed")
 
             # Send play command
@@ -3193,9 +3330,8 @@ async def music_play(request: MusicPlayRequest):
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
 
             if "error" in response:
-                error_detail = response.get("details", "Play command failed")
-                logger.error("music_play_ma_error", error=error_detail)
-                raise HTTPException(status_code=500, detail=error_detail)
+                logger.error("music_play_ma_error")
+                raise HTTPException(status_code=500, detail=MUSIC_PLAYBACK_FAILED)
 
             logger.info("music_play_success", player_id=request.player_id)
             return {"status": "ok", "player_id": request.player_id}
@@ -3204,13 +3340,13 @@ async def music_play(request: MusicPlayRequest):
         logger.error("music_play_timeout")
         raise HTTPException(status_code=504, detail="Play command timeout")
     except websockets.exceptions.WebSocketException as e:
-        logger.error("music_play_ws_error", error=str(e))
-        raise HTTPException(status_code=502, detail=f"WebSocket error: {e}")
+        logger.error("music_play_ws_error", error_type=type(e).__name__)
+        raise HTTPException(status_code=502, detail=MUSIC_SERVICE_UNAVAILABLE)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("music_play_error", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("music_play_error", error_type=type(e).__name__)
+        raise HTTPException(status_code=500, detail=MUSIC_REQUEST_FAILED)
 
 
 # In-memory MA auth token (can be set via /internal/ma-token endpoint)
