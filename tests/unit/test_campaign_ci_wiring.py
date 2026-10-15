@@ -68,6 +68,7 @@ GLOBS = (
     "tests/unit/test_admin_config_favorite_teams.py",
     "admin/backend/tests/test_favorite_teams_settings.py",
     "tests/unit/test_household_*.py",
+    "tests/unit/test_jarvis_web_household_*.py",
     "admin/backend/tests/test_household_*.py",
     "admin/backend/tests/integration/test_household_*.py",
     "tests/unit/test_context_detector_dining.py",
@@ -206,6 +207,9 @@ CAMPAIGN_TESTS = (
     "admin/backend/tests/test_household_settings_routes.py",
     "admin/backend/tests/test_household_settings_real_seam.py",
     "admin/backend/tests/integration/test_household_settings_postgres.py",
+    "tests/unit/test_jarvis_web_household_settings.py",
+    "tests/unit/test_jarvis_web_household_copy.py",
+    "admin/backend/tests/test_household_sms_country_code.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

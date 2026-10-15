@@ -31,6 +31,7 @@ from wyoming.event import Event
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
+from app.services.household_settings import resolve_location
 from app.utils.rag_urls import resolve_rag_base_url, check_ssrf_safe, check_ollama_ssrf_safe
 from shared.config import get_config
 
@@ -47,7 +48,7 @@ WYOMING_TTS_PORT = int(os.getenv("WYOMING_TTS_PORT", "10200"))
 # D8: the full-pipeline test's auto-detected RAG probe has no user-supplied
 # location, so it can't reuse test_rag_query's query.text. The airport probe
 # always uses a fixed, non-behavioral example code; it isn't derived from
-# DEFAULT_CITY/DEFAULT_STATE.
+# the household location.
 PROBE_AIRPORT_CODE = "JFK"
 
 
@@ -56,7 +57,7 @@ def _rag_probe_url(
 ) -> Optional[str]:
     """Build the synthetic probe URL for test_full_pipeline's auto-detected
     RAG connector. Returns None when the probe can't run generically (the
-    weather probe needs a configured DEFAULT_CITY, or the RAG service host
+    weather probe needs a configured home city, or the RAG service host
     isn't resolvable via the registry/env/legacy chain -- ATHENA-113b:
     resolution goes through app.utils.rag_urls, the same per-service
     registry -> RAG_<NAME>_URL -> legacy RAG_HOST/RAG_SERVICE_HOST chain the
@@ -681,14 +682,12 @@ async def test_full_pipeline(
             port = port_map.get(rag_connector, 8010)
 
             # Call appropriate RAG service
-            cfg = get_config()
-            rag_url = _rag_probe_url(
-                rag_connector, port, cfg.default_city, os.getenv("DEFAULT_STATE", ""), db=db
-            )
+            home = resolve_location(db)
+            rag_url = _rag_probe_url(rag_connector, port, home.city, home.state, db=db)
 
             if rag_url is None:
-                if rag_connector == "weather" and not cfg.default_city:
-                    results["rag_skipped"] = f"no DEFAULT_CITY configured for {rag_connector} probe"
+                if rag_connector == "weather" and not home.city:
+                    results["rag_skipped"] = f"no home city configured (Base Knowledge or DEFAULT_CITY) for {rag_connector} probe"
                 else:
                     results["rag_skipped"] = f"'{rag_connector}' RAG service is not configured"
             else:

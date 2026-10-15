@@ -35,6 +35,7 @@ sys.modules["_test_jarvis_web_caller_mode_main"] = jarvis_main
 _spec.loader.exec_module(jarvis_main)
 
 import caller_auth  # noqa: E402 -- resolved from _JARVIS_BACKEND via sys.path, same module main.py imported
+import household  # noqa: E402 -- the same singleton main.py reads its appliance entities from
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -124,9 +125,12 @@ def _isolate_caller_auth_state(monkeypatch):
     # business logic -- set them truthy so gate tests exercise the gate,
     # not an unrelated config guard.
     monkeypatch.setattr(jarvis_main, "HA_TOKEN", "fake-ha-token")
-    monkeypatch.setattr(jarvis_main, "OVEN_ENTITY", "water_heater.test_oven")
-    monkeypatch.setattr(jarvis_main, "FRIDGE_ENTITY", "water_heater.test_fridge")
-    monkeypatch.setattr(jarvis_main, "FREEZER_ENTITY", "water_heater.test_freezer")
+    monkeypatch.setattr(household, "_cache", None)  # restored on teardown
+    household.install_for_test(sources={"jarvis_web": {
+        "oven_entity": "water_heater.test_oven",
+        "fridge_entity": "water_heater.test_fridge",
+        "freezer_entity": "water_heater.test_freezer",
+    }})
     caller_auth._configure_for_tests({"SERVICE_API_KEY": os.environ["SERVICE_API_KEY"]})
     caller_auth._reset_for_tests()
     yield

@@ -279,3 +279,59 @@ def test_pipeline_test_endpoint_blocks_private_ollama_host_with_no_network_call(
 
     assert response.status_code == 403
     assert response.json()["detail"]["error"] == "ssrf_blocked"
+
+
+def _install_fake_pipeline_session(monkeypatch):
+    """An aiohttp session whose every call answers 200 with an empty body."""
+    resp = MagicMock()
+    resp.status = 200
+    resp.json = AsyncMock(return_value={"response": "ok"})
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.post = MagicMock(return_value=ctx)
+    session.get = MagicMock(return_value=ctx)
+    session_ctx = MagicMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", MagicMock(return_value=session_ctx))
+
+
+def test_full_pipeline_weather_probe_uses_the_household_location(owner_client, db, monkeypatch):
+    """The probe's city and state come from resolve_location (the Base
+    Knowledge Everyone row when there is one), not from DEFAULT_CITY alone."""
+    from shared.household_settings import Location
+
+    monkeypatch.setenv("DEFAULT_CITY", "Denver")
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "localhost")
+    _clear_all_config_caches()
+    seen = []
+
+    def _probe(connector, port, city, state, db=None):
+        seen.append((connector, city, state))
+        return None
+
+    monkeypatch.setattr(voice_tests_module, "_rag_probe_url", _probe)
+    monkeypatch.setattr(voice_tests_module, "resolve_location",
+                        lambda _db: Location("Springfield", "IL", "Springfield, IL", "admin"))
+    _install_fake_pipeline_session(monkeypatch)
+
+    response = owner_client.post("/api/voice-tests/pipeline/test", json={"text": "what's the weather like"})
+
+    assert response.status_code == 200, response.text
+    assert seen == [("weather", "Springfield", "IL")]
+
+
+def test_full_pipeline_skips_the_weather_probe_when_no_home_city_is_set(owner_client, db, monkeypatch):
+    monkeypatch.delenv("DEFAULT_CITY", raising=False)
+    monkeypatch.delenv("DEFAULT_STATE", raising=False)
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "localhost")
+    _clear_all_config_caches()
+    _install_fake_pipeline_session(monkeypatch)
+
+    response = owner_client.post("/api/voice-tests/pipeline/test", json={"text": "what's the weather like"})
+
+    assert response.status_code == 200, response.text
+    skipped = response.json()["results"].get("rag_skipped", "")
+    assert "home city" in skipped and "DEFAULT_CITY" in skipped, response.json()

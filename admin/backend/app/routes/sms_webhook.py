@@ -27,6 +27,7 @@ from ..models import SMSIncoming, CalendarEvent, GuestSMSPreference
 from shared.config import get_config
 
 from app.services import service_urls
+from app.services.household_settings import resolve_sms_country_code
 
 logger = structlog.get_logger(__name__)
 
@@ -482,7 +483,7 @@ def find_guest_by_phone(
 
     Only confirmed, not-deleted stays with a phone on file are considered,
     and only an exact E.164 match counts (the booking's number is normalised
-    leniently, with SMS_DEFAULT_COUNTRY_CODE; the sender strictly). Tiers,
+    leniently, with the household SMS country code (admin, else SMS_DEFAULT_COUNTRY_CODE); the sender strictly). Tiers,
     first match wins:
 
     - "current": checkin <= now <= checkout, the earliest checkout first
@@ -497,10 +498,12 @@ def find_guest_by_phone(
     house reads for them).
     """
     now = now or datetime.now(timezone.utc)
-    country_code = get_config().sms_default_country_code
-    sender = to_e164(phone_number, country_code, strict=True)
+    # A strict sender is always international, so no country code applies to it
+    # and nothing is read from the database for a number that can't match.
+    sender = to_e164(phone_number, "", strict=True)
     if sender is None:
         return None
+    country_code = resolve_sms_country_code(db)
 
     def stays():
         return db.query(CalendarEvent).filter(
