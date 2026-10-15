@@ -937,7 +937,7 @@ def gw():
 
 
 def test_gateway_section_tuple_is_one_named_constant(gw):
-    assert gw.HOUSEHOLD_SECTIONS == ("gateway", "location")
+    assert gw.HOUSEHOLD_SECTIONS == ("gateway", "location", "speaker_rooms")
 
 
 def test_gateway_model_chain_admin_then_env_then_default(gw, monkeypatch):
@@ -984,5 +984,5 @@ def test_gateway_city_keyword_follows_a_matching_admin_location_only(gw, monkeyp
 
 def test_gateway_lifespan_source_configures_the_named_constant_and_closes_before_admin():
     source_text = (_SRC / "gateway" / "main.py").read_text()
-    assert "household.configure(sections=HOUSEHOLD_SECTIONS)" in source_text
+    assert "household.configure(sections=HOUSEHOLD_SECTIONS, spawn=_spawn_household_refresh)" in source_text
     assert source_text.index("household_reader.aclose()") < source_text.index("await admin_client.close()")

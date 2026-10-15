@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 import gateway.main as gw  # noqa: E402
 from gateway import speaker_room as sr  # noqa: E402
 from shared import ha_registry as hr  # noqa: E402
+from shared import household  # noqa: E402
 from shared.client_throttle import parse_networks  # noqa: E402
 
 RAW = json.loads(
@@ -420,11 +421,11 @@ def test_the_route_helper_believes_a_device_only_from_a_trusted_caller(monkeypat
 # HA_SATELLITE_ROOM_MAP: entity keys and device keys
 # ---------------------------------------------------------------------------
 
-MAP_JSON = json.dumps({"assist_satellite.study_voice": "study", STUDY: "galley"})
+MAP_ENTRIES = [{"key": "assist_satellite.study_voice", "room": "study"}, {"key": STUDY, "room": "galley"}]
 
 
 def test_satellite_room_map_inverts_entity_keys_only(monkeypatch):
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", hr.parse_satellite_room_map(MAP_JSON))
+    household.install_for_test(sources={"speaker_rooms": {"entries": MAP_ENTRIES}})
     assert gw._get_room_to_satellite_map() == {"study": "assist_satellite.study_voice"}
 
 
@@ -438,7 +439,7 @@ def test_satellite_room_map_never_sends_an_announcement_to_a_device_id(monkeypat
             posts.append(payload)
             return True
 
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", hr.parse_satellite_room_map(MAP_JSON))
+    household.install_for_test(sources={"speaker_rooms": {"entries": MAP_ENTRIES}})
     monkeypatch.setattr(gw, "gateway_ha", FakeGatewayHA())
     assert asyncio.run(gw.send_satellite_announcement("galley", "hello")) is False
     assert posts == []
