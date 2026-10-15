@@ -1963,12 +1963,13 @@ background, refreshed when a request finds it older than five minutes, and
 once more when an unknown device shows up). A room's name, aliases, lights, fans and sensors come from
 its area; a device inherits its parent device's area. Nothing in Athena
 names your rooms. `HA_AREAS=off` never connects: rooms then come only from
-`HA_LIGHT_GROUPS`, `HA_SATELLITE_ROOM_MAP` and the admin room groups.
+the Rooms page's **Room lights** and **Speaker rooms** (or, while those are unset,
+`HA_LIGHT_GROUPS` and `HA_SATELLITE_ROOM_MAP`) and the admin room groups.
 
 **The speaker's room**, as the gateway resolves it, in order:
 
-1. `HA_SATELLITE_ROOM_MAP`, by the device id or by the satellite entity on
-   that device (an override);
+1. the Rooms page's **Speaker rooms** (else `HA_SATELLITE_ROOM_MAP`), by the
+   device id or by the satellite entity on that device (an override);
 2. the registry's area for the device id;
 3. a guess, only when no device id was sent: exactly one voice satellite is
    not idle;
@@ -2021,7 +2022,7 @@ Athena can't vouch for (an unproven household request, or a service that
 doesn't send the trusted mark) reaches the lights under every Home Assistant
 light group, as before areas existed. A guest or any other non-owner audience
 (a degraded mode service, a public caller) reaches only the lamps of the
-`HA_LIGHT_GROUPS` groups and of the admin room groups, and is asked which room
+configured rooms (Rooms → **Room lights**, else `HA_LIGHT_GROUPS`) and of the admin room groups, and is asked which room
 if there are none. Lights with no area are included only when
 `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS=true`, and only for the callers that reach
 every area (a trusted owner).
@@ -2069,10 +2070,12 @@ A room light command ("turn on the kitchen lights") resolves to the smallest
 set of light entities that cover that room's lights, and writes each physical
 bulb at most once.
 
-1. **`HA_LIGHT_GROUPS`.** If the room has an entry, that entity is the room.
-   Keys match regardless of case, spaces or underscores (`living room`,
-   `Living_Room`). An entry naming an entity Home Assistant doesn't report is
-   logged and ignored. The same entry answers "are the kitchen lights on".
+1. **The configured room lights** (Rooms → **Room lights**, else
+   `HA_LIGHT_GROUPS`). If the room has an entry, those entities are the room:
+   one or several lights or groups. Room names match regardless of case,
+   spaces or underscores (`living room`, `Living_Room`). An entity Home
+   Assistant doesn't report is never written; it is logged and counts as not
+   responding (below). The same entry answers "are the kitchen lights on".
 2. **The area.** Otherwise, when Home Assistant has an area of that name (or
    alias), the room is the lamps in that area: lights assigned to it directly
    or through their device, minus anything that isn't a lamp. A light is not
@@ -2106,8 +2109,8 @@ bulb at most once.
    other lights' names (`outside_*`, `back_door_*`), so "outside" reaches
    `porch` and `patio` but not the other way round. Broader aliases such as `bed`, `work`, `family`,
    `primary` or a floor name are not synonyms, because as a word that opens
-   an id they would pull in other rooms' lights; use `HA_LIGHT_GROUPS` or a
-   room group for those.
+   an id they would pull in other rooms' lights; use a Room lights entry
+   (or `HA_LIGHT_GROUPS`) or a room group for those.
 5. **Cover.** A group that is part of another matched group is dropped, and
    groups that overlap only partly contribute just the lights not already
    covered, as individual lights. A cycle of groups counts as one light.
@@ -2767,6 +2770,8 @@ Preferences that used to come only from environment variables are set in the adm
 | `sms` | SMS Messaging → **Default country code** | Owner only | `SMS_DEFAULT_COUNTRY_CODE` |
 | `lights` | Devices (Home Assistant devices Athena uses) → **Room lights** | Owner only | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` |
 | `bed_warmer` | Devices → **Bed warmer** | Owner only | `HA_BED_WARMER_ENTITIES` |
+| `room_lights` | Rooms → **Room lights** | Owner only | `HA_LIGHT_GROUPS` |
+| `speaker_rooms` | Rooms → **Speaker rooms** | Owner only | `HA_SATELLITE_ROOM_MAP` |
 | `jarvis_web` | Devices → **Jarvis web app** | Owner only | `DEFAULT_ROOM`, `CLIMATE_ENTITY`, `MIN_TEMP`, `MAX_TEMP`, `OVEN_ENTITY_ID`, `FRIDGE_ENTITY_ID`, `FREEZER_ENTITY_ID`, `STOVE_COOK_MODE_SENSOR_ID`, `STOVE_DISPLAY_TEMP_SENSOR_ID`, `STOVE_TIMER_SENSOR_ID`, `FRIDGE_DOOR_SENSOR_ID` |
 
 The "owner" sections need the owner-only `manage_infrastructure` permission, because they decide what a voice command can switch or who a text message belongs to. An operator sees these cards read-only, with a note saying so, and the API doesn't return their values to a user without the permission (`restricted: true`). Anyone with shell access can still use the environment variables.
@@ -2790,10 +2795,22 @@ The "owner" sections need the owner-only `manage_infrastructure` permission, bec
 - A user reading the settings sees each URL as `scheme://host` with `url_masked: true`; only a service key gets the whole URL. Saving with the masked form for the same item keeps the stored URL (the card shows the URL read-only with a **Replace URL** button); any other use of the mask is refused (`url_masked_edit`), and a new full URL replaces the stored one.
 - Errors, `/health` messages and logs name a host, never a URL (a key in a path or query string can't leak). The transit and events services' own routes follow it: `GET /events/sources` returns `host` instead of `url`, and `GET /transit/route/{route_id}` reports its `feed_config` with `host` instead of `url` and without `origin` or `allow_private`. Anything that parsed those `url` fields needs the host form.
 - Transit feeds are fetched one at a time, so a many-feed install's first load is slower than before.
-- A reload that fails keeps what was loaded. If the loader fails, or every transit feed (or every community-event source) fails, the previous stops, events and config stay in place, `/health` names the failed feeds, and the same config is retried after 1, 2, 4, ... minutes (at most 30). A different config (an admin edit) is applied at once, `POST /transit/refresh` always tries now, and a load where only some feeds failed is kept without a retry. A first load that fails entirely is still committed (the service shows as configured, with the errors). Several searches that find the events cache empty share one scrape and wait for it up to 20 seconds.
+- A reload that fails keeps what was loaded. If the loader fails, or every transit feed (or every community-event source) fails, the previous stops, events and config stay in place, `/health` names the failed feeds, and the same config is retried after 1, 2, 4, ... minutes (at most 30). A different config (an admin edit) is applied at once, `POST /transit/refresh` always tries now, and a load where only some feeds failed is kept without a retry, so those feeds (or sources) have no stops or events until the config changes, `POST /transit/refresh` runs or the daily refresh does. A first load that fails entirely is still committed (the service shows as configured, with the errors). Several searches that find the events cache empty share one scrape and wait for it up to 20 seconds.
 - At startup the gateway and the RAG services wait at most 2.5 seconds in total for admin-backend; after that they use the environment until the next refresh.
 
 **API.** `GET /api/settings/household` takes a service key or a signed-in user with `read`, and `?sections=a&sections=b` limits it; names it doesn't know are dropped, so a newer reader can talk to an older admin-backend. Each section is `{"value": {...} | null, "revision": n, ...}` (`null` and revision 0 when nothing is stored). `PUT /api/settings/household/{section}` takes `{"value": {...}, "revision": n}` from a signed-in user with `write`; the section's own permission is checked first (`403 insufficient_role`), then the body (`422` listing field names and rule words, never the submitted text; `413` above 1 MiB for list sections, 64 KiB for the rest), then the revision (`409 stale_revision` if someone else saved first; reload and retry). `location` answers `405 section_read_only`. Every save writes a `household_settings_update` audit row with the old and new values (hosts or field names only for URLs; the Jarvis web default room is redacted), and a refused save on an owner-only section writes a `household_settings_refused` row, at most once per user, section and reason per minute. There's no database migration.
+
+**Room lights and speaker rooms.** Two Household settings on the **Rooms** page (the former Room Groups page, same address) replace the two JSON variables for most installs. Both are usually unnecessary, because Athena takes rooms and lights from Home Assistant's areas.
+
+- **Room lights** lists, per room, the lights (1 to 32 `light.*` entity ids; groups are fine) that answer a command for that room. It takes the place of `HA_LIGHT_GROUPS`, which allowed one entity per room. A room listed here uses only these lights; any other room still resolves from its Home Assistant area.
+- **Speaker rooms** lists, per voice satellite, the room it is in: a 32-character Home Assistant device id or an `assist_satellite.*` entity id. An entry wins over the satellite's Home Assistant area. Two satellite entities can't share a room (the announcement route needs one entity per room); device ids can.
+- **Precedence, per setting.** A saved list (an empty list included: "none") wins; "Use the server's setting" (stored as unset), no row, an admin-backend that predates the setting, or a service that hasn't reached admin-backend yet all fall back to `HA_LIGHT_GROUPS` / `HA_SATELLITE_ROOM_MAP`, parsed exactly as before. The cards say "the server's setting"; the variable names appear only here.
+- **Owner only.** Both need the owner-only `manage_infrastructure` permission to save, because they decide which devices a command writes and which room a voice command defaults to. The pickers that list Home Assistant's lights and voice satellites (`GET /api/settings/room-lights/candidates`, `GET /api/settings/speaker-rooms/satellites`) need it too, since they name every light and satellite in the house. Other users get the cards without values or pickers (a note says why). A refused save is audited without room names or ids.
+- **Pickup.** Services re-read every 60 seconds, with no restart. If admin-backend becomes unreachable, the last good **Room lights** value stays in force indefinitely (switching to the environment during an outage could bring back a mapping the owner removed). The last good **Speaker rooms** value is trusted for 600 seconds only; after that every service falls back to `HA_SATELLITE_ROOM_MAP` until a refresh succeeds, so the gateway and orchestrator always agree.
+- **Names.** A room name is 1 to 64 printable characters and can't be a reserved word that means a whole-house or speaker-relative scope ("whole house", "all", "here", "this room", and similar). Two entries can't share a room name once case, spaces and punctuation are ignored. At most 64 rooms or satellites per list. A read drops an invalid or duplicate item and logs a count (`household_section_invalid_items`), never the value.
+- **Configured lights Home Assistant doesn't report** are not written, and count as "not responding" in the reply and the all-down check. The whole-house command for a non-owner audience still writes every configured id, as the environment variable did.
+- **Scene fallback.** When a requested scene or script doesn't exist, the per-room fallback now runs through the same permission step as a direct light command: a light the request may not touch is removed (a guest never reaches a restricted bulb through it) and a fully denied fallback is refused. Its fan-out gate counts the ids written, whereas the direct room paths count the physical bulbs beneath a group; a group written by the fallback therefore counts as one.
+- **Residual.** "Are the kitchen lights on" is a read, and Reads need no guard: a status answer can name a light that a guest couldn't switch.
 
 **Adding a section** (for example another campaign's): append a `_spec(...)` to the registry in `src/shared/household_settings.py` (with its model, whether it is writable, and its permission), add its resolver to `RESOLVERS` in `src/shared/household.py`, and add the section name to the `configure(sections=...)` tuple of every process that reads it, in the same change. `tests/unit/test_household_settings_drift.py` fails when a resolver's section isn't configured by any process, and when any other module reads one of these settings from the environment or `AthenaConfig`.
 
@@ -3068,12 +3085,12 @@ rather than guessing a device/room your HA instance doesn't have. See
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HA_SATELLITE_ROOM_MAP` | *(empty)* | An override, not a requirement: JSON object mapping a Voice PE `assist_satellite` entity ID, or a 32-character Home Assistant device ID, to its room. Rooms normally come from Home Assistant's areas (see "Which room Athena assumes"); an entry here wins over the area. Room names are matched like `HA_LIGHT_GROUPS` keys. Satellite announcements (room to entity) use the entity ID entries only; device-ID entries are never an announce target. |
+| `HA_SATELLITE_ROOM_MAP` | *(empty)* | A fallback, read while no list is saved on the Rooms page's **Speaker rooms** card (or when the saved list is more than 10 minutes stale because admin-backend is unreachable). An override, not a requirement: JSON object mapping a Voice PE `assist_satellite` entity ID, or a 32-character Home Assistant device ID, to its room. Rooms normally come from Home Assistant's areas (see "Which room Athena assumes"); an entry here wins over the area. Room names are matched like Room lights names. Satellite announcements (room to entity) use the entity ID entries only; device-ID entries are never an announce target. |
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | Fallback (the Devices page's **Bed warmer** card wins when all five are saved). JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
 | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | Fallback, read only while no list is saved on the Devices page's **Room lights** card (a saved list adds to the built-in LED rule; `[]` here still turns the built-in off). JSON array of regexes (`re.search` on the entity id). A light is dropped when it matches, whether it was picked for a room by its area or only by name, and in "all the lights" (an area's lamps and the leaves of a light group alike); it still never applies to an `HA_LIGHT_GROUPS` entry itself (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. |
-| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
+| `HA_LIGHT_GROUPS` | *(empty)* | A fallback, read while no list is saved on the Rooms page's **Room lights** card. JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured lights gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
 | `HA_AREAS` | `auto` | `auto` reads Home Assistant's area, device and entity registries over its WebSocket API (read-only, in the background; needs `HA_URL` and `HA_TOKEN`). `off` never connects. Any other value logs an error and reads `off`. See "Which room Athena assumes". |
 | `HA_DEVICE_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs or addresses of clients whose Home Assistant device id the gateway believes, for the speaker's room, per-device sessions and follow-ups. A request that presents the gateway's own API key is trusted too. Empty and no gateway key: a device id is ignored. Keep it narrow (Home Assistant's address as `/32`); an entry wider than /24 (IPv4) or /64 (IPv6) logs `ha_device_client_networks_wide`, and one overlapping `TRUSTED_PROXY_CIDRS` is ignored with an error. |
 | `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS` | `false` | `true` lets an owner's "all the lights" also reach lights that have no Home Assistant area. Never for a guest or any other audience. |

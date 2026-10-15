@@ -49,11 +49,11 @@ data:
   # HA_AREAS: ""
   # HA_BED_WARMER_ENTITIES: ""
   # HA_DEVICE_CLIENT_NETWORKS: ""
-  # HA_LIGHT_GROUPS: ""
+  # HA_LIGHT_GROUPS: ""  # fallback for admin Rooms -> Room lights
   # HA_ROOM_LIGHT_EXCLUDE_ENTITIES: ""
   # HA_MUSIC_PLAYERS: ""
   # HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES: ""
-  # HA_SATELLITE_ROOM_MAP: ""
+  # HA_SATELLITE_ROOM_MAP: ""  # fallback for admin Rooms -> Speaker rooms
   # HA_TV_ENTITIES: ""
   # HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS: ""
   # HA_WRITE_FANOUT_CONFIRM_THRESHOLD: ""

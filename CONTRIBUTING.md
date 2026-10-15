@@ -199,10 +199,10 @@ to stay complete — when you add a field, add its row here too.
 | `transit_static_services` | `TRANSIT_STATIC_SERVICES` | `""` | JSON non-GTFS transit services (fixed schedules) |
 | `community_events_sources` | `COMMUNITY_EVENTS_SOURCES` | `""` | JSON community-event source definitions |
 | `default_amtrak_station` | `DEFAULT_AMTRAK_STATION` | `""` | Default Amtrak origin station code |
-| `ha_satellite_room_map` | `HA_SATELLITE_ROOM_MAP` | `""` | Voice PE `assist_satellite` entity → room map (takes priority over the generic friendly-name parse) |
+| `ha_satellite_room_map` | `HA_SATELLITE_ROOM_MAP` | `""` | Fallback for the Rooms page's **Speaker rooms** card (read through `household.speaker_rooms()`): Voice PE `assist_satellite` entity or device id → room map (takes priority over the generic friendly-name parse) |
 | `ha_tv_entities` | `HA_TV_ENTITIES` | `""` | Fallback room → Apple TV entity map, used only when the admin API is unreachable |
 | `ha_bed_warmer_entities` | `HA_BED_WARMER_ENTITIES` | `""` | Entity ids for a Sunbeam-via-Tuya bed-warmer integration |
-| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map: the authoritative group for room light commands and status, and the scene-activation-failed fallback (keys match regardless of case, spaces or underscores; a room with no entry is resolved by name, and gets no scene fallback) |
+| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Fallback for the Rooms page's **Room lights** card (read through `household.room_lights()`): room → light-group entity map, the authoritative lights for room light commands and status, and the scene-activation-failed fallback (keys match regardless of case, spaces or underscores; a room with no entry is resolved by name, and gets no scene fallback) |
 | `ha_room_light_exclude_entities` | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | `""` | JSON array of regexes (`re.search` on the entity id); a light picked for a room only by name is dropped when it matches. Unset = built-in LED-ring/status-LED pattern, `"[]"` = off |
 | `ha_music_players` | `HA_MUSIC_PLAYERS` | `""` | Fallback room → Music Assistant entity map, used only when the admin API is unreachable |
 | `ha_permission_fallback_restricted_entities` | `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES` | `""` | Entity-id regex patterns applied as the "degraded" permission set when the mode service is unreachable or rejecting (ATHENA-69 D4); empty string means "use the built-in default list", explicit `[]` means an outage grants unrestricted HA writes |
