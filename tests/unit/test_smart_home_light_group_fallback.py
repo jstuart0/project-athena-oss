@@ -31,10 +31,13 @@ sys.path.insert(0, "src")
 
 import orchestrator.smart_home_controller as shc  # noqa: E402
 from orchestrator import mode_permission  # noqa: E402
+from shared import household  # noqa: E402
 
 
 def _controller():
-    return shc.SmartHomeController(entity_manager=mock.MagicMock(), llm_router=mock.MagicMock())
+    manager = mock.MagicMock()
+    manager.get_entities = mock.AsyncMock(return_value={})
+    return shc.SmartHomeController(entity_manager=manager, llm_router=mock.MagicMock())
 
 
 def _run_as_owner(coro):
@@ -49,36 +52,22 @@ def _run_as_owner(coro):
 
 
 def _set_light_groups(monkeypatch, raw: str):
-    monkeypatch.setattr(shc, "_light_groups_cache", None)
-    monkeypatch.setattr(shc, "_light_groups_warned", False)
-    monkeypatch.setattr(shc, "get_config", lambda: mock.MagicMock(ha_light_groups=raw))
+    monkeypatch.setattr(household, "_config", lambda: mock.MagicMock(ha_light_groups=raw))
+    household.reset_room_settings_for_test()
 
 
-def test_invalid_json_yields_empty_dict_and_logs_warning_not_raise(monkeypatch):
-    """P9 (valerie r3): _get_light_groups used a stdlib logging.Logger but
-    called it with a structlog-style error=... kwarg, which stdlib logging
-    doesn't accept -- HA_LIGHT_GROUPS='{not json' raised TypeError outside
-    the try/except this function's callers expect to be protected by.
-    Mirrors tv_handler/music_handler's invalid-JSON tests. _get_light_groups
-    creates its own structlog logger locally (`import structlog;
-    logger = structlog.get_logger(__name__)`), so there's no module-level
-    `shc.logger` to monkeypatch -- stub structlog.get_logger itself."""
+def test_invalid_json_yields_empty_dict_and_logs_warning_not_raise(monkeypatch, caplog):
+    """HA_LIGHT_GROUPS='{not json' configures nothing and never raises into the
+    controller. The resolver (``shared.household``) logs the error class once
+    per raw value, never the text."""
     _set_light_groups(monkeypatch, "{not valid json")
-    calls = []
 
-    class _FakeLogger:
-        def info(self, event, **kw):
-            pass
+    with caplog.at_level("WARNING", logger="shared.household"):
+        assert shc._get_light_groups() == {}
+        assert shc._get_light_groups() == {}
 
-        def warning(self, event, **kw):
-            calls.append({"event": event, **kw})
-
-    import structlog
-    monkeypatch.setattr(structlog, "get_logger", lambda *a, **kw: _FakeLogger())
-
-    result = shc._get_light_groups()
-    assert result == {}
-    assert calls and calls[0]["event"] == "ha_light_groups_invalid_json"
+    events = [r.getMessage() for r in caplog.records if "ha_light_groups_invalid_json" in r.getMessage()]
+    assert events == ["ha_light_groups_invalid_json error_class=JSONDecodeError"]
 
 
 def _failing_ha_client():

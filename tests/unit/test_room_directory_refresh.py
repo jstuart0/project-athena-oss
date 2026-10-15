@@ -14,7 +14,6 @@ import copy
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 if str(SRC) not in sys.path:
@@ -23,6 +22,7 @@ if str(SRC) not in sys.path:
 from orchestrator import room_directory as rd  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from shared import ha_registry as hr  # noqa: E402
+from shared import household  # noqa: E402
 
 RAW = json.loads(
     (Path(__file__).resolve().parents[1] / "fixtures" / "ha_registry" / "house_a.json").read_text(encoding="utf-8")
@@ -45,8 +45,12 @@ class Fetcher:
         return copy.deepcopy(RAW)
 
 
-def config():
-    return SimpleNamespace(ha_light_groups="", ha_satellite_room_map="")
+def room_values():
+    """The empty (default) room lights and speaker rooms, as the provider's callables."""
+    return {
+        "room_lights": lambda: household.room_lights_from(None, ""),
+        "speaker_rooms": lambda: household.speaker_rooms_from(None, "", admin_age=None),
+    }
 
 
 def make(clock=None):
@@ -63,7 +67,7 @@ async def settle():
 def test_a_directory_read_of_a_registry_with_no_snapshot_starts_one_refresh_and_then_has_the_areas():
     async def go():
         clock, fetcher, registry = make()
-        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, config=config)
+        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, **room_values())
         assert provider.current().resolves("galley") is None
         await settle()
         calls_after_first = fetcher.calls
@@ -78,7 +82,7 @@ def test_a_directory_read_of_a_registry_with_no_snapshot_starts_one_refresh_and_
 def test_a_fresh_snapshot_costs_no_refresh():
     async def go():
         clock, fetcher, registry = make()
-        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, config=config)
+        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, **room_values())
         provider.current()
         await settle()
         for _ in range(20):
@@ -92,7 +96,7 @@ def test_a_fresh_snapshot_costs_no_refresh():
 def test_a_stale_snapshot_refreshes_once_and_two_reads_inside_the_interval_share_it():
     async def go():
         clock, fetcher, registry = make()
-        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, config=config)
+        provider = rd.RoomDirectoryProvider(registry, None, monotonic=clock, **room_values())
         provider.current()
         await settle()
         clock.now += 400  # past the TTL and the minimum interval
@@ -131,6 +135,6 @@ def test_the_smart_home_controllers_lookup_reads_through_the_same_door():
 
 def test_a_registry_that_is_off_is_never_asked_for_a_fetch():
     registry = hr.HARegistry(None)
-    provider = rd.RoomDirectoryProvider(registry, None, config=config)
+    provider = rd.RoomDirectoryProvider(registry, None, **room_values())
     provider.current()
     assert registry.state == hr.STATE_DISABLED and registry.read() is None

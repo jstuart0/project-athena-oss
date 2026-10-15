@@ -315,6 +315,7 @@ class RoomLights(list):
     several rooms' names: the list is then empty and the caller asks which."""
 
     ambiguous_rooms: tuple = ()
+    missing: int = 0
 
 
 def area_lamp_targets(

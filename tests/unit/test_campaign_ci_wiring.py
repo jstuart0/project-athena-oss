@@ -264,6 +264,7 @@ PREEXISTING_SHARED_STATE: Dict[str, str] = {
     "tests/unit/test_smart_home_controller_permissions.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_write_fanout_confirmation.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_reviewed_route_callers_wire.py": "setdefault for ADMIN_API_URL only; shared the orchestrator-behaviour step at the base",
+    "tests/unit/test_smart_home_light_group_fallback.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_state_question_routing.py": "stubs langgraph and prometheus_client only when absent; shared the orchestrator-behaviour step at the base",
     "tests/unit/test_mode_permission.py": "stubs langgraph and prometheus_client only when absent, the same as test_ha_permission_guard.py in this step; unwired at the base, wired by the guard phase",
 }

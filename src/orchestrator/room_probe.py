@@ -1,6 +1,6 @@
 """Read-only probe of the Home Assistant area registry, for a roll.
 
-    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--utterances FILE]
+    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--sources] [--utterances FILE]
 
 Reads ``HA_URL`` and ``HA_TOKEN`` from the environment (through the one
 credential resolver), fetches the three registry lists ``--runs`` times over the
@@ -10,6 +10,10 @@ same read-only WebSocket session the orchestrator uses, and prints:
   area-key collision and unmatchable-room counts;
 * per area: the lamp targets a "turn on the lights" would write, and how many
   of the area's lights are unavailable;
+* ``--sources``: where the room lights and speaker rooms settings come from
+  (admin, the server's environment or neither), with counts only: rooms, lights,
+  configured lights Home Assistant doesn't report, and configured rooms that
+  are no area;
 * ``--shape``: the key names present in each registry list (never a value);
 * ``--utterances FILE`` (one utterance per line): what ``decide_room`` would
   do for each, from each area that has a voice satellite.
@@ -38,6 +42,7 @@ from shared import household
 from shared.ha_registry import RegistrySnapshot, snapshot_fetcher
 
 UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
+HOUSEHOLD_LOAD_TIMEOUT_S = 5.0
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -47,7 +52,7 @@ def _percentile(values: Sequence[float], fraction: float) -> float:
 
 class _Snapshot:
     """A registry that always has this one snapshot, for the directory provider
-    (which then reads the live HA_LIGHT_GROUPS and HA_SATELLITE_ROOM_MAP)."""
+    (which then reads the live room lights and speaker rooms settings)."""
 
     def __init__(self, snapshot: RegistrySnapshot):
         self._snapshot = snapshot
@@ -92,6 +97,20 @@ def satellite_area_keys(snapshot: RegistrySnapshot) -> List[str]:
     return [a.key for a in snapshot.areas if snapshot.entities_in(a.area_id, "assist_satellite")]
 
 
+def source_lines(provider: RoomDirectoryProvider, states: Mapping[str, Any]) -> List[str]:
+    """Where each room map comes from, counts only (no room names, ids or URLs)."""
+    sources = provider.sources()
+    lights, speakers = sources["room_lights"], sources["speaker_rooms"]
+    configured = {entity_id for ids in provider.room_lights().mapping.values() for entity_id in ids}
+    not_reported = sum(1 for entity_id in configured if entity_id not in states)
+    return [
+        f"room lights: source {lights['source']}, rooms {lights['rooms']}, lights {lights['lights']}, "
+        f"not reported by Home Assistant {not_reported}, rooms that are no area {lights['unmatched']}",
+        f"speaker rooms: source {speakers['source']}, device keys {speakers['device_keys']}, "
+        f"entity keys {speakers['entity_keys']}, rooms that are no area {speakers['unmatched']}",
+    ]
+
+
 def per_area_lines(
     snapshot: RegistrySnapshot, states: Mapping[str, Any], exclude: Sequence, *, show_names: bool,
 ) -> List[str]:
@@ -114,6 +133,7 @@ async def run(
     show_names: bool,
     utterances: Sequence[str],
     exclude: Sequence = (),
+    sources: bool = False,
     out: TextIO = sys.stdout,
 ) -> int:
     timings, raw = [], None
@@ -124,7 +144,8 @@ async def run(
     snapshot = RegistrySnapshot.from_raw(raw, fetched_at=time.monotonic())
     size = len(json.dumps(raw, separators=(",", ":")))
     counts = snapshot.counts()
-    directory = RoomDirectoryProvider(_Snapshot(snapshot), None).current()
+    provider = RoomDirectoryProvider(_Snapshot(snapshot), None)
+    directory = provider.current()
     print(f"fetch: runs {runs}, p50 {statistics.median(timings):.0f} ms, p95 {_percentile(timings, 0.95):.0f} ms, "
           f"payload {size} bytes", file=out)
     print(f"registry: areas {counts['areas']}, devices {counts['devices']}, entities {counts['entities']}, "
@@ -134,6 +155,10 @@ async def run(
     print("per area:", file=out)
     for line in per_area_lines(snapshot, states, exclude, show_names=show_names):
         print(line, file=out)
+
+    if sources:
+        for line in source_lines(provider, states):
+            print(line, file=out)
 
     if shape:
         print("shape:", file=out)
@@ -170,10 +195,18 @@ async def _live_states(resolver: StaticResolver, latch: HAAuthLatch) -> Mapping[
 
 
 async def _run_with_household(*args: Any, **kwargs: Any) -> int:
-    """Load the household settings once, so the exclusions match the live
-    process, then run the probe."""
-    await household.reader().current()
-    return await run(*args, exclude=_room_light_exclude_patterns(), **kwargs)
+    """Load the household settings once (bounded), so the exclusions and the
+    room maps match the live process, then run the probe. The reader fetches
+    every section and is closed on the way out; nothing is written."""
+    reader = household.reader()
+    try:
+        try:
+            await asyncio.wait_for(reader.current(), timeout=HOUSEHOLD_LOAD_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            pass
+        return await run(*args, exclude=_room_light_exclude_patterns(), **kwargs)
+    finally:
+        await reader.aclose()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -181,6 +214,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--shape", action="store_true")
     parser.add_argument("--areas", action="store_true", help="print area keys instead of numbering them")
+    parser.add_argument("--sources", action="store_true", help="print where the room lights and speaker rooms come from")
     parser.add_argument("--utterances", metavar="FILE")
     args = parser.parse_args(argv)
     service_key = os.environ.get("SERVICE_API_KEY")
@@ -197,7 +231,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return asyncio.run(_run_with_household(
             snapshot_fetcher(resolver, latch, caller="orchestrator_registry"),
             lambda: _live_states(resolver, latch),
-            runs=args.runs, shape=args.shape, show_names=args.areas,
+            runs=args.runs, shape=args.shape, show_names=args.areas, sources=args.sources,
             utterances=_read_utterances(args.utterances),
         ))
     except Exception as exc:

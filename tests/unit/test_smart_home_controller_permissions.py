@@ -42,6 +42,7 @@ import pytest
 import orchestrator.smart_home_controller as shc
 from orchestrator import mode_permission as mp
 from orchestrator.nodes import _runtime
+from shared import household
 
 
 def _run(coro):
@@ -129,16 +130,25 @@ async def _case_fan_turn_on_office(controller, ha_client):
     return await controller._handle_fan_intent("turn_on", "office", ha_client)
 
 
+async def _scene_denial_on_scope(controller, ha_client, parameters, **kwargs):
+    """_handle_scene_intent re-raises a denial (execute_intent turns it into the
+    refusal); the denial itself is already on the scope, which these tests read."""
+    try:
+        return await controller._handle_scene_intent("activate", parameters, ha_client, **kwargs)
+    except mp.HAWritePermissionDenied:
+        return None
+
+
 async def _case_scene_leaving_explicit(controller, ha_client):
-    return await controller._handle_scene_intent("activate", {"entity_id": "script.leaving"}, ha_client)
+    return await _scene_denial_on_scope(controller, ha_client, {"entity_id": "script.leaving"})
 
 
 async def _case_scene_goodbye_fallback(controller, ha_client):
     """The scene/script doesn't exist -- exercises the ':3976-3981'
     good-bye fallback (light.turn_off all + lock.lock all), which must
     never fire after the activation attempt is itself denied (D20)."""
-    return await controller._handle_scene_intent(
-        "activate", {"entity_id": "script.leaving_nonexistent"}, ha_client,
+    return await _scene_denial_on_scope(
+        controller, ha_client, {"entity_id": "script.leaving_nonexistent"},
         original_query="goodbye leaving nonexistent",
     )
 
@@ -150,8 +160,8 @@ async def _case_scene_goodbye_fallback_scene_domain(controller, ha_client):
     denial). A non-existent `scene.` entity takes the sibling branch
     (domain='scene', service='scene.turn_on') -- same fallback-suppression
     guarantee, different domain/service pair reaching authorize_ha_write."""
-    return await controller._handle_scene_intent(
-        "activate", {"entity_id": "scene.leaving_nonexistent"}, ha_client,
+    return await _scene_denial_on_scope(
+        controller, ha_client, {"entity_id": "scene.leaving_nonexistent"},
         original_query="goodbye leaving nonexistent",
     )
 
@@ -256,8 +266,8 @@ class TestScenePermissionDenialDoesNotStartFallback:
 
         async def _drive():
             with mp.ha_permission_scope(perms, mode="guest") as scope:
-                result = await controller._handle_scene_intent(
-                    "activate", {"entity_id": "scene.leaving_party"}, ha_client,
+                result = await _scene_denial_on_scope(
+                    controller, ha_client, {"entity_id": "scene.leaving_party"},
                     original_query="goodbye leaving party",
                 )
                 return result, list(scope.denials)
@@ -441,10 +451,11 @@ class TestWholeHouseFanOutDenialSurfacing:
         }
         em = _fake_entity_manager()
         em.get_entities = AsyncMock(return_value=entities)
-        monkeypatch.setattr(shc, "_light_groups_cache", None)
-        monkeypatch.setattr(shc, "get_config", lambda: MagicMock(
-            ha_light_groups='{"house": "light.house_group"}', ha_whole_house_unassigned_lights=False,
+        monkeypatch.setattr(household, "_config", lambda: MagicMock(
+            ha_light_groups='{"house": "light.house_group"}',
         ))
+        household.reset_room_settings_for_test()
+        monkeypatch.setattr(shc, "get_config", lambda: MagicMock(ha_whole_house_unassigned_lights=False))
         controller = _controller(entity_manager=em)
         ha_client = _raw_ha_client()
         perms = _guest_perms(allowed_intents=["control"], restricted_entities=[r"^light\.owner_bedroom"])

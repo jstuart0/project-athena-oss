@@ -6,8 +6,9 @@ very name the parse was assigned to. The room and door decisions (and the
 "unprocessable" marker) are the server's to make, so a model that writes
 ``decided_access`` into its output can't decide which door a command opens.
 
-The two other ``json.loads`` calls parse operator environment variables, not
-model output, and are listed with that reason.
+``OPERATOR_ENV`` would list any ``json.loads`` that parses an operator
+environment variable instead of model output; none is left (the light groups
+and the bed warmer are parsed in ``shared.household``).
 """
 from __future__ import annotations
 
@@ -17,9 +18,7 @@ from pathlib import Path
 CONTROLLER = Path(__file__).resolve().parents[2] / "src" / "orchestrator" / "smart_home_controller.py"
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
-OPERATOR_ENV = {
-    "_get_light_groups": "HA_LIGHT_GROUPS, an operator setting",
-}
+OPERATOR_ENV: dict = {}
 
 
 def enclosing_function(tree: ast.AST, node: ast.AST):
@@ -72,8 +71,9 @@ def loads_sites(source: str):
 
 def test_population_floor_and_named_members():
     sites = loads_sites(CONTROLLER.read_text(encoding="utf-8"))
-    # The bed warmer's parse moved to shared.household (admin value, then env), so two sites remain.
-    assert len(sites) >= 2
+    # The bed warmer's and the light groups' parses moved to shared.household (admin value, then env),
+    # so one site remains.
+    assert len(sites) >= 1
     assert "_model_object" in {name for name, _ in sites}
     assert set(OPERATOR_ENV) <= {name for name, _ in sites}, "an allowlisted site no longer exists: drop it"
 

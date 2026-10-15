@@ -10,12 +10,13 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 from . import access_target, room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
+from shared import household
 from shared.config import get_config
 from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_count_too_low
 from shared.local_time import local_now
@@ -590,52 +591,42 @@ def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
     return None
 
 
-_light_groups_cache: Optional[Dict[str, str]] = None
-_light_groups_warned = False
+class _RoomLightIds(tuple):
+    """One room's configured light ids. A room with exactly one id still equals
+    that bare id string, the form ``_get_light_groups`` returned before a room
+    could list several (``test_room_lights_golden.py`` pins it)."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return len(self) == 1 and self[0] == other
+        return tuple.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    __hash__ = tuple.__hash__
 
 
-def _get_light_groups() -> Dict[str, str]:
-    """room -> light-group entity ID, from HA_LIGHT_GROUPS (DC17 item 1).
+def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
+    """room key -> the light entity ids that room's commands write, from the
+    household's Room lights setting (admin), else ``HA_LIGHT_GROUPS``.
 
-    Keys are normalized once here (case, spaces and underscores are
-    equivalent: ``"Living Room"`` -> ``"living_room"``), so every reader
-    looks a room up with its ``"_".join(_tokens(room))`` form.
+    The directory provider is the single source when the lifespan has
+    registered one (so tests and the directory agree); otherwise the resolver
+    is read directly. Keys are ``room_key`` forms. Callers:
+    ``_resolve_room_lights``, ``_whole_house_lamp_rooms`` and
+    ``_configured_room_targets`` (``test_room_settings_drift.py`` pins the set).
 
-    The owner's authoritative group for a room: room light commands resolve
-    through it first (``_resolve_room_lights``), and the scene-activation-
-    failed fallback below uses it to dim/turn on a SPECIFIC room's lights
-    when the requested scene/script doesn't exist. Empty/unset means a room
-    with no configured group gets no scene fallback at all -- turning on
-    "all" lights house-wide when one room's group isn't configured is a
-    house-wide regression, not a safe default."""
-    global _light_groups_cache, _light_groups_warned
-    if _light_groups_cache is not None:
-        return _light_groups_cache
-
-    import structlog
-    logger = structlog.get_logger(__name__)
-
-    raw = get_config().ha_light_groups
-    if not raw:
-        if not _light_groups_warned:
-            logger.info("ha_light_groups_unset")
-            _light_groups_warned = True
-        _light_groups_cache = {}
-        return _light_groups_cache
-
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
-        _light_groups_cache = {"_".join(_tokens(str(k))): str(v) for k, v in parsed.items()}
-    except Exception as e:
-        # structlog's logger accepts arbitrary kwargs (error=...); the
-        # stdlib logging.Logger this used to be does not -- passing one
-        # raised TypeError here, outside the try/except this function's
-        # own callers expect to protect them (P9, valerie r3).
-        logger.warning("ha_light_groups_invalid_json", error=str(e))
-        _light_groups_cache = {}
-    return _light_groups_cache
+    The owner's authoritative lights for a room: room light commands resolve
+    through it first, and the scene-activation-failed fallback uses it to dim
+    or turn on a SPECIFIC room's lights when the requested scene/script
+    doesn't exist. Empty means a room with no configured lights gets no scene
+    fallback at all -- turning on "all" lights house-wide when one room isn't
+    configured is a house-wide regression, not a safe default."""
+    from orchestrator.nodes import _runtime
+    provider = _runtime.get_room_directory()
+    value = provider.room_lights() if provider is not None else household.room_lights()
+    return {room: _RoomLightIds(ids) for room, ids in value.mapping.items()}
 
 
 @dataclass(frozen=True)
@@ -2469,9 +2460,11 @@ Return ONLY valid JSON."""
         they never touch HA and have nothing to surface.
         """
         from orchestrator.mode_permission import (
+            HAWritePermissionDenied,
             current_ha_scope,
             ensure_permission_enforcing,
             ha_permission_scope,
+            permission_refusal_message,
             refusal_message,
         )
 
@@ -2667,7 +2660,13 @@ Return ONLY valid JSON."""
 
             # Handle scene/routine activation
             if device_type == 'scene':
-                return _finish(await self._handle_scene_intent(action, parameters, ha_client, original_query))
+                try:
+                    scene_answer = await self._handle_scene_intent(action, parameters, ha_client, original_query)
+                except HAWritePermissionDenied:
+                    # Already recorded on the scope: _finish surfaces the real
+                    # refusal; this text is only the floor if it somehow wasn't.
+                    scene_answer = permission_refusal_message(("scene",), scope)
+                return _finish(scene_answer)
 
             # Handle switch state questions (3.4): switch has no dedicated
             # handler today, so route its get_status read before the
@@ -2687,29 +2686,42 @@ Return ONLY valid JSON."""
             ))
 
     async def _resolve_room_lights(self, room: str) -> List[Dict]:
-        """A room's light entities: the owner's HA_LIGHT_GROUPS entry first,
-        else the entity manager's name resolution. Every match carries the
-        manager's five keys."""
+        """A room's light entities: the household's configured lights for the
+        room first (Room lights, else HA_LIGHT_GROUPS), else the registry
+        area's lights, else the entity manager's name resolution. Every match
+        carries the manager's five keys. For a configured room, ``missing`` is
+        how many configured ids Home Assistant doesn't report; they are not
+        written, and callers count them as not responding."""
         import structlog
         logger = structlog.get_logger(__name__)
 
         key = "_".join(_tokens(room))
-        entity_id = _get_light_groups().get(key) if key else None
-        if entity_id:
-            entity = (await self.entity_manager.get_entities()).get(entity_id)
-            if entity is not None:
+        configured = _get_light_groups().get(key, ()) if key else ()
+        if configured:
+            entities = await self.entity_manager.get_entities()
+            found: List[Dict] = []
+            for entity_id in configured:
+                entity = entities.get(entity_id)
+                if entity is None:
+                    continue
                 attrs = entity.get('attributes') or {}
                 raw_members = attrs.get('entity_id')
                 members = list(raw_members) if isinstance(raw_members, list) else []
-                logger.info("room_lights_resolved", source="configured", targets=1)
-                return [{
+                found.append({
                     'entity_id': entity_id,
                     'friendly_name': attrs.get('friendly_name', entity_id),
                     'members': members,
                     'state': entity.get('state'),
                     'type': 'group' if members else 'individual',
-                }]
-            logger.warning("ha_light_groups_entity_missing")
+                })
+            missing = len(configured) - len(found)
+            if missing:
+                logger.warning("ha_light_groups_entity_missing", missing=missing, configured=len(configured))
+            if found:
+                logger.info("room_lights_resolved", source="configured", targets=len(found))
+                result = RoomLights(found)
+                result.missing = missing
+                return result
         snapshot = self._registry_snapshot()
         find_area_lights = getattr(self.entity_manager, "find_area_lights", None)
         if snapshot is not None and key and find_area_lights is not None:
@@ -2749,10 +2761,14 @@ Return ONLY valid JSON."""
         ref = directory.ref(room_key(room or "")) if directory is not None else None
         return ref.label if ref is not None else (room or "").replace("_", " ")
 
-    async def _light_availability(self, gate_ids: Sequence[str], refresh_key: str) -> Tuple[int, int]:
+    async def _light_availability(
+        self, gate_ids: Sequence[str], refresh_key: str, *, missing: int = 0,
+    ) -> Tuple[int, int]:
         """(lights, lights that aren't responding) among the physical lights a
         command would write. A light is down when its state is unavailable or
-        unknown or it is absent from Home Assistant's states. When every one is
+        unknown or it is absent from Home Assistant's states. ``missing`` is
+        the number of configured lights Home Assistant doesn't report at all
+        (room paths don't write them); they count in both numbers. When every one is
         down, states are re-fetched once (at most once a minute per
         ``refresh_key``) before believing it; a failed re-fetch counts as
         still down."""
@@ -2776,7 +2792,7 @@ Return ONLY valid JSON."""
                     )
                 else:
                     dead = down(gate_ids)
-        return len(gate_ids), len(dead)
+        return len(gate_ids) + missing, len(dead) + missing
 
     async def _single_light_name(self, gate_ids: Sequence[str]) -> Optional[str]:
         """The friendly name of the one physical light a command writes, or
@@ -3674,7 +3690,9 @@ Return ONLY valid JSON."""
             return permission_refusal_message(("light",), current_ha_scope())
         target_lights = list(lt.write_ids)
 
-        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key=room)
+        light_total, light_down = await self._light_availability(
+            lt.gate_ids, refresh_key=room, missing=getattr(light_matches, 'missing', 0),
+        )
         if light_total and light_down == light_total:
             return f"The {room_label} lights aren't responding right now."
         single_name = await self._single_light_name(lt.gate_ids)
@@ -6127,9 +6145,61 @@ Return ONLY valid JSON."""
 
                 return f"I tried to activate {scene_name}, but it may not be configured yet. I'll try a basic version."
 
+        except HAWritePermissionDenied:
+            # The fallback's denial (like the activation's) is the refusal the
+            # caller surfaces; the catch-all below must never turn it into
+            # "I couldn't activate".
+            raise
         except Exception as e:
             logger.error(f"Scene activation error: {e}")
             return "I couldn't activate the scene or routine right now."
+
+    async def _configured_room_targets(self, key: str) -> Optional[LightTargets]:
+        """The lights configured for a room, finalized against the request's
+        permissions (a group with a denied bulb degrades to its permitted
+        bulbs), or None when the room has none configured. The scene fallback's
+        only way to its room's lights."""
+        configured = tuple(dict.fromkeys(_get_light_groups().get(key, ())))
+        if not configured:
+            return None
+        return await self._finalize_light_targets([], ids=configured, per_light=False)
+
+    async def _scene_fallback_room_lights(
+        self, key: str, brightness_pct: int, reply: str, ha_client, original_query: Optional[str],
+    ) -> Optional[str]:
+        """Turn on one configured room's lights for a scene fallback. Returns
+        the reply (or the fan-out question, or the permission refusal); None
+        when the room has no lights configured or the write failed, so the
+        caller falls through as it always has. A permission denial is never
+        swallowed."""
+        import structlog
+        from orchestrator.mode_permission import (
+            HAWritePermissionDenied, current_ha_scope, permission_refusal_message,
+        )
+        from . import write_fanout
+
+        lt = await self._configured_room_targets(key)
+        if lt is None:
+            return None
+        if lt.denied_all:
+            self._record_light_denials(lt, "turn_on")
+            return permission_refusal_message(("light",), current_ha_scope())
+        prompt = write_fanout.gate("light", "turn_on", lt.write_ids, original_query)
+        if prompt:
+            return prompt
+        self._record_light_denials(lt, "turn_on")
+        targets = lt.write_ids[0] if len(lt.write_ids) == 1 else list(lt.write_ids)
+        try:
+            await ha_client.call_service("light", "turn_on", {
+                "entity_id": targets,
+                "brightness_pct": brightness_pct,
+            })
+        except HAWritePermissionDenied:
+            raise
+        except Exception as exc:
+            structlog.get_logger(__name__).warning("scene_fallback_write_failed", error_class=type(exc).__name__)
+            return None
+        return reply
 
     async def _run_scene_fallback(self, query_lower: str, ha_client, original_query: str = None) -> Optional[str]:
         """ATHENA-128 4.3: the scene-activation fallback, extracted from
@@ -6145,22 +6215,12 @@ Return ONLY valid JSON."""
         from . import write_fanout
 
         if 'movie' in query_lower:
-            # Dim the living room's lights as a fallback (DC17 item 1: a
-            # specific room's group, configured via HA_LIGHT_GROUPS --
-            # never a house-wide "all" target).
-            living_room_group = _get_light_groups().get("living_room")
-            if living_room_group:
-                prompt = write_fanout.gate("light", "turn_on", (living_room_group,), original_query)
-                if prompt:
-                    return prompt
-                try:
-                    await ha_client.call_service("light", "turn_on", {
-                        "entity_id": living_room_group,
-                        "brightness_pct": 20
-                    })
-                    return "Movie mode ready! I've dimmed the living room lights."
-                except:
-                    pass
+            # Dim the living room's lights as a fallback (a specific room's
+            # configured lights -- never a house-wide "all" target).
+            reply = await self._scene_fallback_room_lights(
+                "living_room", 20, "Movie mode ready! I've dimmed the living room lights.", ha_client, original_query)
+            if reply is not None:
+                return reply
         elif 'good night' in query_lower or 'goodnight' in query_lower:
             # Turn off all lights as a fallback
             prompt = write_fanout.gate("light", "turn_off", ("all",), original_query, unbounded=True)
@@ -6172,21 +6232,12 @@ Return ONLY valid JSON."""
             except:
                 pass
         elif 'good morning' in query_lower:
-            # Turn on the office's lights as a fallback (DC17 item 1: a
-            # specific room's group, never "all").
-            office_group = _get_light_groups().get("office")
-            if office_group:
-                prompt = write_fanout.gate("light", "turn_on", (office_group,), original_query)
-                if prompt:
-                    return prompt
-                try:
-                    await ha_client.call_service("light", "turn_on", {
-                        "entity_id": office_group,
-                        "brightness_pct": 100
-                    })
-                    return "Good morning! I've turned on the lights."
-                except:
-                    pass
+            # Turn on the office's lights as a fallback (a specific room's
+            # configured lights, never "all").
+            reply = await self._scene_fallback_room_lights(
+                "office", 100, "Good morning! I've turned on the lights.", ha_client, original_query)
+            if reply is not None:
+                return reply
         elif 'leaving' in query_lower or 'goodbye' in query_lower:
             # Turn off all lights and lock doors as a fallback
             prompt = write_fanout.gate_many(
@@ -6206,23 +6257,12 @@ Return ONLY valid JSON."""
             except:
                 pass
         elif 'home' in query_lower:
-            # Turn on the living room's lights as a fallback (DC17 item 1:
-            # a specific room's group, never "all"; P9 fixed the room --
-            # the original hardcoded target here was light.living_room_all,
-            # not light.office_all).
-            arriving_group = _get_light_groups().get("living_room")
-            if arriving_group:
-                prompt = write_fanout.gate("light", "turn_on", (arriving_group,), original_query)
-                if prompt:
-                    return prompt
-                try:
-                    await ha_client.call_service("light", "turn_on", {
-                        "entity_id": arriving_group,
-                        "brightness_pct": 80
-                    })
-                    return "Welcome home! I've turned on the lights."
-                except:
-                    pass
+            # Turn on the living room's lights as a fallback (a specific
+            # room's configured lights, never "all").
+            reply = await self._scene_fallback_room_lights(
+                "living_room", 80, "Welcome home! I've turned on the lights.", ha_client, original_query)
+            if reply is not None:
+                return reply
 
         return None
 
@@ -6309,9 +6349,9 @@ Return ONLY valid JSON."""
                 members = group.get('members') or [group.get('entity_id')]
                 rooms.append(leaves_of(m for m in members if m))
         else:
-            for key, group_id in _get_light_groups().items():
-                if key not in excluded and group_id:
-                    rooms.append(leaves_of([group_id]))
+            for key, group_ids in _get_light_groups().items():
+                if key not in excluded and group_ids:
+                    rooms.append(leaves_of(group_ids))
             try:
                 room_groups = await get_admin_client().get_room_groups(enabled_only=True)
             except Exception:
@@ -6533,7 +6573,10 @@ Return ONLY valid JSON."""
             self._record_light_denials(lt, _multi_room_service)
             return permission_refusal_message(("light",), current_ha_scope())
         room_labels = [self._spoken_room(name) for name in resolved_rooms_keys]
-        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key="|".join(resolved_rooms_keys))
+        light_total, light_down = await self._light_availability(
+            lt.gate_ids, refresh_key="|".join(resolved_rooms_keys),
+            missing=sum(getattr(matches, 'missing', 0) for _, matches in resolved_rooms),
+        )
         if light_total and light_down == light_total:
             return f"The {_join_spoken(room_labels)} lights aren't responding right now."
         _multi_room_prompt = write_fanout.gate(
@@ -6634,7 +6677,10 @@ Return ONLY valid JSON."""
             self._record_light_denials(lt, _room_group_service)
             return permission_refusal_message(("light",), current_ha_scope())
         group_label = str(group_name).lower().replace("_", " ")
-        light_total, light_down = await self._light_availability(lt.gate_ids, refresh_key=f"group:{group_name}")
+        light_total, light_down = await self._light_availability(
+            lt.gate_ids, refresh_key=f"group:{group_name}",
+            missing=sum(getattr(matches, 'missing', 0) for matches in room_matches),
+        )
         if light_total and light_down == light_total:
             return f"The {group_label} lights aren't responding right now."
         _room_group_prompt = write_fanout.gate(

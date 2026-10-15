@@ -66,6 +66,7 @@ GATED = {
     "_execute_multi_room_command",
     "_execute_room_group_command",
     "_run_scene_fallback",
+    "_scene_fallback_room_lights",
     # Single-target writes, gated with one entity so commands pass
     # unchanged and a real state question is never written silently
     # (with routing reverted by the kill switch).
