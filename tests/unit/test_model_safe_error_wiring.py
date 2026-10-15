@@ -225,7 +225,7 @@ def test_no_raise_exception_builds_its_message_from_a_response_error():
                 if name == "Exception" and any(isinstance(n, ast.Attribute) and n.attr == "error" for n in ast.walk(node.exc)):
                     offenders.append(f"{path.relative_to(REPO)}:{node.lineno}")
     assert not offenders, offenders
-    assert rag_raises == 6, "the six failed-RAG-response raises (main.py x3, retrieve.py x3) are all RAGToolError"
+    assert rag_raises == 7, "the seven failed-RAG-response raises (main.py x3, retrieve.py x3, favorite_teams.py x1) are all RAGToolError"
 
 
 def test_user_safe_text_is_built_only_inside_make_user_safe():

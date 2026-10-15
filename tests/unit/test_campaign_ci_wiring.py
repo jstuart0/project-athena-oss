@@ -64,6 +64,9 @@ GLOBS = (
     "tests/unit/test_retrieve.py",
     "tests/unit/test_rag_url_reachability.py",
     "tests/unit/test_sports_status.py",
+    "tests/unit/test_favorite_teams_*.py",
+    "tests/unit/test_admin_config_favorite_teams.py",
+    "admin/backend/tests/test_favorite_teams_settings.py",
     "tests/unit/test_context_detector_dining.py",
     "tests/unit/test_semantic_cache_audience.py",
     "tests/unit/test_bench_observability.py",
@@ -190,6 +193,11 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_entity_freshness.py",
     "tests/unit/test_occupancy_answer.py",
     "tests/unit/test_occupancy_whole_house_words.py",
+    "tests/unit/test_favorite_teams_model.py",
+    "tests/unit/test_favorite_teams_choice.py",
+    "tests/unit/test_admin_config_favorite_teams.py",
+    "tests/unit/test_admin_frontend_favorite_teams.py",
+    "admin/backend/tests/test_favorite_teams_settings.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

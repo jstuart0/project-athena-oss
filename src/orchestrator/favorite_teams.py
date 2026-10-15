@@ -286,13 +286,14 @@ async def _pick(pool: Tuple[FavoriteTeam, ...], tasks: List["asyncio.Task"], tex
 
     if not done:
         await _reap(tasks[1:])
+        first: Optional[Dict[str, Any]] = None
+        failure: Optional[BaseException] = None
         try:
             first = await asyncio.wait_for(tasks[0], timeout=FIRST_CANDIDATE_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 - any lookup failure is the single-team failure path
-            logger.info("favorite_pick", candidates=len(pool), finished=0, chosen_index=None)
-            return DefaultPick(pool[0], failure=e, looked_up=True)
-        logger.info("favorite_pick", candidates=len(pool), finished=0, chosen_index=0)
-        return DefaultPick(pool[0], first, looked_up=True)
+            failure = e
+        logger.info("favorite_pick", candidates=len(pool), finished=0, chosen_index=0 if failure is None else None)
+        return DefaultPick(pool[0], first, failure=failure, looked_up=True)
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(pool)
     failures: Dict[int, BaseException] = {}

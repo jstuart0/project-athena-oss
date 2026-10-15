@@ -2748,6 +2748,22 @@ The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in bo
 | `DEFAULT_TIMEZONE` | `UTC` | The property's IANA zone (for example `America/New_York`). It's the assistant's clock: the time and date in prompts and fast-path answers, "today"/"tomorrow", year inference for spoken dates, event/sports/transit day windows, and scheduled "at 7:00" waits. The process `TZ` is never used for these, so a UTC pod still answers in local time. The images ship the zone database (`tzdata`). An empty or unknown value falls back to UTC and logs `local_timezone_invalid` once |
 | `DEFAULT_AMTRAK_STATION` | *(empty)* | Default Amtrak station code |
 
+### Favourite teams
+
+The teams a sports question means when it names none ("how did we do last night") are set in the admin panel, not in the environment: **Conversation Context -> Favourite teams**. The list is ordered, holds up to 8 teams, and each team has an optional league (pick one when the name is shared, such as Giants).
+
+| What | Detail |
+|------|--------|
+| Storage | One `system_settings` row, key `sports.favorite_teams`, category `sports`: `{"v":1,"revision":n,"teams":[{"name":"...","league":"nfl"|null}]}`. No migration. |
+| Routes | `GET /api/settings/favorite-teams` (the service key, or a signed-in user with `read`) and `PUT /api/settings/favorite-teams` (a signed-in user with `write`; a service key is refused). The `PUT` carries the whole list and the `revision` it was loaded at; a stale revision is `409 stale_revision`. Each save writes one audit row with counts and league codes, never names. |
+| Names | 1 to 64 characters of letters, digits, spaces and `. - '` (non-English letters are fine); no repeats, ignoring case. |
+| Leagues | `nfl`, `college-football`, `nba`, `college-basketball`, `wnba`, `mlb`, `nhl`, `mls`, `premier-league`, `la-liga`, `bundesliga`, `serie-a`, `ligue-1`, `liga-mx`, `champions-league`, `europa-league`, `international`. |
+| Who gets a default | Household callers only (the audience that sees Household base knowledge). Public, unresolved, degraded-mode and guest callers get no default team, so a guest asking "how did we do" is asked which team. |
+| A sport word narrows the list | "football" or "NFL" -> NFL and college football; "college football" -> college football; "basketball" or "NBA" -> NBA, WNBA, college basketball; "baseball" or "MLB" -> MLB; "hockey" or "NHL" -> NHL; "soccer" -> every soccer league; a league name -> that league. "Football" means American football; a household that says "football" for soccer should say "soccer" or the league. A favourite with no league survives narrowing only when no favourite has a matching league. A sport with no matching favourite means no default. |
+| Which favourite | One candidate: the usual lookup. Several (the first 4, in order): looked up at once, with a 3.5 second deadline, and the game the question is about wins. A question about the past ("did we win", "last night") takes the most recent finished game, even over a live one; about the future ("next", "when do we play") the soonest game; otherwise a live game, then the most recent finished one. Ties go to the team higher in the list. Only the lookups that finished by the deadline are ranked; none are started after it. |
+| Freshness | The orchestrator keeps the list for 60 seconds, and keeps the last good copy when admin-backend is unreachable (it asks again at most once a minute). A restart while admin-backend is down has no favourites until it returns. A cached answer built from the old list can replay for up to the sports cache time (5 minutes). |
+| Known limits | The model's own `get_sports_scores` argument is not rewritten; "how did the Giants do" (a named team) is unchanged. `ligue-1`, `liga-mx` and `europa-league` favourites are looked up by league in the retrieve path but passed by name only to the tool-calling tool, whose league list omits them. The live-scoreboard endpoint is not cached, so a several-favourite question makes up to four scoreboard requests. |
+
 ---
 
 ### Region-Configurable RAG Services

@@ -332,6 +332,7 @@ NOTED_READS = {
     "get_voice_config_all": (),
     "get_voice_interface_config": ("zz_interface",),
     "check_voice_services_health": (),
+    "get_favorite_teams": (),
 }
 
 
