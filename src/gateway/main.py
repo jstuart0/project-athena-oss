@@ -54,7 +54,7 @@ from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
 from shared.client_throttle import invalid_network_entries, parse_networks, read_forwarded_for
-from shared.ha_registry import SatelliteRoomMap, parse_satellite_room_map
+from shared.ha_registry import SatelliteRoomMap
 from shared.assistant_profile import get_voice_response_limits
 from shared.output_channel import (
     OutputChannel,
@@ -309,8 +309,19 @@ MODEL_MAPPING = {
 }
 
 
-# The household sections this process reads; the sibling campaign appends "speaker_rooms".
-HOUSEHOLD_SECTIONS = ("gateway", "location")
+# The household sections this process reads.
+HOUSEHOLD_SECTIONS = ("gateway", "location", "speaker_rooms")
+
+# Household refreshes scheduled from the request path; held until they finish
+# so the event loop's weak reference can't drop one mid-flight.
+_household_refresh_tasks: set = set()
+
+
+def _spawn_household_refresh(coro):
+    task = asyncio.ensure_future(coro)
+    _household_refresh_tasks.add(task)
+    task.add_done_callback(_household_refresh_tasks.discard)
+    return task
 
 
 def _fallback_model() -> str:
@@ -459,7 +470,7 @@ async def lifespan(app: FastAPI):
     admin_client = get_admin_client()
     logger.info("Admin config client initialized")
 
-    household_reader = household.configure(sections=HOUSEHOLD_SECTIONS)
+    household_reader = household.configure(sections=HOUSEHOLD_SECTIONS, spawn=_spawn_household_refresh)
     await household_reader.current()
 
     # Fetch gateway configuration from database (with env var fallbacks)
@@ -659,25 +670,12 @@ async def lifespan(app: FastAPI):
         await metric_client.aclose()
 
 
-# HA_SATELLITE_ROOM_MAP: {"<assist_satellite entity id or 32-hex device id>":
-# "<room>"}, configured rather than hardcoded (OSS-First). Parsed lazily (not
-# at import time) so a malformed value degrades to "unconfigured" instead of
-# crashing gateway startup. shared.ha_registry.parse_satellite_room_map splits
-# the two key kinds and reports bad keys as a count.
-_ha_satellite_room_map_cache: Optional[SatelliteRoomMap] = None
-_ha_satellite_room_map_warned = False
-
-
+# The voice-device-to-room map comes from household.speaker_rooms(): the admin
+# setting, else HA_SATELLITE_ROOM_MAP, else none. The call is synchronous and
+# does no I/O (it reads the cached snapshot and schedules a tracked refresh when
+# that is stale), so it is safe on the request path.
 def _get_satellite_room_map() -> SatelliteRoomMap:
-    global _ha_satellite_room_map_cache, _ha_satellite_room_map_warned
-    if _ha_satellite_room_map_cache is not None:
-        return _ha_satellite_room_map_cache
-    raw = _get_athena_config().ha_satellite_room_map
-    if not raw and not _ha_satellite_room_map_warned:
-        logger.info("ha_satellite_room_map_unset_satellite_features_disabled")
-        _ha_satellite_room_map_warned = True
-    _ha_satellite_room_map_cache = parse_satellite_room_map(raw)
-    return _ha_satellite_room_map_cache
+    return household.speaker_rooms().map
 
 
 def _get_room_to_satellite_map() -> Dict[str, str]:

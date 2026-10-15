@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
 sys.modules.setdefault("prometheus_client", mock.MagicMock())
 
 import gateway.main as gw  # noqa: E402
+from shared import household  # noqa: E402
 
 from .ha_auth_fakes import Clock, FakeHA, TOKEN, URL  # noqa: E402
 
@@ -211,7 +212,7 @@ def test_the_gateways_two_call_sites_go_through_gateway_ha(monkeypatch):
         fake = StatesHA()
         access, *_ = await build(fake)
         monkeypatch.setattr(gw, "gateway_ha", access)
-        monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", gw.parse_satellite_room_map('{"%s": "study"}' % SATELLITE))
+        household.install_for_test(sources={"speaker_rooms": {"entries": [{"key": SATELLITE, "room": "study"}]}})
         satellites = await gw._fetch_assist_satellite_states()
         announced = await gw.send_satellite_announcement("study", "hello")
         return satellites, announced, fake.rest_sent
@@ -255,7 +256,7 @@ def test_the_gateway_takes_nothing_from_the_environment_when_home_assistant_is_n
     monkeypatch.setattr(gw.httpx, "AsyncClient", Recording)
     monkeypatch.setattr(gw, "gateway_ha", None, raising=False)
     monkeypatch.setattr(gw, "ha_client", None, raising=False)
-    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", gw.parse_satellite_room_map('{"%s": "study"}' % SATELLITE))
+    household.install_for_test(sources={"speaker_rooms": {"entries": [{"key": SATELLITE, "room": "study"}]}})
     assert run(gw._fetch_assist_satellite_states()) == []
     assert run(gw.send_satellite_announcement("study", "hello")) is False
     assert sent == []
