@@ -385,6 +385,7 @@ ENV_NAMES = (
     "SMS_DEFAULT_COUNTRY_CODE", "HA_ROOM_LIGHT_EXCLUDE_ENTITIES", "HA_BED_WARMER_ENTITIES", "DEFAULT_ROOM",
     "CLIMATE_ENTITY", "MIN_TEMP", "MAX_TEMP", "OVEN_ENTITY_ID", "FRIDGE_ENTITY_ID", "FREEZER_ENTITY_ID",
     "STOVE_COOK_MODE_SENSOR_ID", "STOVE_DISPLAY_TEMP_SENSOR_ID", "STOVE_TIMER_SENSOR_ID", "FRIDGE_DOOR_SENSOR_ID",
+    "HA_LIGHT_GROUPS", "HA_SATELLITE_ROOM_MAP",
 )
 
 
@@ -484,6 +485,20 @@ CASES = {
         default_expect=("guest", "climate.thermostat", 65, 75, ""),
         partial={"min_temp": 62, "climate_entity": "climate.admin"},
         partial_expect=("Kitchen", "climate.admin", 60, 78, "water_heater.env_oven"),
+    ),
+    "room_lights": dict(
+        read=lambda r: dict(r.mapping),
+        admin={"rooms": [{"room": "Den", "lights": ["light.den_a", "light.den_b"]}]},
+        admin_expect={"den": ("light.den_a", "light.den_b")}, null={"rooms": None},
+        env={"HA_LIGHT_GROUPS": json.dumps({"Kitchen": "light.kitchen"})}, env_expect={"kitchen": ("light.kitchen",)},
+        default_expect={}, empty={"rooms": []}, empty_expect={},
+    ),
+    "speaker_rooms": dict(
+        read=lambda r: (dict(r.map.device_rooms), dict(r.map.entity_rooms)),
+        admin={"entries": [{"key": "a" * 32, "room": "Den"}, {"key": "assist_satellite.den", "room": "Den"}]},
+        admin_expect=({"a" * 32: "Den"}, {"assist_satellite.den": "Den"}), null={"entries": None},
+        env={"HA_SATELLITE_ROOM_MAP": json.dumps({"b" * 32: "Kitchen"})}, env_expect=({"b" * 32: "Kitchen"}, {}),
+        default_expect=({}, {}), empty={"entries": []}, empty_expect=({}, {}),
     ),
 }
 

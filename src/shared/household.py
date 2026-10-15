@@ -38,8 +38,12 @@ from shared.household_settings import (
     combine_sources,
     glob_to_regex,
     resolve_jarvis_web,
+    room_key,
     snapshot_from_body,
     validate_update,
+    DEVICE_KEY_RE,
+    RoomLightsSection,
+    SpeakerRoomsSection,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,14 +139,20 @@ def reset_for_test() -> None:
     global _reader, _configured, _configured_args, _seam
     _reader, _configured, _configured_args, _seam = None, None, None, False
     _warned_unconfigured.clear()
+    reset_room_settings_for_test()
+
+
+def _snapshot_of(name: str) -> Snapshot:
+    """The reader's snapshot, warning once when ``name`` is not a configured section."""
+    if _configured is not None and name not in _configured and name not in _warned_unconfigured:
+        _warned_unconfigured.add(name)
+        logger.warning("household_section_not_configured section=%s", name)
+    return reader().peek()
 
 
 def _section(name: str):
     """The stored model of a section, or ``None``."""
-    if _configured is not None and name not in _configured and name not in _warned_unconfigured:
-        _warned_unconfigured.add(name)
-        logger.warning("household_section_not_configured section=%s", name)
-    return reader().peek().sections.get(name)
+    return _snapshot_of(name).sections.get(name)
 
 
 def _config():
@@ -360,6 +370,158 @@ def jarvis_web() -> JarvisWeb:
     return resolve_jarvis_web(_section("jarvis_web"), os.environ)
 
 
+# ---------------------------------------------------------------------------
+# Room lights and speaker rooms
+# ---------------------------------------------------------------------------
+
+# How long the last good speaker-room answer is trusted once every refresh has
+# failed; after that the environment's map applies (the gateway and the
+# orchestrator both resolve through here, so they agree).
+SPEAKER_ROOMS_STALE_AFTER_SECONDS = 600.0
+
+_monotonic: Callable[[], float] = time.monotonic
+
+
+@dataclass(frozen=True)
+class RoomLightsValue:
+    """room key -> the light entity ids that room's commands write. ``version``
+    changes exactly when the mapping or its source does."""
+    mapping: Mapping[str, Tuple[str, ...]]
+    source: str
+    version: int
+
+
+@dataclass(frozen=True)
+class SpeakerRoomsValue:
+    """The voice-device-to-room map (``shared.ha_registry.SatelliteRoomMap``)."""
+    map: Any
+    source: str
+    version: int
+
+
+_logged_invalid_light_groups: set = set()
+
+
+def _env_light_groups(raw: str) -> Dict[str, Tuple[str, ...]]:
+    """``HA_LIGHT_GROUPS`` exactly as the controller always read it: keys normalized
+    with ``room_key`` (an empty one is kept), the last duplicate wins, every value
+    is ``str(value)``; unset, invalid JSON and a non-object give ``{}``."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
+        return {room_key(str(k)): (str(v),) for k, v in parsed.items()}
+    except Exception as exc:
+        if raw not in _logged_invalid_light_groups:
+            _logged_invalid_light_groups.add(raw)
+            logger.warning("ha_light_groups_invalid_json error_class=%s", type(exc).__name__)
+        return {}
+
+
+def room_lights_from(section: Optional[RoomLightsSection], env_raw: str) -> RoomLightsValue:
+    """Pure: the admin rooms when stored (``[]`` included), else the environment's
+    value, else none."""
+    if section is not None and section.rooms is not None:
+        mapping = {room_key(e.room): tuple(e.lights) for e in section.rooms}
+        source = SOURCE_ADMIN
+    else:
+        mapping = _env_light_groups(env_raw)
+        source = SOURCE_ENV if env_raw else SOURCE_DEFAULT
+    return RoomLightsValue(MappingProxyType(mapping), source, hash((source, tuple(mapping.items()))))
+
+
+def speaker_rooms_from(section: Optional[SpeakerRoomsSection], env_raw: str, *,
+                       admin_age: Optional[float]) -> SpeakerRoomsValue:
+    """Pure: the admin entries when stored and no older than the staleness cap, else
+    the environment's map, else none. ``admin_age`` is the seconds since the last
+    successful fetch (``None`` when unknown)."""
+    from shared.ha_registry import SatelliteRoomMap, parse_satellite_room_map
+
+    stale = admin_age is not None and admin_age > SPEAKER_ROOMS_STALE_AFTER_SECONDS
+    if section is not None and section.entries is not None and not stale:
+        devices = {e.key: e.room for e in section.entries if DEVICE_KEY_RE.fullmatch(e.key)}
+        entities = {e.key: e.room for e in section.entries if e.key not in devices}
+        room_map, source = SatelliteRoomMap(entities, devices), SOURCE_ADMIN
+    else:
+        room_map, source = parse_satellite_room_map(env_raw), SOURCE_ENV if env_raw else SOURCE_DEFAULT
+    content = (source, tuple(sorted(room_map.entity_rooms.items())), tuple(sorted(room_map.device_rooms.items())))
+    return SpeakerRoomsValue(room_map, source, hash(content))
+
+
+class _Memo:
+    """One resolver's last answer, valid while its inputs are the same objects."""
+
+    def __init__(self) -> None:
+        self.key: Optional[tuple] = None
+        self.snapshot: Optional[Snapshot] = None
+        self.value: Any = None
+        self.logged: Optional[tuple] = None
+        self.stale_logged = False
+
+    def hit(self, snapshot: Snapshot, rest: tuple) -> bool:
+        return self.value is not None and self.snapshot is snapshot and self.key == rest
+
+    def store(self, snapshot: Snapshot, rest: tuple, value: Any) -> Any:
+        self.snapshot, self.key, self.value = snapshot, rest, value
+        return value
+
+
+_room_lights_memo = _Memo()
+_speaker_rooms_memo = _Memo()
+
+
+def reset_room_settings_for_test() -> None:
+    global _room_lights_memo, _speaker_rooms_memo
+    _room_lights_memo, _speaker_rooms_memo = _Memo(), _Memo()
+    _logged_invalid_light_groups.clear()
+
+
+def room_lights() -> RoomLightsValue:
+    """The rooms' light ids: admin, then ``HA_LIGHT_GROUPS``, then none. Memoized
+    on the snapshot, its revision and the raw environment value, so a call with
+    nothing changed does no work. Last good admin data is kept through an outage."""
+    snapshot = _snapshot_of("room_lights")
+    raw = _config().ha_light_groups
+    rest = (snapshot.revisions.get("room_lights"), raw)
+    memo = _room_lights_memo
+    if memo.hit(snapshot, rest):
+        return memo.value
+    value = memo.store(snapshot, rest, room_lights_from(snapshot.sections.get("room_lights"), raw))
+    counts = (value.source, len(value.mapping), sum(len(v) for v in value.mapping.values()))
+    if memo.logged != counts:
+        memo.logged = counts
+        logger.info("room_lights_source source=%s rooms=%d lights=%d", *counts)
+    return value
+
+
+def speaker_rooms() -> SpeakerRoomsValue:
+    """The voice-device-to-room map: admin, then ``HA_SATELLITE_ROOM_MAP``, then none.
+    Unlike room lights the last good admin value is trusted for
+    ``SPEAKER_ROOMS_STALE_AFTER_SECONDS`` only."""
+    snapshot = _snapshot_of("speaker_rooms")
+    raw = _config().ha_satellite_room_map
+    age = _monotonic() - snapshot.loaded_at if snapshot.loaded and snapshot.loaded_at > 0 else None
+    section = snapshot.sections.get("speaker_rooms")
+    stale = age is not None and age > SPEAKER_ROOMS_STALE_AFTER_SECONDS and section is not None
+    rest = (snapshot.revisions.get("speaker_rooms"), raw, stale)
+    memo = _speaker_rooms_memo
+    if stale and not memo.stale_logged:
+        memo.stale_logged = True
+        logger.warning("speaker_rooms_admin_stale")
+    elif not stale:
+        memo.stale_logged = False
+    if memo.hit(snapshot, rest):
+        return memo.value
+    value = memo.store(snapshot, rest, speaker_rooms_from(section, raw, admin_age=age))
+    counts = (value.source, len(value.map.device_rooms), len(value.map.entity_rooms))
+    if memo.logged != counts:
+        memo.logged = counts
+        logger.info("speaker_rooms_source source=%s device_keys=%d entity_keys=%d", *counts)
+    return value
+
+
 # Every section has a resolver; a campaign that adds a section adds its resolver here.
 RESOLVERS: Mapping[str, Callable[[], Any]] = MappingProxyType({
     "location": location,
@@ -371,4 +533,6 @@ RESOLVERS: Mapping[str, Callable[[], Any]] = MappingProxyType({
     "lights": room_light_exclude_patterns,
     "bed_warmer": resolved_bed_warmer,
     "jarvis_web": jarvis_web,
+    "room_lights": room_lights,
+    "speaker_rooms": speaker_rooms,
 })

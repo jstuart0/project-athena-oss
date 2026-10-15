@@ -618,6 +618,212 @@ class JarvisWebSection(_Strict):
 
 
 # ---------------------------------------------------------------------------
+# Room lights and speaker rooms (owner-only; the household campaign's siblings)
+# ---------------------------------------------------------------------------
+
+MAX_ROOMS = 64
+MAX_LIGHTS_PER_ROOM = 32
+MAX_ROOM_NAME = 64
+SATELLITE_ENTITY_RE = re.compile(r"assist_satellite\.[a-z0-9_]+")
+DEVICE_KEY_RE = re.compile(r"[0-9a-f]{32}")
+_LIGHT_ID_RE = re.compile(r"light\.[a-z0-9_]+")
+
+
+def _room_name(value: Any) -> str:
+    """A room's display name: printable, 1 to 64 characters after trimming, with
+    a non-empty ``room_key`` that is not one of the reserved words."""
+    if not isinstance(value, str):
+        raise _err("bad_room")
+    text = unicodedata.normalize("NFC", value).strip()
+    if not text or len(text) > MAX_ROOM_NAME or not text.isprintable() or not room_key(text):
+        raise _err("bad_room")
+    if is_reserved_room(text):
+        raise _err("reserved_room")
+    return text
+
+
+def _light_id(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > MAX_ENTITY_LENGTH or not _LIGHT_ID_RE.fullmatch(value):
+        raise _err("not_a_light")
+    return value
+
+
+def _satellite_key(value: Any) -> str:
+    """A Home Assistant device id (32 hex) or an ``assist_satellite.`` entity id,
+    lowercased and trimmed."""
+    if not isinstance(value, str):
+        raise _err("bad_satellite_key")
+    text = value.strip().lower()
+    if len(text) > MAX_ENTITY_LENGTH or not (DEVICE_KEY_RE.fullmatch(text) or SATELLITE_ENTITY_RE.fullmatch(text)):
+        raise _err("bad_satellite_key")
+    return text
+
+
+RoomName = Annotated[str, BeforeValidator(_room_name)]
+LightId = Annotated[str, BeforeValidator(_light_id)]
+SatelliteKey = Annotated[str, BeforeValidator(_satellite_key)]
+
+
+def _bounded(limit: int, *, at_least_one: bool = False):
+    def check(value: Any) -> Any:
+        if value is None or not isinstance(value, list):
+            return value  # None is unset; a non-list fails the field's own type check
+        if len(value) > limit:
+            raise _err("too_many")
+        if at_least_one and not value:
+            raise _err("no_lights")
+        return value
+    return check
+
+
+def _indexed_error(model_name: str, kind: str, index: int, field_name: str) -> ValidationError:
+    """A validation error located at ``(index, field_name)`` of the list being checked,
+    so the caller can point at a row."""
+    return ValidationError.from_exception_data(model_name, [{
+        "type": PydanticCustomError(kind, "invalid value"), "loc": (index, field_name), "input": None,
+    }])
+
+
+class RoomLightEntry(_Strict):
+    room: RoomName
+    lights: Annotated[List[LightId], BeforeValidator(_bounded(MAX_LIGHTS_PER_ROOM, at_least_one=True))]
+
+    @field_validator("lights", mode="after")
+    @classmethod
+    def _distinct_lights(cls, value: List[str]) -> List[str]:
+        if len(set(value)) != len(value):
+            raise _err("duplicate_light")
+        return value
+
+
+class RoomLightsSection(_Strict):
+    """The lights a room's commands write: ``{rooms: [{room, lights}]}``. ``None`` is
+    unset (the reader uses the server's setting); ``[]`` is an answer: none."""
+    rooms: Annotated[Optional[List[RoomLightEntry]], BeforeValidator(_bounded(MAX_ROOMS))] = None
+
+    @field_validator("rooms", mode="after")
+    @classmethod
+    def _distinct_rooms(cls, value: Optional[List[RoomLightEntry]]) -> Optional[List[RoomLightEntry]]:
+        seen = set()
+        for index, entry in enumerate(value or []):
+            key = room_key(entry.room)
+            if key in seen:
+                raise _indexed_error("RoomLightsSection", "duplicate_room", index, "room")
+            seen.add(key)
+        return value
+
+
+class SpeakerRoomEntry(_Strict):
+    key: SatelliteKey
+    room: RoomName
+
+
+class SpeakerRoomsSection(_Strict):
+    """Which room a voice satellite is in: ``{entries: [{key, room}]}``, ``key`` a device
+    id or an ``assist_satellite.`` entity id."""
+    entries: Annotated[Optional[List[SpeakerRoomEntry]], BeforeValidator(_bounded(MAX_ROOMS))] = None
+
+    @field_validator("entries", mode="after")
+    @classmethod
+    def _distinct_entries(cls, value: Optional[List[SpeakerRoomEntry]]) -> Optional[List[SpeakerRoomEntry]]:
+        keys, entity_rooms = set(), set()
+        for index, entry in enumerate(value or []):
+            if entry.key in keys:
+                raise _indexed_error("SpeakerRoomsSection", "duplicate_key", index, "key")
+            keys.add(entry.key)
+            if SATELLITE_ENTITY_RE.fullmatch(entry.key):
+                room = room_key(entry.room)
+                if room in entity_rooms:
+                    raise _indexed_error("SpeakerRoomsSection", "duplicate_satellite_room", index, "room")
+                entity_rooms.add(room)
+        return value
+
+
+def _read_room_lights(name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Tolerant read (D8): a stored light that isn't ``light.*``, a reserved or repeated
+    room and an entry left with no lights are dropped; the rest is kept."""
+    rooms = data.get("rooms")
+    if not isinstance(rooms, list):
+        return data
+    kept: List[Any] = []
+    seen = set()
+    dropped = max(0, len(rooms) - MAX_ROOMS)
+    for entry in rooms[:MAX_ROOMS]:
+        if not isinstance(entry, dict):
+            kept.append(entry)
+            continue
+        try:
+            room = _room_name(entry.get("room"))
+        except PydanticCustomError:
+            dropped += 1
+            continue
+        key = room_key(room)
+        lights = entry.get("lights")
+        if key in seen:
+            dropped += 1
+            continue
+        if not isinstance(lights, list):
+            kept.append(entry)  # the model rejects it and the generic path drops the entry
+            continue
+        good: List[str] = []
+        for light in lights:
+            try:
+                good_id = _light_id(light)
+            except PydanticCustomError:
+                dropped += 1
+                continue
+            if good_id in good or len(good) >= MAX_LIGHTS_PER_ROOM:
+                dropped += 1
+                continue
+            good.append(good_id)
+        if not good:
+            dropped += 1
+            continue
+        seen.add(key)
+        kept.append({**entry, "room": room, "lights": good})
+    if dropped:
+        logger.error("household_section_invalid_items section=%s count=%d", name, dropped)
+    return {**data, "rooms": kept}
+
+
+def _read_speaker_rooms(name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return data
+    kept: List[Any] = []
+    keys, entity_rooms = set(), set()
+    dropped = max(0, len(entries) - MAX_ROOMS)
+    for entry in entries[:MAX_ROOMS]:
+        if not isinstance(entry, dict):
+            kept.append(entry)
+            continue
+        try:
+            key, room = _satellite_key(entry.get("key")), _room_name(entry.get("room"))
+        except PydanticCustomError:
+            dropped += 1
+            continue
+        if key in keys:
+            dropped += 1
+            continue
+        if SATELLITE_ENTITY_RE.fullmatch(key):
+            if room_key(room) in entity_rooms:
+                dropped += 1
+                continue
+            entity_rooms.add(room_key(room))
+        keys.add(key)
+        kept.append({**entry, "key": key, "room": room})
+    if dropped:
+        logger.error("household_section_invalid_items section=%s count=%d", name, dropped)
+    return {**data, "entries": kept}
+
+
+_READ_FILTERS: Mapping[str, Callable[[str, Dict[str, Any]], Dict[str, Any]]] = MappingProxyType({
+    "room_lights": _read_room_lights,
+    "speaker_rooms": _read_speaker_rooms,
+})
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -656,6 +862,10 @@ _REGISTRY: Tuple[SectionSpec, ...] = (
     _spec("bed_warmer", BedWarmerSection, permission="manage_infrastructure", units=(_BED_FIELDS,)),
     _spec("jarvis_web", JarvisWebSection, permission="manage_infrastructure",
           units=(("min_temp", "max_temp"),), audit_redact=("default_room",)),
+    _spec("room_lights", RoomLightsSection, permission="manage_infrastructure",
+          list_fields=("rooms",), audit="fields"),
+    _spec("speaker_rooms", SpeakerRoomsSection, permission="manage_infrastructure",
+          list_fields=("entries",), audit="fields"),
 )
 
 SECTIONS: Mapping[str, SectionSpec] = MappingProxyType({s.name: s for s in _REGISTRY})
@@ -737,6 +947,9 @@ def parse_value(name: str, value: Mapping[str, Any]) -> BaseModel:
     for list_field in spec.list_fields:
         if isinstance(data.get(list_field), list):
             data[list_field] = _dedupe_ids(name, list_field, data[list_field])
+    read_filter = _READ_FILTERS.get(name)
+    if read_filter is not None:
+        data = read_filter(name, data)
     for _ in range(200):
         try:
             return model.model_validate(data)

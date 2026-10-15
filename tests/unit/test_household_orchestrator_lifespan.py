@@ -72,7 +72,7 @@ def test_the_lifespan_configures_exactly_the_orchestrator_sections(monkeypatch):
 
     monkeypatch.setattr(household, "configure", spy)
     asyncio.run(_start_and_stop(main))
-    assert main.HOUSEHOLD_SECTIONS == ("location", "lights", "bed_warmer")
+    assert main.HOUSEHOLD_SECTIONS == ("location", "lights", "bed_warmer", "room_lights", "speaker_rooms")
     assert seen["sections"] == main.HOUSEHOLD_SECTIONS
     assert seen["spawn"] is _runtime.spawn_background
     assert set(main.HOUSEHOLD_SECTIONS) <= set(household_settings.SECTIONS)

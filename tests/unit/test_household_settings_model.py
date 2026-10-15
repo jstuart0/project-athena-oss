@@ -52,6 +52,7 @@ def bad(section, value, kind=None):
 def test_the_registry_has_the_nine_sections_in_order():
     assert list(hs.SECTIONS) == [
         "location", "amtrak", "transit", "community_events", "gateway", "sms", "lights", "bed_warmer", "jarvis_web",
+        "room_lights", "speaker_rooms",
     ]
     for name, spec in hs.SECTIONS.items():
         assert re.fullmatch(r"[a-z_]+", name)
@@ -63,13 +64,14 @@ def test_the_registry_has_the_nine_sections_in_order():
 
 def test_permissions_and_writability_match_the_decisions():
     owner_only = {n for n, s in hs.SECTIONS.items() if s.required_permission == "manage_infrastructure"}
-    assert owner_only == {"sms", "lights", "bed_warmer", "jarvis_web"}
+    assert owner_only == {"sms", "lights", "bed_warmer", "jarvis_web", "room_lights", "speaker_rooms"}
     assert [n for n, s in hs.SECTIONS.items() if not s.writable] == ["location"]
     assert hs.SECTIONS["bed_warmer"].units == (("level_left", "level_right", "power_main", "power_side_a", "power_side_b"),)
     assert hs.SECTIONS["jarvis_web"].units == (("min_temp", "max_temp"),)
     assert hs.SECTIONS["jarvis_web"].audit_redact == ("default_room",)
     assert {n: s.audit for n, s in hs.SECTIONS.items() if s.audit != "values"} == {
         "location": "fields", "amtrak": "fields", "transit": "hosts", "community_events": "hosts",
+        "room_lights": "fields", "speaker_rooms": "fields",
     }
 
 

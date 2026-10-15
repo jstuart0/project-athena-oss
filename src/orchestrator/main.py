@@ -1180,7 +1180,7 @@ def _build_ha_channels(
 
 # The household settings sections this process reads (one tuple, so a campaign
 # that adds a section and its resolver appends the name here in the same change).
-HOUSEHOLD_SECTIONS: tuple = ("location", "lights", "bed_warmer")
+HOUSEHOLD_SECTIONS: tuple = ("location", "lights", "bed_warmer", "room_lights", "speaker_rooms")
 
 # The first load never holds startup longer than the admin fetch's own timeout
 # plus a margin; on a miss the resolvers serve env until the first refresh.
