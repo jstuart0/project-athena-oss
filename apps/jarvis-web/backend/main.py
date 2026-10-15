@@ -23,6 +23,7 @@ import hmac
 import secrets
 import httpx
 from datetime import datetime, timedelta
+from urllib.parse import quote
 from typing import Optional, Dict, Any, List
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +39,7 @@ from sqlalchemy import text
 from admin_url import get_admin_url
 import caller_auth
 import client_throttle
+import household
 from service_key import is_header_safe, note_admin_refusal
 from tts_normalizer import normalize_for_tts
 from caller_auth import CLASS_AUTHENTICATED, Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
@@ -102,9 +104,32 @@ def _service_key_headers() -> Dict[str, str]:
     return {"X-Service-Key": SERVICE_API_KEY}
 
 
+_household_client: Optional[httpx.AsyncClient] = None
+
+
+async def _fetch_household() -> Optional[Dict[str, Any]]:
+    """The household settings jarvis-web reads, as admin-backend's GET body, or
+    ``None`` when admin has nothing to say (unset URL, a refusal, an error body).
+    Passed to ``household.configure``; the cache logs a raised error by type."""
+    global _household_client
+    if not ADMIN_BACKEND_URL:
+        return None
+    if _household_client is None:
+        _household_client = httpx.AsyncClient(timeout=2.0)
+    response = await _household_client.get(
+        f"{ADMIN_BACKEND_URL}/api/settings/household",
+        params=[("sections", "jarvis_web")],
+        headers=_service_key_headers(),
+    )
+    if response.status_code != 200:
+        note_admin_refusal(response.status_code, "/api/settings/household")
+        return None
+    body = response.json()
+    return body if isinstance(body, dict) else None
+
+
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
 ADMIN_BACKEND_URL = get_admin_url()
-DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
 
 # Persistent session DB config
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -180,7 +205,6 @@ HA_TOKEN = os.getenv("HA_TOKEN", "")
 
 # Voice services configuration (voice host STT/TTS)
 VOICE_API_URL = os.getenv("VOICE_API_URL", "http://localhost:10201")
-CLIMATE_ENTITY = os.getenv("CLIMATE_ENTITY", "climate.thermostat")
 
 # Upload limits for POST /api/voice/transcribe (ATHENA-63 Phase 2). This
 # endpoint has no auth dependency, so its multipart body is fully
@@ -191,10 +215,6 @@ CLIMATE_ENTITY = os.getenv("CLIMATE_ENTITY", "climate.thermostat")
 # same way regardless of whether Content-Length was honest or present.
 MAX_AUDIO_UPLOAD_BYTES = int(os.getenv("MAX_AUDIO_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 AUDIO_UPLOAD_READ_TIMEOUT_SECONDS = float(os.getenv("AUDIO_UPLOAD_READ_TIMEOUT_SECONDS", "30"))
-
-# Temperature limits for guest safety
-MIN_TEMP = int(os.getenv("MIN_TEMP", "65"))
-MAX_TEMP = int(os.getenv("MAX_TEMP", "75"))
 
 # The API docs are a development aid, off unless JARVIS_ENABLE_DOCS=true
 # (D28: the only anonymous surface is the relay and /api/health).
@@ -226,6 +246,9 @@ if caller_auth.SETTINGS.cors_origins:
 async def startup():
     global _engine, _db_available
 
+    household.configure(fetch=_fetch_household)
+    await household.warm()
+
     if not _SA_URL:
         logger.info("persistent_sessions_db_skipped", reason="DATABASE_URL_not_set")
         return
@@ -251,7 +274,11 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _engine, _db_available
+    global _engine, _db_available, _household_client
+    await household.aclose()
+    if _household_client is not None:
+        await _household_client.aclose()
+        _household_client = None
     if _engine:
         await _engine.dispose()
     _db_available = False
@@ -912,7 +939,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
             request_body = {
                 "query": message.message,
                 "mode": current_mode,
-                "room": DEFAULT_ROOM,
+                "room": household.settings().default_room,
                 "session_id": session_id,
                 "interface_type": "chat",  # pinned: a client string never picks the channel
                 "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
@@ -1155,7 +1182,7 @@ async def chat_stream(message: ChatMessage, request: Request):
             request_body = {
                 "query": message.message,
                 "mode": current_mode,
-                "room": DEFAULT_ROOM,
+                "room": household.settings().default_room,
                 "session_id": orch_session_id,
                 "interface_type": "chat",  # pinned: a client string never picks the channel
                 "source": message.source or "jarvis",
@@ -1554,11 +1581,12 @@ async def get_climate():
             status_code=503,
             detail="Climate control not configured"
         )
+    cfg = household.settings()
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             response = await client.get(
-                f"{HA_URL}/api/states/{CLIMATE_ENTITY}",
+                f"{HA_URL}/api/states/{quote(cfg.climate_entity, safe='')}",
                 headers=await get_ha_headers()
             )
 
@@ -1578,8 +1606,8 @@ async def get_climate():
                 hvac_mode=data.get("state", "off"),
                 hvac_action=attrs.get("hvac_action"),
                 humidity=attrs.get("current_humidity"),
-                min_temp=MIN_TEMP,
-                max_temp=MAX_TEMP
+                min_temp=cfg.min_temp,
+                max_temp=cfg.max_temp
             )
 
     except httpx.RequestError as e:
@@ -1600,12 +1628,13 @@ async def set_temperature(request: SetTemperatureRequest):
         )
 
     # Enforce guest-safe temperature limits
+    cfg = household.settings()
     temp = request.temperature
-    if temp < MIN_TEMP:
-        temp = MIN_TEMP
+    if temp < cfg.min_temp:
+        temp = cfg.min_temp
         logger.info("temperature_clamped_to_min", requested=request.temperature, set=temp)
-    elif temp > MAX_TEMP:
-        temp = MAX_TEMP
+    elif temp > cfg.max_temp:
+        temp = cfg.max_temp
         logger.info("temperature_clamped_to_max", requested=request.temperature, set=temp)
 
     try:
@@ -1614,7 +1643,7 @@ async def set_temperature(request: SetTemperatureRequest):
                 f"{HA_URL}/api/services/climate/set_temperature",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": CLIMATE_ENTITY,
+                    "entity_id": cfg.climate_entity,
                     "temperature": temp
                 }
             )
@@ -1650,6 +1679,7 @@ async def set_hvac_mode(mode: str):
             detail="Climate control not configured"
         )
 
+    cfg = household.settings()
     valid_modes = ["heat", "cool", "off", "heat_cool", "auto"]
     if mode not in valid_modes:
         raise HTTPException(
@@ -1663,7 +1693,7 @@ async def set_hvac_mode(mode: str):
                 f"{HA_URL}/api/services/climate/set_hvac_mode",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": CLIMATE_ENTITY,
+                    "entity_id": cfg.climate_entity,
                     "hvac_mode": mode
                 }
             )
@@ -2133,21 +2163,13 @@ async def _media_command(entity_id: str, service: str, data: Dict[str, Any] = No
 # Kitchen Appliances (Oven, Fridge, Freezer)
 # =============================================================================
 
-# Appliance entity IDs, configured via env (DC14 item 1, OSS-First) --
-# these name a specific GE appliance model's HA entities (exposed as
-# water_heater entities), not something every deployment has. Empty means
-# the corresponding endpoint reports the appliance isn't configured
-# instead of querying/calling a hardcoded entity that doesn't exist in
-# this deployment's HA instance.
-OVEN_ENTITY = os.getenv("OVEN_ENTITY_ID", "")
-FRIDGE_ENTITY = os.getenv("FRIDGE_ENTITY_ID", "")
-FREEZER_ENTITY = os.getenv("FREEZER_ENTITY_ID", "")
-
-# Related sensors
-STOVE_COOK_MODE_SENSOR = os.getenv("STOVE_COOK_MODE_SENSOR_ID", "")
-STOVE_DISPLAY_TEMP_SENSOR = os.getenv("STOVE_DISPLAY_TEMP_SENSOR_ID", "")
-STOVE_TIMER_SENSOR = os.getenv("STOVE_TIMER_SENSOR_ID", "")
-FRIDGE_DOOR_SENSOR = os.getenv("FRIDGE_DOOR_SENSOR_ID", "")
+# The 503 details say where the entity is set: the Devices page (admin) or the env var.
+OVEN_NOT_CONFIGURED = "Oven not configured. Set it on the admin Devices page or with OVEN_ENTITY_ID."
+FRIDGE_NOT_CONFIGURED = "Fridge not configured. Set it on the admin Devices page or with FRIDGE_ENTITY_ID."
+FREEZER_NOT_CONFIGURED = "Freezer not configured. Set it on the admin Devices page or with FREEZER_ENTITY_ID."
+FRIDGE_FREEZER_NOT_CONFIGURED = (
+    "Fridge/freezer not configured. Set them on the admin Devices page or with FRIDGE_ENTITY_ID/FREEZER_ENTITY_ID."
+)
 
 # Temperature limits for safety
 OVEN_MIN_TEMP = 170
@@ -2205,8 +2227,9 @@ async def get_oven_state():
     """Get current oven state, temperature, and cooking mode"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not OVEN_ENTITY:
-        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.oven_entity:
+        raise HTTPException(status_code=503, detail=OVEN_NOT_CONFIGURED)
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2214,7 +2237,7 @@ async def get_oven_state():
 
             # Get oven entity state
             oven_resp = await client.get(
-                f"{HA_URL}/api/states/{OVEN_ENTITY}",
+                f"{HA_URL}/api/states/{quote(cfg.oven_entity, safe='')}",
                 headers=headers
             )
 
@@ -2228,7 +2251,7 @@ async def get_oven_state():
             cook_mode = None
             try:
                 mode_resp = await client.get(
-                    f"{HA_URL}/api/states/{STOVE_COOK_MODE_SENSOR}",
+                    f"{HA_URL}/api/states/{quote(cfg.stove_cook_mode_sensor, safe='')}",
                     headers=headers
                 )
                 if mode_resp.status_code == 200:
@@ -2240,7 +2263,7 @@ async def get_oven_state():
             display_temp = None
             try:
                 temp_resp = await client.get(
-                    f"{HA_URL}/api/states/{STOVE_DISPLAY_TEMP_SENSOR}",
+                    f"{HA_URL}/api/states/{quote(cfg.stove_display_temp_sensor, safe='')}",
                     headers=headers
                 )
                 if temp_resp.status_code == 200:
@@ -2254,7 +2277,7 @@ async def get_oven_state():
             time_remaining = None
             try:
                 timer_resp = await client.get(
-                    f"{HA_URL}/api/states/{STOVE_TIMER_SENSOR}",
+                    f"{HA_URL}/api/states/{quote(cfg.stove_timer_sensor, safe='')}",
                     headers=headers
                 )
                 if timer_resp.status_code == 200:
@@ -2285,8 +2308,9 @@ async def set_oven_temperature(request: SetOvenTempRequest):
     """Set oven target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not OVEN_ENTITY:
-        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.oven_entity:
+        raise HTTPException(status_code=503, detail=OVEN_NOT_CONFIGURED)
 
     temp = request.temperature
     if temp < OVEN_MIN_TEMP or temp > OVEN_MAX_TEMP:
@@ -2301,7 +2325,7 @@ async def set_oven_temperature(request: SetOvenTempRequest):
                 f"{HA_URL}/api/services/water_heater/set_temperature",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": OVEN_ENTITY,
+                    "entity_id": cfg.oven_entity,
                     "temperature": temp
                 }
             )
@@ -2327,8 +2351,9 @@ async def set_oven_mode(request: SetOvenModeRequest):
     """Set oven cooking mode (Bake, Convection, etc.)"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not OVEN_ENTITY:
-        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.oven_entity:
+        raise HTTPException(status_code=503, detail=OVEN_NOT_CONFIGURED)
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2336,7 +2361,7 @@ async def set_oven_mode(request: SetOvenModeRequest):
                 f"{HA_URL}/api/services/water_heater/set_operation_mode",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": OVEN_ENTITY,
+                    "entity_id": cfg.oven_entity,
                     "operation_mode": request.mode
                 }
             )
@@ -2362,8 +2387,9 @@ async def turn_oven_off():
     """Turn off the oven"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not OVEN_ENTITY:
-        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.oven_entity:
+        raise HTTPException(status_code=503, detail=OVEN_NOT_CONFIGURED)
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2371,7 +2397,7 @@ async def turn_oven_off():
                 f"{HA_URL}/api/services/water_heater/set_operation_mode",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": OVEN_ENTITY,
+                    "entity_id": cfg.oven_entity,
                     "operation_mode": "Off"
                 }
             )
@@ -2396,8 +2422,9 @@ async def get_fridge_state():
     """Get fridge and freezer state"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not FRIDGE_ENTITY and not FREEZER_ENTITY:
-        raise HTTPException(status_code=503, detail="Fridge/freezer not configured. Set FRIDGE_ENTITY_ID/FREEZER_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.fridge_entity and not cfg.freezer_entity:
+        raise HTTPException(status_code=503, detail=FRIDGE_FREEZER_NOT_CONFIGURED)
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2405,13 +2432,13 @@ async def get_fridge_state():
 
             # Get fridge state
             fridge_resp = await client.get(
-                f"{HA_URL}/api/states/{FRIDGE_ENTITY}",
+                f"{HA_URL}/api/states/{quote(cfg.fridge_entity, safe='')}",
                 headers=headers
             )
 
             # Get freezer state
             freezer_resp = await client.get(
-                f"{HA_URL}/api/states/{FREEZER_ENTITY}",
+                f"{HA_URL}/api/states/{quote(cfg.freezer_entity, safe='')}",
                 headers=headers
             )
 
@@ -2419,7 +2446,7 @@ async def get_fridge_state():
             door_open = False
             try:
                 door_resp = await client.get(
-                    f"{HA_URL}/api/states/{FRIDGE_DOOR_SENSOR}",
+                    f"{HA_URL}/api/states/{quote(cfg.fridge_door_sensor, safe='')}",
                     headers=headers
                 )
                 if door_resp.status_code == 200:
@@ -2457,8 +2484,9 @@ async def set_fridge_temperature(request: SetApplianceTempRequest):
     """Set fridge target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not FRIDGE_ENTITY:
-        raise HTTPException(status_code=503, detail="Fridge not configured. Set FRIDGE_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.fridge_entity:
+        raise HTTPException(status_code=503, detail=FRIDGE_NOT_CONFIGURED)
 
     temp = request.temperature
     if temp < FRIDGE_MIN_TEMP or temp > FRIDGE_MAX_TEMP:
@@ -2473,7 +2501,7 @@ async def set_fridge_temperature(request: SetApplianceTempRequest):
                 f"{HA_URL}/api/services/water_heater/set_temperature",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": FRIDGE_ENTITY,
+                    "entity_id": cfg.fridge_entity,
                     "temperature": temp
                 }
             )
@@ -2499,8 +2527,9 @@ async def set_freezer_temperature(request: SetApplianceTempRequest):
     """Set freezer target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
-    if not FREEZER_ENTITY:
-        raise HTTPException(status_code=503, detail="Freezer not configured. Set FREEZER_ENTITY_ID.")
+    cfg = household.settings()
+    if not cfg.freezer_entity:
+        raise HTTPException(status_code=503, detail=FREEZER_NOT_CONFIGURED)
 
     temp = request.temperature
     if temp < FREEZER_MIN_TEMP or temp > FREEZER_MAX_TEMP:
@@ -2515,7 +2544,7 @@ async def set_freezer_temperature(request: SetApplianceTempRequest):
                 f"{HA_URL}/api/services/water_heater/set_temperature",
                 headers=await get_ha_headers(),
                 json={
-                    "entity_id": FREEZER_ENTITY,
+                    "entity_id": cfg.freezer_entity,
                     "temperature": temp
                 }
             )

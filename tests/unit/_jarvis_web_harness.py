@@ -29,6 +29,7 @@ os.environ.setdefault("SERVICE_API_KEY", SERVICE_KEY)
 SERVICE_KEY = os.environ["SERVICE_API_KEY"]
 
 import caller_auth  # noqa: E402
+import household  # noqa: E402
 
 
 def load_main(name: str = "_jw_harness_main"):
@@ -174,9 +175,12 @@ def install_outbound(monkeypatch, guest: Optional[dict] = None) -> Outbound:
     monkeypatch.setattr(main.httpx, "AsyncClient", out.factory())
     monkeypatch.setattr(caller_auth, "get_admin_url", lambda: "http://admin.local:8080")
     monkeypatch.setattr(main, "HA_TOKEN", "fake-ha-token")
-    monkeypatch.setattr(main, "OVEN_ENTITY", "water_heater.test_oven")
-    monkeypatch.setattr(main, "FRIDGE_ENTITY", "water_heater.test_fridge")
-    monkeypatch.setattr(main, "FREEZER_ENTITY", "water_heater.test_freezer")
+    monkeypatch.setattr(household, "_cache", None)  # restored on teardown
+    household.install_for_test(sources={"jarvis_web": {
+        "oven_entity": "water_heater.test_oven",
+        "fridge_entity": "water_heater.test_fridge",
+        "freezer_entity": "water_heater.test_freezer",
+    }})
     return out
 
 

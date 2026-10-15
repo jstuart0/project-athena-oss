@@ -34,6 +34,7 @@ jarvis_main = importlib.util.module_from_spec(_spec)
 sys.modules["_test_jarvis_web_backend_main"] = jarvis_main
 _spec.loader.exec_module(jarvis_main)
 
+import household  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
@@ -43,9 +44,11 @@ def client(monkeypatch):
     # not configured" guard doesn't fire before the NEW entity-specific
     # guard this phase adds.
     monkeypatch.setattr(jarvis_main, "HA_TOKEN", "fake-ha-token")
-    monkeypatch.setattr(jarvis_main, "OVEN_ENTITY", "")
-    monkeypatch.setattr(jarvis_main, "FRIDGE_ENTITY", "")
-    monkeypatch.setattr(jarvis_main, "FREEZER_ENTITY", "")
+    # No admin value and no env value: every appliance is "not configured".
+    monkeypatch.setattr(household, "_cache", None)  # restored on teardown
+    household.install_for_test(sources={})
+    for name in ("OVEN_ENTITY_ID", "FRIDGE_ENTITY_ID", "FREEZER_ENTITY_ID"):
+        monkeypatch.delenv(name, raising=False)
 
     # ATHENA-69 (D19): the oven/fridge/freezer POST routes are now
     # owner_only. Authenticate every request in this file as a signed-in
@@ -121,7 +124,7 @@ def test_get_fridge_state_not_blocked_when_only_fridge_configured(client, monkey
     """Sibling check: configuring just one of fridge/freezer must not hit
     the "both unconfigured" 503 -- proves the guard is an OR, not an AND,
     on the two independently-configurable entities."""
-    monkeypatch.setattr(jarvis_main, "FRIDGE_ENTITY", "water_heater.example_fridge")
+    household.install_for_test(sources={"jarvis_web": {"fridge_entity": "water_heater.example_fridge"}})
     with mock.patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = mock.AsyncMock()
         mock_client.__aenter__ = mock.AsyncMock(return_value=mock_client)

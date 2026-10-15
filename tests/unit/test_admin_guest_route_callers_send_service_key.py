@@ -105,6 +105,7 @@ PREDECESSOR_TARGETS = {
     },
     "src/orchestrator/smart_home_controller.py": {"_get_house_layout"},
     "src/orchestrator/main.py": {"get_origin_placeholder_patterns"},
+    "apps/jarvis-web/backend/main.py": {"_fetch_household"},
 }
 
 # The callers of the 95 reviewed routes.
@@ -459,16 +460,16 @@ def _predecessor_keys():
 
 # C1 -----------------------------------------------------------------------
 
-def test_population_is_the_sixty_nine_callers():
+def test_population_is_the_seventy_callers():
     results = _all_results()
     every = {(rel, name) for rel, names in TARGETS.items() for name in names}
-    assert len(results) == 69, sorted(every - set(results))
+    assert len(results) == 70, sorted(every - set(results))
     assert len(TARGETS) == 18
     assert not _reviewed_keys() & _predecessor_keys()
     empty = sorted(k for k, calls in results.items() if not calls)
     assert not empty, f"named callers with no gated call found: {empty}"
     names = {n for _r, n in results}
-    for named in ("get_user_session_by_device", "create_voice_automation", "record_intent_metric", "get_favorite_teams", "fetch_household_settings"):
+    for named in ("get_user_session_by_device", "create_voice_automation", "record_intent_metric", "get_favorite_teams", "fetch_household_settings", "_fetch_household"):
         assert named in names
     for named in (
         ("src/gateway/main.py", "get_feature_flag"),
@@ -483,7 +484,7 @@ def test_population_is_the_sixty_nine_callers():
         return {area: sum(1 for rel, _n in keys if area_of(rel) == area) for area in AREAS}
 
     assert count(_reviewed_keys()) == {"shared": 26, "orchestrator": 16, "edge": 9}
-    assert count(_predecessor_keys()) == {"shared": 12, "orchestrator": 6, "edge": 0}
+    assert count(_predecessor_keys()) == {"shared": 12, "orchestrator": 6, "edge": 1}
 
 
 # C2 -----------------------------------------------------------------------

@@ -71,6 +71,8 @@ COPY src/shared/client_throttle.py /app/backend/client_throttle.py
 COPY src/shared/service_key.py /app/backend/service_key.py
 # Shared speech normalizer for /api/voice/synthesize; overwrites the local-dev shim.
 COPY src/shared/tts_normalizer.py /app/backend/tts_normalizer.py
+# Shared household settings registry (pure: stdlib + pydantic); overwrites the local-dev shim.
+COPY src/shared/household_settings.py /app/backend/household_settings.py
 COPY apps/jarvis-web/frontend/ /app/frontend/
 
 # Set working directory to backend
