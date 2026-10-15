@@ -14,6 +14,7 @@ from .test_room_light_area_tier import _isolated, _reg, _state  # noqa: F401
 from . import _room_chat_harness as rch
 
 from orchestrator import room_probe  # noqa: E402
+from shared import household  # noqa: E402
 
 
 def run_probe(**kw):
@@ -146,3 +147,117 @@ def test_main_refuses_an_address_the_policy_rejects(monkeypatch, capsys):
     monkeypatch.setenv("HA_TOKEN", "t")
     assert room_probe.main(["--runs", "1"]) == 2
     assert "HA_URL and HA_TOKEN" in capsys.readouterr().err
+
+
+# --- --sources ----------------------------------------------------------------
+
+class _EnvConfig:
+    def __init__(self, groups="", satellites=""):
+        self.ha_light_groups = groups
+        self.ha_satellite_room_map = satellites
+
+
+def test_sources_prints_counts_and_words_for_both_settings(monkeypatch):
+    monkeypatch.setattr(household, "_config", lambda: _EnvConfig(
+        groups=json.dumps({"Study": "light.study_lamp_0", "Nowhere Room": "light.not_in_home_assistant"}),
+        satellites=json.dumps({"assist_satellite.study_voice": "study", "b" * 32: "Phantom Den"}),
+    ))
+    household.reset_room_settings_for_test()
+    code, text, _ = run_probe(sources=True)
+    assert code == 0
+    assert ("room lights: source env, rooms 2, lights 2, not reported by Home Assistant 1, "
+            "rooms that are no area 1") in text
+    assert "speaker rooms: source env, device keys 1, entity keys 1, rooms that are no area 1" in text
+
+
+def test_sources_with_nothing_configured_reports_default(monkeypatch):
+    monkeypatch.setattr(household, "_config", lambda: _EnvConfig())
+    household.reset_room_settings_for_test()
+    _, text, _ = run_probe(sources=True)
+    assert "room lights: source default, rooms 0, lights 0, not reported by Home Assistant 0, rooms that are no area 0" in text
+    assert "speaker rooms: source default, device keys 0, entity keys 0, rooms that are no area 0" in text
+
+
+def test_sources_prints_no_names_ids_or_urls(monkeypatch):
+    monkeypatch.setattr(household, "_config", lambda: _EnvConfig(
+        groups=json.dumps({"Nowhere Room": "light.not_in_home_assistant"}),
+        satellites=json.dumps({"assist_satellite.secret_voice": "Phantom Den"}),
+    ))
+    household.reset_room_settings_for_test()
+    _, text, _ = run_probe(sources=True)
+    lowered = text.lower()
+    for needle in ("nowhere", "phantom", "secret_voice", "not_in_home_assistant", "http", "light."):
+        assert needle not in lowered, needle
+
+
+def test_without_the_flag_no_sources_lines_are_printed():
+    _, text, _ = run_probe()
+    assert "room lights:" not in text and "speaker rooms:" not in text
+
+
+class _FakeReader:
+    """Counts the probe's calls; serves the inert test reader's snapshot."""
+
+    def __init__(self, hang=False):
+        self.hang = hang
+        self.loaded = 0
+        self.closed = 0
+        self._inert = household.install_for_test()
+
+    def peek(self):
+        return self._inert.peek()
+
+    async def current(self):
+        self.loaded += 1
+        if self.hang:
+            await asyncio.sleep(60)
+
+    async def aclose(self):
+        self.closed += 1
+
+
+def _drive_household(monkeypatch, reader, **kw):
+    monkeypatch.setattr(household, "reader", lambda: reader)
+    raw, states = rch.house_raw_and_states()
+
+    async def fetch():
+        return raw
+
+    async def read_states():
+        return states
+
+    out = io.StringIO()
+    code = asyncio.run(room_probe._run_with_household(
+        fetch, read_states, runs=1, shape=False, show_names=False, utterances=[], sources=True, out=out, **kw))
+    return code, out.getvalue()
+
+
+def test_the_probe_loads_the_household_reader_once_and_closes_it(monkeypatch):
+    reader = _FakeReader()
+    code, text = _drive_household(monkeypatch, reader)
+    assert code == 0 and "room lights:" in text
+    assert (reader.loaded, reader.closed) == (1, 1)
+
+
+def test_a_reader_that_never_answers_is_abandoned_after_the_bound_and_still_closed(monkeypatch):
+    monkeypatch.setattr(room_probe, "HOUSEHOLD_LOAD_TIMEOUT_S", 0.01)
+    reader = _FakeReader(hang=True)
+    code, text = _drive_household(monkeypatch, reader)
+    assert code == 0 and "room lights:" in text and reader.closed == 1
+
+
+def test_the_reader_is_closed_when_the_probe_fails(monkeypatch):
+    reader = _FakeReader()
+
+    async def fetch():
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(household, "reader", lambda: reader)
+
+    async def read_states():
+        return {}
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(room_probe._run_with_household(
+            fetch, read_states, runs=1, shape=False, show_names=False, utterances=[], sources=True))
+    assert reader.closed == 1

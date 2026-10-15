@@ -34,6 +34,7 @@ from orchestrator import write_fanout  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.utterance_kind import classify_utterance  # noqa: E402
 from shared import ha_registry as hr  # noqa: E402
+from shared import household  # noqa: E402
 
 SATELLITE_DEVICE = "a" * 32
 
@@ -152,7 +153,12 @@ class Rig:
         self.cfg = Cfg()
         self.cfg.ha_light_groups = groups
         self.cfg.ha_whole_house_unassigned_lights = unassigned
-        provider = rd.RoomDirectoryProvider(self.registry, None, config=lambda: self.cfg)
+        provider = rd.RoomDirectoryProvider(
+            self.registry, None,
+            room_lights=lambda: household.room_lights_from(None, self.cfg.ha_light_groups or ""),
+            speaker_rooms=lambda: household.speaker_rooms_from(
+                None, self.cfg.ha_satellite_room_map or "", admin_age=None),
+        )
         _runtime.set_room_directory(provider)
         if exclude is not None:
             monkeypatch.setenv("HA_ROOM_LIGHT_EXCLUDE_ENTITIES", exclude)
@@ -184,7 +190,6 @@ class Rig:
 
         self.clock = Clock()
         monkeypatch.setattr(shc, "_monotonic", self.clock)
-        monkeypatch.setattr(shc, "_light_groups_cache", None)
         monkeypatch.setattr(shc, "get_config", lambda: self.cfg)
         monkeypatch.setattr(write_fanout, "get_config", lambda: fanout_cfg(threshold, hard_limit))
         admin = MagicMock()

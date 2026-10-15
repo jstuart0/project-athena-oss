@@ -1,6 +1,8 @@
-"""RoomDirectoryProvider: one directory, built from the registry snapshot,
-HA_LIGHT_GROUPS, HA_SATELLITE_ROOM_MAP and the admin room groups, rebuilt
-only when one of them changes. Fictional rooms; injected clock."""
+"""RoomDirectoryProvider: one directory, built from the registry snapshot, the
+room lights and speaker rooms values (injected resolvers; the environment
+strings here stand in for ``HA_LIGHT_GROUPS`` / ``HA_SATELLITE_ROOM_MAP``)
+and the admin room groups, rebuilt only when one of them changes. Fictional
+rooms; injected clock."""
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +21,7 @@ if str(SRC) not in sys.path:
 from orchestrator import room_directory as rd  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from shared import ha_registry as hr  # noqa: E402
+from shared import household  # noqa: E402
 
 RAW = json.loads(
     (Path(__file__).resolve().parents[1] / "fixtures" / "ha_registry" / "house_a.json").read_text(encoding="utf-8")
@@ -70,8 +73,11 @@ class Clock:
 
 
 def provider(registry=None, admin=None, config=None, names=None, clock=None):
+    cfg = config or Config()
     return rd.RoomDirectoryProvider(
-        registry, admin, light_group_names=names, monotonic=clock or Clock(), config=lambda: config or Config(),
+        registry, admin, light_group_names=names, monotonic=clock or Clock(),
+        room_lights=lambda: household.room_lights_from(None, cfg.ha_light_groups),
+        speaker_rooms=lambda: household.speaker_rooms_from(None, cfg.ha_satellite_room_map, admin_age=None),
     )
 
 
@@ -201,3 +207,62 @@ def test_current_directory_is_none_until_a_provider_is_registered():
         assert rd.current_directory() is p.current()
     finally:
         _runtime.reset_for_test()
+
+
+def test_a_changed_room_lights_or_speaker_rooms_version_rebuilds_the_directory():
+    lights = {"value": household.room_lights_from(None, "")}
+    speakers = {"value": household.speaker_rooms_from(None, "", admin_age=None)}
+    p = rd.RoomDirectoryProvider(
+        Registry(snapshot()), None, room_lights=lambda: lights["value"], speaker_rooms=lambda: speakers["value"],
+    )
+    first = p.current()
+    assert p.current() is first
+    lights["value"] = household.room_lights_from(None, json.dumps({"Sunroom": "light.sunroom_all"}))
+    second = p.current()
+    assert second is not first and second.resolves("sunroom") is not None
+    speakers["value"] = household.speaker_rooms_from(
+        None, json.dumps({"assist_satellite.loft_voice": "loft"}), admin_age=None)
+    third = p.current()
+    assert third is not second and third.resolves("loft") is not None
+
+
+def test_a_room_with_no_key_is_kept_out_of_the_directory_and_keys_are_sorted():
+    cfg = Config(groups=json.dumps({"!!!": "light.x", "Zed Room": "light.z", "Attic": "light.a"}))
+    assert provider(None, config=cfg).current().keys() == ("attic", "zed_room")
+
+
+def test_the_provider_serves_the_resolver_values_it_was_given():
+    cfg = Config(groups=json.dumps({"Sunroom": "light.sunroom_all"}))
+    p = provider(Registry(snapshot()), config=cfg)
+    assert dict(p.room_lights().mapping) == {"sunroom": ("light.sunroom_all",)}
+    assert p.speaker_rooms().source == "default"
+
+
+def test_sources_reports_counts_and_words_only():
+    cfg = Config(
+        groups=json.dumps({"Sunroom": "light.sunroom_all", "Galley": "light.galley_all"}),
+        satellites=json.dumps({"assist_satellite.loft_voice": "loft", STUDY_DEVICE: "study"}),
+    )
+    report = provider(Registry(snapshot()), config=cfg).sources()
+    assert report["room_lights"] == {"source": "env", "rooms": 2, "lights": 2, "unmatched": 1}
+    assert report["speaker_rooms"] == {"source": "env", "device_keys": 1, "entity_keys": 1, "unmatched": 1}
+    assert provider(None, config=cfg).sources()["room_lights"]["unmatched"] is None
+
+
+def test_unmatched_override_rooms_are_logged_once_per_change_with_a_snapshot_only():
+    cfg = Config(groups=json.dumps({"Sunroom": "light.sunroom_all", "Galley": "light.galley_all"}))
+    p = provider(Registry(snapshot(1.0)), config=cfg)
+    with structlog.testing.capture_logs() as logs:
+        p.current()
+        p.current()
+    unmatched = [e for e in logs if e["event"] == "room_overrides_unmatched"]
+    assert [e["count"] for e in unmatched] == [1]
+    assert "sunroom" not in json.dumps(logs, default=str).lower()
+    with structlog.testing.capture_logs() as logs:
+        provider(None, config=cfg).current()
+    assert not [e for e in logs if e["event"] == "room_overrides_unmatched"]
+
+
+def test_sources_counts_only_rooms_with_a_key():
+    cfg = Config(groups=json.dumps({"!!!": "light.x", "Attic": "light.a"}))
+    assert provider(None, config=cfg).sources()["room_lights"]["rooms"] == 1

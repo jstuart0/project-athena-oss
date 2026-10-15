@@ -1221,6 +1221,9 @@ async def lifespan(app: FastAPI):
         await asyncio.wait_for(household_reader.current(), timeout=HOUSEHOLD_STARTUP_TIMEOUT_S)
     except asyncio.TimeoutError:
         logger.warning("household_settings_startup_timeout")
+    # Resolve the room maps once so the first turn reads a built value.
+    household.room_lights()
+    household.speaker_rooms()
 
     # Redis first: the Home Assistant auth gate keeps its shared state there.
     cache_client = CacheClient()
@@ -1426,8 +1429,8 @@ async def lifespan(app: FastAPI):
     if getattr(cache_client, "client", None) is not None:
         ha_link_task = asyncio.create_task(ha_link_publisher.run())  # long-lived; closed by _runtime.close_all()
 
-    # The room vocabulary every reader shares (areas, HA_LIGHT_GROUPS, the
-    # satellite map, admin room groups). Local first (R2-H1), then registered.
+    # The room vocabulary every reader shares (areas, the room lights and
+    # speaker rooms settings, admin room groups). Local first (R2-H1), then registered.
     _entity_manager = _runtime.get_entity_manager()
     room_directory = RoomDirectoryProvider(
         ha_registry,

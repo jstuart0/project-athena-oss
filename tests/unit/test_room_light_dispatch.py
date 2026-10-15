@@ -32,6 +32,7 @@ from orchestrator import mode_permission as mp  # noqa: E402
 from orchestrator import write_fanout  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.utterance_kind import classify_utterance  # noqa: E402
+from shared import household  # noqa: E402
 
 from .test_room_light_resolution import GROUPS, _build_entities, _oracle_leaves  # noqa: E402
 
@@ -42,8 +43,7 @@ IMPERATIVE_ON = "turn on the galley lights"
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
     monkeypatch.delenv("HA_ROOM_LIGHT_EXCLUDE_ENTITIES", raising=False)
-    monkeypatch.setattr(shc, "_light_groups_cache", None)
-    monkeypatch.setattr(shc, "_light_groups_warned", False)
+    household.reset_room_settings_for_test()
     _runtime.reset_for_test()
     shared.config._clear_cache_for_tests()
     hem._clear_room_light_exclude_cache()
@@ -100,7 +100,8 @@ class _Rig:
         self.gate_calls = []
         monkeypatch.setattr(write_fanout, "get_config",
                             lambda: _fanout_cfg(threshold=threshold, hard_limit=hard_limit))
-        monkeypatch.setattr(shc, "get_config", lambda: MagicMock(ha_light_groups=groups_raw))
+        monkeypatch.setattr(household, "_config", lambda: MagicMock(ha_light_groups=groups_raw))
+        household.reset_room_settings_for_test()
         admin = MagicMock()
         admin.resolve_room_group = AsyncMock(return_value=room_group)
         monkeypatch.setattr(shc, "get_admin_client", lambda: admin)
@@ -208,7 +209,6 @@ def test_configured_match_has_the_managers_five_keys(monkeypatch):
     (match,) = _resolve(rig, "galley")
     assert set(match) == {"entity_id", "friendly_name", "members", "state", "type"}
     assert match["type"] == "group" and match["members"] == GROUPS["light.galley"]
-    monkeypatch.setattr(shc, "_light_groups_cache", None)
     (plain,) = _resolve(_Rig(monkeypatch, groups_raw='{"den":"light.satellite_den_led_ring"}'), "den")
     assert plain["type"] == "individual" and plain["members"] == []
 
