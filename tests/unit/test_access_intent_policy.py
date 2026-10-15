@@ -698,6 +698,25 @@ class SequenceRig(DoorRig):
 
 
 class TestSequences:
+    @pytest.mark.parametrize("query", [
+        "they unlock the front door and then wait 5 minutes and lock it",
+        "she said unlock the front door, then turn off the lights in 5 minutes",
+        "maybe unlock the front door and then lock it in 5 minutes",
+        "unlock the front door and in 5 minutes lock it",
+    ])
+    def test_a_sequence_never_unlocks_now_for_narration_or_a_deferral(self, monkeypatch, query):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("lock", {"device_type": "lock", "room": "front_door"})]
+        text = rig.run_plan(steps, query)
+        assert text is not None and rig.calls == [], (query, text)
+
+    def test_the_sequence_door_rule_has_a_positive_control(self, monkeypatch):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"})]
+        assert rig.run_plan(steps, "unlock the front door and then turn on the lights") is None
+        assert rig.openings == [("lock", "unlock", "lock.front_door")]
+
     def test_a_model_decided_access_is_stripped_and_asks_which_door(self, monkeypatch):
         rig = SequenceRig(monkeypatch, THREE_LOCKS)
         steps = [step("unlock", {"device_type": "lock", "room": None, "decided_access": "lock.back_door",
