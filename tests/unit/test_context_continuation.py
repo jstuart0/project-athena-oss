@@ -65,8 +65,12 @@ TURN2 = "what plae have happy our and outdoor seating?"
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_between_tests():
+    # Tests assign main_module.get_conversation_context directly; put the original back so the
+    # state does not leak into the next test module that shares the process.
+    original_get_context = main_module.get_conversation_context
     _runtime.reset_for_test()
     yield
+    main_module.get_conversation_context = original_get_context
     _runtime.reset_for_test()
 
 

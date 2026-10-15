@@ -918,3 +918,61 @@ def test_an_ordinary_door_opening_still_writes(utterance, domain, action):
 def test_narrated_and_tagged_openings_are_no_command(utterance):
     uk = classify_utterance(utterance)
     assert uk.kind != IMPERATIVE and uk.command_text is None, utterance
+
+
+# --- reconcile r2: deferral vocabulary, conditions on device commands -----------------------------
+
+VOCABULARY_DEFERRED = [
+    "unlock the front door at five pm", "open the garage door at seven thirty", "unlock the front door in about five minutes",
+    "lock the door in half an hour", "lock the door in like ten minutes", "open the garage door in a few minutes",
+    "unlock the front door if you can", "lock the door unless I say otherwise", "open the garage door while I'm away",
+    "lock the door every night", "unlock the front door on monday", "open the garage door this evening",
+    "unlock the front door by five", "unlock the front door at night",
+]
+
+
+@pytest.mark.parametrize("utterance", VOCABULARY_DEFERRED, ids=str)
+def test_the_wider_deferral_vocabulary_defers_a_door(utterance):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.command_text, uk.deferred) == (UNKNOWN, None, True), utterance
+    domain, action = ("cover", "open") if "garage" in utterance else ("lock", "lock" if "lock the" in utterance and "unlock" not in utterance else "unlock")
+    answer, calls = _door_controller_calls(utterance, domain, action)
+    assert answer == NO_WRITE_CUE_TEXT and calls == [], (utterance, answer)
+
+
+@pytest.mark.parametrize("utterance", ["unlock at night", "unlock the front door", "open the garage door", "unlock the front door please"], ids=str)
+def test_the_wider_vocabulary_leaves_plain_commands_and_scene_phrases_alone(utterance):
+    assert classify_utterance(utterance).deferred is False
+
+
+CONDITIONAL_COMMANDS = [
+    "turn off the lights when I go to bed", "turn on the porch light once it gets dark",
+    "can you turn off the lights when I go to bed", "turn on the lights after dinner",
+]
+NOT_CONDITIONS = ["turn off the office light after 5 seconds", "turn off the lights", "did the lights turn off when I left",
+                  "play jazz when I get home"]
+
+
+@pytest.mark.parametrize("utterance", CONDITIONAL_COMMANDS, ids=str)
+def test_a_device_command_with_a_condition_goes_to_the_agent_not_the_controller(utterance):
+    from orchestrator.utterance_kind import has_trailing_condition
+    assert has_trailing_condition(utterance) and should_use_automation_agent(utterance) is True
+    create = ("create_automation", {"name": "Later", "trigger": {"type": "state", "entity_id": "binary_sensor.bed"},
+                                    "actions": [{"type": "service", "entity_id": "light.office_0", "service": "turn_off"}]})
+    h = _agent_calls_after(utterance, *create)
+    assert h.client.create_automation.await_count == 1, utterance
+    h = _agent_calls_after(utterance, *HA_OFF)
+    assert h.client.call_service.await_count == 0, utterance  # the immediate tool never carries a condition
+
+
+@pytest.mark.parametrize("utterance", NOT_CONDITIONS, ids=str)
+def test_a_timer_a_plain_command_and_a_question_are_no_condition(utterance):
+    from orchestrator.utterance_kind import has_trailing_condition
+    assert not has_trailing_condition(utterance)
+
+
+@pytest.mark.parametrize("utterance", CONDITIONAL_COMMANDS, ids=str)
+def test_without_the_agent_a_conditional_command_is_refused_not_run_now(utterance):
+    from orchestrator.nodes.route_control import CONDITIONAL_COMMAND_TEXT
+    state, _model, client = drive_control(utterance)
+    assert writes(client) == [] and state.answer == CONDITIONAL_COMMAND_TEXT, (utterance, state.answer)

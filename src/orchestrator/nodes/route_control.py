@@ -67,6 +67,7 @@ from orchestrator.utterance_kind import (
     classify_utterance,
     command_query,
     has_narration,
+    has_trailing_condition,
 )
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 from orchestrator.context.detector import context_ref_view
@@ -90,6 +91,9 @@ def _is_agent_exempt(query: str, uk: UtteranceClassification) -> bool:
     return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not is_motion_trigger_form(lower)
 
 
+CONDITIONAL_COMMAND_TEXT = (
+    "I can't wait for a condition like that yet. Tell me when you want it done, or set it up as an automation."
+)
 PENDING_CONFIRMATION_TTL_SECONDS = 60
 CONTROL_CONTEXT_TTL_SECONDS = 300
 EXPIRED_PENDING_TEXT = "That request expired. Please say it again."
@@ -1219,6 +1223,15 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         state.error = "permission_denied"
                     else:
                         state.answer = result
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+
+                # A device command with a condition after it ("turn off the lights when I go to
+                # bed") is never run now. With the automation agent available it was routed
+                # above; without it the answer says so and nothing is written.
+                if uk.kind != UtteranceKind.STATE_QUESTION and has_trailing_condition(state.query, assistant_names):
+                    logger.info("trailing_condition_refused_without_agent")
+                    state.answer = CONDITIONAL_COMMAND_TEXT
                     state.node_timings["route_control"] = time.time() - start
                     return state
 

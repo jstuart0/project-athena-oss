@@ -3009,6 +3009,14 @@ Return ONLY valid JSON."""
                 query, target.get('room') or target.get('entity_id'), domain,
             ):
                 return VERB_UNCLEAR_TEXT
+            if opening:
+                # The same rule as a single command: a command no one reported and no time or
+                # condition qualifies ("she said unlock the front door, then ...").
+                refusal = self._door_command_refusal(
+                    domain, step.get('action'), query, None, carried_words=False, confirmed=False,
+                )
+                if refusal is not None:
+                    return refusal
             permitted, _denied = self._split_permitted(list(pool))
             if not permitted:
                 # The permission pre-authorization that follows refuses it.

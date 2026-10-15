@@ -642,7 +642,7 @@ class TestUnparseableAnswers:
         assert llm.calls and llm.calls[0]["require_full_prompt"] is True
         assert out.answer == room_context.UNPROCESSABLE_TEXT and writes(chat) == []
 
-    @pytest.mark.parametrize("query", [MOTION_QUERY, "turn off motion detection", "disable motion in the study after coffee"])
+    @pytest.mark.parametrize("query", [MOTION_QUERY, "turn off motion detection", "disable motion in the study during coffee"])
     def test_motion_with_garbled_json_writes_nothing(self, monkeypatch, query):
         """The old fallback matched 'off' inside "coffee" and picked a helper to switch."""
         llm = Scripted(("reply", GARBLED, "stop"))

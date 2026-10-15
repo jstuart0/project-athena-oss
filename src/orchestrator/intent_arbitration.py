@@ -74,7 +74,8 @@ _PATTERN_EVIDENCE: Mapping[IntentCategory, "re.Pattern[str]"] = {
 _TIMELESS_WORDING = re.compile(
     r"\b(?:who (?:invented|founded|created|discovered)|invented|history of|origin of|origins of|"
     r"rules? (?:of|for)|what are the rules|how (?:does|do|did)|why (?:does|do|did)|what causes|explain|"
-    r"difference between)\b"
+    r"difference between|best|greatest|worst|favou?rite|in (?:the )?(?:spring|summer|autumn|fall|winter)|"
+    r"typically|usually|normally|on average)\b"
 )
 _TIME_SENSITIVE_CUE = re.compile(
     r"\b(?:today|tonight|tomorrow|tomorrow's|yesterday|now|right now|currently|current|latest|live|"

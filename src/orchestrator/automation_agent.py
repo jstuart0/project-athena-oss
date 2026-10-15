@@ -29,7 +29,8 @@ from orchestrator import access_target
 from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
 from orchestrator.utterance_kind import (
-    UtteranceKind, classify_utterance, command_query, has_deferral, has_narration, is_narration,
+    UtteranceKind, classify_utterance, command_query, has_deferral, has_narration, has_trailing_condition,
+    is_narration,
 )
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -85,6 +86,8 @@ def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple =
     uk = classify_utterance(query, assistant_names=names)
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return None  # a question's write is stopped by the read-only scope or the fan-out gate
+    if has_trailing_condition(query, names):
+        return NO_WRITE_CUE_TEXT  # "...when I go to bed": only create_automation carries a condition
     if kind in ("scene", "script"):
         return None if scene_request_allowed(uk) else NO_WRITE_CUE_TEXT
     if kind in _COMMAND_ONLY_KINDS and (uk.deferred or has_deferral(query, names)):
@@ -1660,6 +1663,12 @@ def is_motion_trigger_form(query: str) -> bool:
     return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
 
 
+_HOME_DEVICE_KEYWORDS = (
+    'light', 'lamp', 'switch', 'fan', 'thermostat', 'heat', 'cool',
+    'lock', 'door lock', 'garage', 'blind', 'shade', 'curtain',
+    'tv', 'television', 'speaker', 'music', 'play music',
+)
+
 _SCHEDULE_LED_RE = re.compile(
     r"^\s*(?:(?:in|after)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)"
     r"\s*(?:seconds?|secs?|minutes?|mins?|hours?)\s+"
@@ -1690,6 +1699,12 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     # Words that only describe what someone does or says ask for nothing.
     if is_narration(query, assistant_names):
         return False
+
+    # A device command with a condition after it ("turn off the lights when I go
+    # to bed") is never for now: the agent sets it up. Checked before the
+    # exclusions, which would otherwise let the controller run it at once.
+    if any(k in query_lower for k in _HOME_DEVICE_KEYWORDS) and has_trailing_condition(query, assistant_names):
+        return True
 
     # EXCLUSIONS FIRST - these should NEVER go to automation agent
     # Simple brightness commands - immediate, not scheduled
@@ -1815,12 +1830,7 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     ]
 
     # Check for home device keywords - required for schedule/sequence patterns
-    home_device_keywords = [
-        'light', 'lamp', 'switch', 'fan', 'thermostat', 'heat', 'cool',
-        'lock', 'door lock', 'garage', 'blind', 'shade', 'curtain',
-        'tv', 'television', 'speaker', 'music', 'play music',
-    ]
-    has_home_device = any(k in query_lower for k in home_device_keywords)
+    has_home_device = any(k in query_lower for k in _HOME_DEVICE_KEYWORDS)
 
     has_sequence = any(p in query_lower for p in sequence_patterns)
     has_schedule_action = any(p in query_lower for p in schedule_with_action_patterns)

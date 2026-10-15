@@ -125,3 +125,23 @@ def test_timeless_wording_stays_general_info(query, pattern, llm_conf):
 ])
 def test_time_sensitive_wording_still_takes_the_pattern(query, pattern):
     assert _arb(query, G, 0.9, pattern).intent == pattern
+
+
+@pytest.mark.parametrize("query,pattern", [
+    ("who is the best basketball player", I.SPORTS),
+    ("who is the greatest quarterback in the nfl", I.SPORTS),
+    ("what is the weather like in paris in spring", W),
+    ("what is the weather typically like in london in winter", W),
+])
+@pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
+def test_opinion_and_season_wording_stays_general_info(query, pattern, llm_conf):
+    assert _arb(query, G, llm_conf, pattern).intent == G
+
+
+@pytest.mark.parametrize("query,pattern", [
+    ("who is the best team playing tonight in the nfl", I.SPORTS),
+    ("what is the weather like today", W),
+    ("what is the weather like in paris this weekend", W),
+])
+def test_opinion_wording_with_a_time_cue_still_takes_the_pattern(query, pattern):
+    assert _arb(query, G, 0.9, pattern).intent == pattern

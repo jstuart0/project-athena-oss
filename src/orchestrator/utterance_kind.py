@@ -590,7 +590,17 @@ _TAIL_CLOCK_WORDS = frozenset({"noon", "midnight", "sunset", "sunrise", "sundown
 _TAIL_DELAY_UNITS = frozenset({
     "second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins", "hour", "hours", "day", "days",
 })
-_TAIL_QUANTITY_WORDS = _NUMBER_WORDS | {"couple", "few", "of"}
+_TAIL_QUANTITY_WORDS = _NUMBER_WORDS | {"couple", "few", "several", "of"}
+_TAIL_DELAY_FILLERS = frozenset({"about", "around", "like", "roughly", "approximately", "just", "maybe", "exactly", "another"})
+_TAIL_HOUR_WORDS = frozenset({
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+})
+_TAIL_WEEKDAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"})
+_TAIL_RECURRENCE_UNITS = frozenset({
+    "night", "day", "morning", "evening", "afternoon", "week", "weekday", "weekend", "hour", "minute", "time",
+    *_TAIL_WEEKDAYS,
+})
+_TAIL_EXTRA_CONDITION_WORDS = frozenset({"if", "unless", "while", "every", "each"})  # for a door, any of these defers
 _TAIL_MEDIA_VERBS = frozenset({"play", "pause", "resume", "stop", "skip"})
 _TAIL_REFERENCE_WORDS = frozenset({"that", "this", "it"})  # "after that turn off the fan" is a sequence step
 _TAIL_DOOR_VERBS = frozenset({"lock", "unlock", "open", "close", "shut", "raise", "lower"})
@@ -603,6 +613,9 @@ _CLOCK_MERIDIEM = frozenset({"am", "pm", "o'clock"})
 
 def _delay_phrase(rest: Sequence[str]) -> bool:
     """"5 minutes", "an hour", "half an hour", "a couple of minutes" after "in"."""
+    rest = list(rest)
+    while rest and rest[0] in _TAIL_DELAY_FILLERS:
+        rest.pop(0)  # "in about five minutes", "in like ten minutes"
     for k in (2, 3, 4):
         if len(rest) >= k and rest[k - 1] in _TAIL_DELAY_UNITS:
             return all(w[0].isdigit() or w in _TAIL_QUANTITY_WORDS for w in rest[:k - 1])
@@ -616,17 +629,34 @@ def _clock_phrase(rest: Sequence[str], door: bool) -> bool:
         return False
     if rest[0] in _TAIL_CLOCK_WORDS:
         return True
-    if not (rest[0].isdigit() and len(rest[0]) <= 2 and int(rest[0]) <= 24):
-        return False
-    after = rest[1:3]
+    if not (
+        (rest[0].isdigit() and len(rest[0]) <= 2 and int(rest[0]) <= 24) or rest[0] in _TAIL_HOUR_WORDS
+    ):
+        return False  # "at five pm", "at seven thirty": number words count like digits
+    after = rest[1:4]
     return door or any(w in _CLOCK_MERIDIEM for w in after)
 
 
-def _tail_deferral(ws: Sequence[str], door: bool) -> Optional[str]:
+def _tail_deferral(ws: Sequence[str], door: bool, *, door_clause: bool = False) -> Optional[str]:
     """The first deferral in ``ws``: ``"time"`` for a delay or time of day,
-    ``"condition"`` for when/once/before/after/until, else None."""
+    ``"condition"`` for when/once/before/after/until. In a door clause also
+    if/unless/while/every/each, a weekday, "this evening", "by five" and "at
+    night"."""
     for i, w in enumerate(ws):
         rest = list(ws[i + 1:])
+        if door_clause and rest:
+            if w in _TAIL_EXTRA_CONDITION_WORDS and (
+                w not in ("every", "each") or rest[0] in _TAIL_RECURRENCE_UNITS  # "every door" is a quantity
+            ):
+                return "condition"
+            if w == "on" and rest[0] in _TAIL_WEEKDAYS:
+                return "time"
+            if w == "this" and rest[0] in _TAIL_DAYPARTS | {"weekend", "week"}:
+                return "time"
+            if w == "by" and (rest[0].isdigit() or rest[0] in _TAIL_HOUR_WORDS or rest[0] in _TAIL_CLOCK_WORDS):
+                return "time"
+            if w == "at" and rest[0] == "night" and _TAIL_DOOR_NOUNS.intersection(ws):
+                return "time"
         if w in _TAIL_CONDITION_WORDS and rest and rest[0] not in _TAIL_REFERENCE_WORDS:
             return "condition"
         if w in _TAIL_DAY_WORDS:
@@ -650,7 +680,44 @@ def _trailing_deferral(content: Sequence[str]) -> Optional[str]:
         return None
     if core[0] not in _TAIL_DOOR_VERBS and not _TAIL_DOOR_NOUNS.intersection(core):
         return None
-    return _tail_deferral(core[1:], core[0] in _TAIL_DOOR_VERBS)
+    return _tail_deferral(core[1:], core[0] in _TAIL_DOOR_VERBS, door_clause=True)
+
+
+_TAIL_NUMBERISH = _NUMBER_WORDS | _TAIL_HOUR_WORDS
+
+
+def _condition_follows(ws: Sequence[str]) -> bool:
+    """A when/once/after/before/until clause after a command's verb. A timer
+    ("after 5 seconds", "until ten") is the sequence's, not a condition."""
+    for i, w in enumerate(ws):
+        rest = ws[i + 1:]
+        if w in ("when", "whenever", "once") and rest:
+            return True
+        if w in ("after", "before", "until") and rest and rest[0] not in _TAIL_REFERENCE_WORDS:
+            if rest[0][0].isdigit() or (rest[0] in _TAIL_NUMBERISH and _delay_phrase(rest)):
+                continue
+            return True
+    return False
+
+
+def has_trailing_condition(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
+    """Whether a device command carries a condition after it ("turn off the
+    lights when I go to bed", "turn on the porch light once it gets dark"):
+    not for now, so the automation agent sets it up or nothing runs. Media
+    commands and questions don't count. Fails closed to False (the other
+    guards still apply)."""
+    analysis = _analyze_or_none(query, assistant_names)
+    if analysis is None:
+        return False
+    for c in _live(analysis):
+        if c.narration:
+            continue
+        core, _ = _unwrap_time_phrase(list(_content(c.words)))
+        core = (_strip_request_prefixes(" ".join(core)) or " ".join(core)).split()  # "can you turn off ..."
+        if len(core) >= 2 and _CONTROL_VERB_RE.match(core[0]) and core[0] not in _TAIL_MEDIA_VERBS:
+            if _condition_follows(core[1:]):
+                return True
+    return False
 
 
 def _is_deferral_tail(content: Sequence[str]) -> bool:
