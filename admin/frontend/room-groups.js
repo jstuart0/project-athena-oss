@@ -11,6 +11,7 @@ let allRoomGroups = [];
 let availableRooms = [];
 
 async function loadRoomGroups() {
+    if (window.RoomSettings) RoomSettings.mountAll();
     try {
         const response = await fetch(ROOM_GROUPS_API, {
             headers: { 'Authorization': `Bearer ${getToken()}` }

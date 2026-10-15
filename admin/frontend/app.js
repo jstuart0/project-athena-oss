@@ -4273,7 +4273,7 @@ const TOOLTIP_CONTENT = {
     // Devices
     'devices-name': 'Friendly name for this device. Used for display purposes.',
     'devices-type': 'The type of device: speaker, display, light, sensor, etc.',
-    'devices-zone': 'The physical zone or room where this device is located.',
+    'devices-zone': 'The physical zone or room where this device is located. To say which room a voice satellite is in, use Rooms, then Speaker rooms.',
 
     // LLM Configuration
     'llm-intent-model': 'The AI model used to classify user intents. Faster models reduce latency but may be less accurate.',
