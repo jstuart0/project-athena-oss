@@ -567,8 +567,10 @@ def test_music_unexpected_error_is_a_closed_phrase(rig, monkeypatch, route):
 
 
 def _config(monkeypatch, *, fallback: str, default: str):
+    # The household resolver reads the env config at call time, so a patch of
+    # shared.config.get_config is what stands in for the environment.
     monkeypatch.setattr(
-        gw, "_get_athena_config",
+        "shared.config.get_config",
         lambda: SimpleNamespace(gateway_fallback_model=fallback, athena_default_model=default),
     )
 

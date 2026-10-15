@@ -238,6 +238,9 @@ def _configured_module(monkeypatch, unique_name: str):
     module = _reload_configured_transportation(monkeypatch, unique_name)
     _seed_transit_data(module)
     monkeypatch.setattr(module, "datetime", _FixedDateTime)
+    # Departures read local_now() (ATHENA-149), not module.datetime: pin it too so
+    # the 12:00 fixture doesn't depend on the time of day the suite runs.
+    monkeypatch.setattr(module, "local_now", lambda: _FixedDateTime.now())
     return module
 
 

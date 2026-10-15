@@ -31,7 +31,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
-from shared import ha_auth
+from shared import ha_auth, household
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import HARegistry, create_registry
@@ -309,11 +309,14 @@ MODEL_MAPPING = {
 }
 
 
+# The household sections this process reads; the sibling campaign appends "speaker_rooms".
+HOUSEHOLD_SECTIONS = ("gateway", "location")
+
+
 def _fallback_model() -> str:
-    """The Ollama model the gateway answers with when it has to pick one:
-    GATEWAY_FALLBACK_MODEL, else ATHENA_DEFAULT_MODEL."""
-    config = _get_athena_config()
-    return config.gateway_fallback_model or config.athena_default_model
+    """The Ollama model the gateway answers with when it has to pick one: the
+    admin setting, else GATEWAY_FALLBACK_MODEL, else ATHENA_DEFAULT_MODEL."""
+    return str(household.gateway_fallback_model())
 
 
 def _resolve_ollama_model(requested: Optional[str]) -> str:
@@ -455,6 +458,9 @@ async def lifespan(app: FastAPI):
     # Initialize admin config client for database-driven configuration
     admin_client = get_admin_client()
     logger.info("Admin config client initialized")
+
+    household_reader = household.configure(sections=HOUSEHOLD_SECTIONS)
+    await household_reader.current()
 
     # Fetch gateway configuration from database (with env var fallbacks)
     gateway_config = await admin_client.get_gateway_config()
@@ -631,6 +637,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"LiveKit shutdown error: {e}")
 
+    await household_reader.aclose()
     if ha_registry:
         await ha_registry.close()
     gateway_ha = None
@@ -1282,7 +1289,7 @@ def is_athena_query_keywords(messages: List[ChatMessage]) -> bool:
         "concert", "perform", "tour", "show", "event", "when does",
         "who is", "what is", "tell me about"
     ]
-    athena_patterns += _location_keywords(_get_athena_config().default_city)
+    athena_patterns += _location_keywords(household.location().city)
 
     return any(pattern in last_user_msg for pattern in athena_patterns)
 

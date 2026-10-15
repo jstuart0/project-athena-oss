@@ -27,6 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
 from shared.config import get_config
+from shared import household
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
@@ -51,11 +52,17 @@ GTFS_URL = "https://content.amtrak.com/content/gtfs/GTFS.zip"
 DEFAULT_TIMEZONE = get_config().default_timezone
 EASTERN = ZoneInfo(DEFAULT_TIMEZONE)
 
-# Default origin station, set via DEFAULT_AMTRAK_STATION. Empty means no
-# default is configured; callers must specify an origin explicitly.
-DEFAULT_ORIGIN = get_config().default_amtrak_station.strip().upper()
-if not DEFAULT_ORIGIN:
-    logger.warning("amtrak_default_origin_not_configured")
+NOT_CONFIGURED_HINT = (
+    "set the Amtrak station under Directions & Local Area in the admin UI "
+    "(or DEFAULT_AMTRAK_STATION)"
+)
+
+
+def _default_origin() -> str:
+    """The default origin station: the admin setting, else DEFAULT_AMTRAK_STATION.
+    Empty means none is configured; callers must specify an origin explicitly.
+    Read per request so a change in the admin UI applies without a restart."""
+    return str(household.amtrak_station())
 
 # Common station aliases for natural language processing
 STATION_ALIASES = {
@@ -254,7 +261,7 @@ def get_services_for_date(target_date: date) -> set:
 def resolve_station_code(query: str) -> str:
     """Resolve a station name/alias to a code."""
     if not query:
-        return DEFAULT_ORIGIN
+        return _default_origin()
 
     query_lower = query.lower().strip()
 
@@ -477,6 +484,11 @@ async def lifespan(app: FastAPI):
     cache = CacheClient(url=REDIS_URL)
     await cache.connect()
 
+    household_reader = household.configure(sections=("amtrak",))
+    await household_reader.current()
+    if not _default_origin():
+        logger.warning("amtrak_default_origin_not_configured")
+
     # Pre-load GTFS data
     load_gtfs()
 
@@ -484,6 +496,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down Amtrak RAG service")
+
+    await household_reader.aclose()
 
     # Unregister from service registry
     await unregister_service("amtrak")
@@ -508,17 +522,18 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    default_origin = _default_origin()
     content = {
         "status": "healthy",
         "service": "amtrak-rag",
         "version": "1.0.0",
-        "default_origin": DEFAULT_ORIGIN or None,
+        "default_origin": default_origin or None,
         "gtfs_loaded": _gtfs_cache['loaded'],
         "stations": len(_gtfs_cache['stops']),
         "trips": len(_gtfs_cache['trips'])
     }
-    if not DEFAULT_ORIGIN:
-        content["message"] = "not configured: set DEFAULT_AMTRAK_STATION for a default origin"
+    if not default_origin:
+        content["message"] = f"not configured: {NOT_CONFIGURED_HINT} for a default origin"
     return content
 
 
@@ -560,17 +575,17 @@ async def get_schedule(
 
     Supports round trips when return_date is provided. If origin is omitted,
     the service's configured default station is used; if none is
-    configured, the request is rejected (set DEFAULT_AMTRAK_STATION).
+    configured, the request is rejected.
     """
     try:
         if not origin:
-            if not DEFAULT_ORIGIN:
+            origin = _default_origin()
+            if not origin:
                 raise HTTPException(
                     status_code=400,
-                    detail="No origin specified and DEFAULT_AMTRAK_STATION is not configured",
+                    detail=f"No origin specified and no default is configured: {NOT_CONFIGURED_HINT}",
                 )
-            origin = DEFAULT_ORIGIN
-            logger.info(f"Using default origin: {DEFAULT_ORIGIN}")
+            logger.info(f"Using default origin: {origin}")
 
         result = get_schedule_internal(origin, destination, date, return_date, limit)
         return result
@@ -616,13 +631,13 @@ async def natural_language_query(
 
     # If no origin specified, use the configured default (if any)
     if not origin:
-        if not DEFAULT_ORIGIN:
+        origin = _default_origin()
+        if not origin:
             return {
                 "error": "Could not determine origin station",
-                "hint": "Specify an origin (e.g. 'train from <station> to <destination>') or configure DEFAULT_AMTRAK_STATION",
+                "hint": f"Specify an origin (e.g. 'train from <station> to <destination>') or {NOT_CONFIGURED_HINT}",
             }
-        origin = DEFAULT_ORIGIN
-        logger.info(f"No origin specified, defaulting to {DEFAULT_ORIGIN}")
+        logger.info(f"No origin specified, defaulting to {origin}")
 
     if not destination:
         return {

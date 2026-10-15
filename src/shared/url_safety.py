@@ -742,3 +742,19 @@ def is_local_host(hostname: str | None) -> bool:
     if ip.is_link_local:
         return False
     return ip.is_loopback or ip.is_private
+
+
+def fetch_failure_reason(exc: BaseException, url: str) -> str:
+    """A short reason for a failed fetch that is safe to log and to show on a
+    health endpoint: never the URL, its path or its query (a feed URL can carry
+    a key). A refusal keeps its own reason with the URL reduced to its host; an
+    HTTP error keeps its status; anything else keeps only the exception class."""
+    try:
+        host = urlparse(url).hostname or "unknown"
+    except ValueError:
+        host = "unknown"
+    if isinstance(exc, SsrfBlockedError):
+        return str(exc).replace(url, host)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code} from {host}"
+    return f"{type(exc).__name__} fetching from {host}"
