@@ -123,7 +123,7 @@
         notify(picker);
         try {
             const response = await global.fetch(`${global.API_BASE || ''}${picker.path}`, {
-                headers: { 'Authorization': `Bearer ${global.authToken}` },
+                headers: HS.authHeaders(),
             });
             if (token !== picker.token) return;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -153,6 +153,11 @@
         const fresh = picker.status === 'ok' && Date.now() - picker.at < PICKER_STALE_MS;
         if (fresh && !force) return;
         loadPicker(picker, withGroup);
+    }
+
+    // A saved id the loaded Home Assistant list lacks (only once the list loaded).
+    function missingFromHomeAssistant(picker, id) {
+        return picker.status === 'ok' && !picker.items.some(item => item.entity_id === id);
     }
 
     function findByIdOrName(items, text) {
@@ -282,7 +287,7 @@
         const addMark = mark(addInput, addError);
         const chipList = el('ul', { class: 'flex flex-wrap gap-2 mb-2', 'aria-label': 'Lights in this room' });
         const groupHelp = el('p', { class: `${HIDDEN}${HELP_CLASS} mb-2` }, "A group answers as its bulbs. Guests reach only the bulbs they're allowed.");
-        const removeRoom = plainButton('Remove room', SECONDARY_BUTTON_CLASS, () => env.removeRow(row));
+        const removeRoom = plainButton('Remove room', `${LINK_BUTTON_CLASS} mt-6`, () => env.removeRow(row));
         const addButton = plainButton('Add', BUTTON_CLASS, () => commitLight(), false);
 
         function roomLabel() { return nameInput.value.trim() || 'this room'; }
@@ -292,7 +297,8 @@
             chipButtons.forEach((button, index) => {
                 const id = lights[index];
                 const name = friendlyNameOf(lightsPicker, id) || id;
-                button.setAttribute('aria-label', `Remove ${name} from ${roomLabel()}`);
+                const gone = missingFromHomeAssistant(lightsPicker, id) ? ' (not in Home Assistant)' : '';
+                button.setAttribute('aria-label', `Remove ${name}${gone} from ${roomLabel()}`);
             });
         }
 
@@ -309,10 +315,11 @@
                 remove.addEventListener('click', () => removeLight(id));
                 chipButtons.push(remove);
                 if (item && item.group) anyGroup = true;
-                chipList.appendChild(el('li', { class: 'flex items-center gap-2 bg-dark-bg border border-dark-border rounded-lg pl-3' },
-                    el('span', { class: 'text-sm text-white' }, item ? item.friendly_name : id),
-                    item && item.friendly_name !== id ? el('span', { class: 'text-xs text-gray-500' }, id) : null,
+                chipList.appendChild(el('li', { class: 'flex flex-wrap items-center gap-x-2 max-w-full min-w-0 bg-dark-bg border border-dark-border rounded-lg pl-3' },
+                    el('span', { class: 'text-sm text-white break-words min-w-0' }, item ? item.friendly_name : id),
+                    item && item.friendly_name !== id ? el('span', { class: 'text-xs text-gray-500 break-all w-full sm:w-auto' }, id) : null,
                     item && item.group ? el('span', { class: 'text-xs text-yellow-400' }, 'group') : null,
+                    missingFromHomeAssistant(lightsPicker, id) ? el('span', { class: 'text-xs text-gray-400 italic' }, 'Not in Home Assistant') : null,
                     remove));
             });
             groupHelp.className = `${anyGroup ? '' : HIDDEN}${HELP_CLASS} mb-2`;
@@ -367,16 +374,17 @@
 
         const row = {
             el: el('li', { class: 'mb-4 border border-dark-border rounded-lg p-3', 'data-room-row': 'lights' },
-                el('div', { class: 'mb-3' },
-                    el('label', { for: nameId, class: LABEL_CLASS }, 'Room name'),
-                    nameInput, nameError),
+                el('div', { class: 'flex flex-wrap items-start justify-between gap-x-3 mb-3' },
+                    el('div', { class: 'flex-1 min-w-0 sm:max-w-sm' },
+                        el('label', { for: nameId, class: LABEL_CLASS }, 'Room name'),
+                        nameInput, nameError),
+                    removeRoom),
                 el('p', { class: LABEL_CLASS }, 'Lights'),
                 chipList, groupHelp,
-                el('div', { class: 'mb-3' },
+                el('div', { class: 'sm:max-w-xl' },
                     el('label', { for: addId, class: LABEL_CLASS }, 'Add light'),
                     el('div', { class: 'flex flex-col sm:flex-row gap-2' }, addInput, addButton),
-                    addHelp, addError),
-                removeRoom),
+                    addHelp, addError)),
             roomName() { return nameInput.value.trim(); },
             read() { return { room: nameInput.value.trim(), lights: lights.slice() }; },
             validate() {
@@ -441,8 +449,11 @@
         function showCaption() {
             const resolved = resolveSatellite(keyInput.value);
             const name = resolved.key ? friendlyNameOf(satellitesPicker, resolved.key) : '';
-            caption.textContent = name ? `Home Assistant name: ${name}` : '';
-            caption.className = `${name ? '' : HIDDEN}${HELP_CLASS}`;
+            const typed = keyInput.value.trim().toLowerCase();
+            const gone = !name && SATELLITE_ID_RE.test(typed) && missingFromHomeAssistant(satellitesPicker, typed);
+            const text = name ? `Home Assistant name: ${name}` : (gone ? 'Not found in Home Assistant' : '');
+            caption.textContent = text;
+            caption.className = `${text ? '' : HIDDEN}${HELP_CLASS}`;
         }
 
         function checkKey() {

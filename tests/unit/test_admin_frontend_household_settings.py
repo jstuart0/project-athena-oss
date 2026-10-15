@@ -147,7 +147,9 @@ global.showTab = function (name) { global.__shown.push(name); return 'shown'; };
 global.__perms = ['read', 'write', 'manage_infrastructure'];
 global.hasPermission = p => global.__perms.includes(p);
 global.API_BASE = '';
-global.authToken = 'test-token';
+// Production shape: app.js's `let authToken` is not on window; the token lives in localStorage.
+global.authToken = undefined;
+global.localStorage = { getItem: key => (key === 'auth_token' ? 'test-token' : null) };
 global.console.error = () => {};
 
 global.__entry = (value, stored, extra) => Object.assign({ value, stored: stored || {}, revision: 3, required_permission: 'write', writable: true }, extra || {});

@@ -99,8 +99,9 @@ def test_the_script_is_copied_and_tagged_after_the_renderer_and_before_escape_ht
 
 
 def test_the_edited_scripts_carry_the_new_buster(html):
-    for name in ("room-settings.js", "room-groups.js", "app.js"):
-        assert re.search(rf'/{re.escape(name)}\?v=20261015-lg4"', html), name
+    for name, tag in (("room-settings.js", "lg5"), ("room-groups.js", "lg4"), ("app.js", "lg4")):
+        assert re.search(rf'/{re.escape(name)}\?v=20261015-{tag}"', html), name
+    assert re.search(r'/household-settings\.js\?v=20261015-hs4"', html), "edited for the signed-in token"
 
 
 def test_the_rooms_tab_holds_both_containers_above_the_groups_and_is_named_rooms(html):
@@ -162,9 +163,12 @@ def test_room_lights_shows_unset_none_and_rows_distinctly_and_sends_each():
         __routes['PUT ' + HH + '/room_lights'] = __rlPut(null, 6);
         __saveButton(lights).click();
         await __settle();
-        return {states, sentRows, noneText, sentNone, sentNull: __lastPut().body.value, saved: __text(lights).includes('Saved. Changes reach the assistant within a minute.')};
+        return {states, sentRows, noneText, sentNone, sentNull: __lastPut().body.value, saved: __text(lights).includes('Saved. Changes reach the assistant within a minute.'),
+                auths: Array.from(new Set(__fetches.map(f => f.headers && f.headers.Authorization))), kinds: Array.from(new Set(__fetches.map(f => f.method + (f.url.includes('/candidates') ? ' picker' : ''))))};
         """
     )
+    # The token exists only in localStorage (app.js's `let authToken` is not on window): every card and picker request must still carry it.
+    assert result["auths"] == ["Bearer test-token"] and {"GET", "GET picker", "PUT"} <= set(result["kinds"])
     assert result["states"][0] == {"unset": True, "add": 1, "useServer": 0}
     assert result["sentRows"] == {"value": {"rooms": [{"room": "Living room", "lights": ["light.floor_lamp"]}]}, "revision": 3}
     assert result["noneText"] is True
@@ -403,6 +407,54 @@ def test_a_light_group_shows_a_group_marker_and_the_guest_help():
         """
     )
     assert result == {"group": 1, "helpVisible": True, "id": True}
+
+
+def test_a_saved_light_home_assistant_no_longer_has_is_marked_in_text_and_in_its_remove_label():
+    result = scenario(
+        r"""
+        const {lights} = __setup({rl: __rl([{room: 'Den', lights: ['light.sofa', 'light.not_in_ha_anymore']}])});
+        await __mount();
+        const row = __row(lights, 0);
+        const tags = row.find(e => e.tagName === 'SPAN' && e.textContent === 'Not in Home Assistant').length;
+        const labels = __chipRemoves(row).map(b => b.attrs['aria-label']);
+        return {tags, labels};
+        """
+    )
+    assert result["tags"] == 1
+    assert result["labels"] == ["Remove Sofa strip from Den", "Remove light.not_in_ha_anymore (not in Home Assistant) from Den"]
+
+
+def test_nothing_is_marked_missing_while_the_home_assistant_list_is_unavailable():
+    result = scenario(
+        r"""
+        const {lights} = __setup({rl: __rl([{room: 'Den', lights: ['light.not_in_ha_anymore']}]), lights: {status: 502, body: {}}});
+        await __mount();
+        return {tags: __row(lights, 0).find(e => e.tagName === 'SPAN' && e.textContent === 'Not in Home Assistant').length};
+        """
+    )
+    assert result["tags"] == 0
+
+
+def test_a_satellite_home_assistant_does_not_list_is_captioned_not_found():
+    result = scenario(
+        r"""
+        const {speakers} = __setup({sr: __sr([{key: 'assist_satellite.gone', room: 'Den'}, {key: 'assist_satellite.kitchen', room: 'Kitchen'}])});
+        await __mount();
+        return {gone: __row(speakers, 0).textContent.includes('Not found in Home Assistant'), listed: __row(speakers, 1).textContent.includes('Not found in Home Assistant')};
+        """
+    )
+    assert result == {"gone": True, "listed": False}
+
+
+def test_a_long_chip_wraps_inside_its_row_and_the_room_row_stays_compact(source):
+    chip = source[source.index("chipList.appendChild(el('li'"):]
+    chip = chip[: chip.index("remove));")]
+    assert "flex-wrap" in chip and "max-w-full" in chip and "min-w-0" in chip
+    assert "break-all" in chip and "w-full sm:w-auto" in chip, "the entity id sits on its own line below sm and breaks"
+    row = source[source.index("el('li', { class: 'mb-4 border border-dark-border rounded-lg p-3', 'data-room-row': 'lights' }"):]
+    row = row[: row.index("roomName()")]
+    assert "sm:max-w-sm" in row and "sm:max-w-xl" in row
+    assert row.index("removeRoom") < row.index("Add light"), "Remove room sits in the row header"
 
 
 def test_typed_names_resolve_and_an_unmatched_value_is_refused_while_home_assistant_answers():

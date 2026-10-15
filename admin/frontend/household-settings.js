@@ -630,8 +630,15 @@
         return typeof global.hasPermission === 'function' && global.hasPermission(permission) === true;
     }
 
+    // app.js keeps the token in a script-scoped `let` (not on window), so ask the shared
+    // accessor from utils.js, which falls back to the stored login.
+    function signedInToken() {
+        if (typeof global.getAuthToken === 'function') return global.getAuthToken();
+        return global.localStorage ? global.localStorage.getItem('auth_token') : null;
+    }
+
     function authHeaders(extra) {
-        return Object.assign({ 'Authorization': `Bearer ${global.authToken}` }, extra || {});
+        return Object.assign({ 'Authorization': `Bearer ${signedInToken()}` }, extra || {});
     }
 
     function createCard(section, container) {
@@ -999,5 +1006,5 @@
     // The small DOM helpers and control classes, shared with household-settings-lists.js.
     const ui = { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, SECONDARY_BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN };
 
-    global.HouseholdSettings = { mount, focusHeading, registerKind, defineCard, messageFor, ui };
+    global.HouseholdSettings = { mount, focusHeading, registerKind, defineCard, messageFor, ui, authHeaders };
 })(window);
