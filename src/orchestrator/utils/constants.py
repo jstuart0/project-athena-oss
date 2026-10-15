@@ -72,9 +72,21 @@ FALLBACK_MODELS: Dict[str, str] = {
 # Location Configuration
 # ============================================================================
 
-DEFAULT_CITY = get_config().default_city
-DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
-DEFAULT_LOCATION = ", ".join(p for p in (DEFAULT_CITY, DEFAULT_STATE) if p)
+def default_city() -> str:
+    """The house's city keyword: the admin Base Knowledge location when its city
+    is known, else DEFAULT_CITY. Read per call so an admin change applies."""
+    from shared import household
+
+    return household.location().city
+
+
+def default_location() -> str:
+    """The house's location text (``"City, ST"`` or a full address)."""
+    from shared import household
+
+    return household.location().text
+
+
 # OSS-First: empty default; set DEFAULT_TIMEZONE in env for local time awareness.
 DEFAULT_TIMEZONE = get_config().default_timezone
 

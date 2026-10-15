@@ -51,6 +51,7 @@ from orchestrator.session_manager import SessionManager  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import orchestrator.semantic_cache as semantic_cache  # noqa: E402
+from shared import household  # noqa: E402
 from orchestrator.search_providers.provider_router import ProviderRouter  # noqa: E402
 from orchestrator.search_providers.eventbrite import EventbriteProvider  # noqa: E402
 from orchestrator.search_providers.ticketmaster import TicketmasterProvider  # noqa: E402
@@ -304,7 +305,7 @@ def test_O6_normalize_location_word_boundary_retires_cmd_bug(monkeypatch):
     # mentioned different location. query_mentions_location's word-boundary
     # match retires this: "cmd" no longer satisfies the "md" alias, so
     # normalize_location falls through to the explicit "in Denver" mention.
-    monkeypatch.setattr(semantic_cache, "DEFAULT_CITY", "MD")
+    household.install_for_test(sources={"location": {"city": "MD", "state": "MD", "text": "MD, MD"}})
     result = semantic_cache.normalize_location("in Denver, run the cmd line tool")
     assert result == "denver"
 

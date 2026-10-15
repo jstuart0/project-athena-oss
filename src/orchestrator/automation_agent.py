@@ -27,7 +27,7 @@ from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
 from orchestrator import access_target
 from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
-from orchestrator.utils.constants import DEFAULT_CITY
+from orchestrator.utils.constants import default_city
 from orchestrator.utterance_kind import (
     UtteranceKind, classify_utterance, command_query, has_deferral, has_narration, has_trailing_condition,
     is_narration,
@@ -1743,7 +1743,7 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
         'surprise me', 'fun things', 'good things', 'enjoy',
     ]
     # City-derived queries (likely tourism/recommendations), deployment-
-    # specific rather than a hardcoded house city (3.9). Empty DEFAULT_CITY
+    # specific rather than a hardcoded house city (3.9). Empty default city
     # contributes no phrases.
     #
     # Imported locally, not at module level (R2-C3 / DC14 item 0): a
@@ -1761,7 +1761,7 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     # after main.py has finished its own module-level imports, so both
     # modules are already fully initialized in sys.modules.
     from orchestrator.helpers import city_phrases
-    exclusion_patterns += city_phrases(DEFAULT_CITY, ["represent {c}", "{c} has to offer", "best of {c}"])
+    exclusion_patterns += city_phrases(default_city(), ["represent {c}", "{c} has to offer", "best of {c}"])
     if any(p in query_lower for p in exclusion_patterns):
         return False
 

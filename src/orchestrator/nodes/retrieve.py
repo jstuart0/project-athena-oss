@@ -29,7 +29,7 @@ from orchestrator.rag_validator import validator, ValidationResult
 from orchestrator.sports_status import team_events
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.urls import WEBSEARCH_SERVICE_URL
-from orchestrator.utils.constants import DEFAULT_LOCATION
+from orchestrator.utils.constants import default_location
 from orchestrator.helpers import (
     get_weather_provider_mode,
     get_rag_service_url,
@@ -239,14 +239,15 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                         'right now', 'at the moment', 'this morning', 'this afternoon',
                         'this evening', 'later today',
                     }
-                    raw_location = state.entities.get("location", DEFAULT_LOCATION)
+                    home_location = default_location()
+                    raw_location = state.entities.get("location", home_location)
                     raw_lower = raw_location.lower().strip().strip(" ?!.,") if raw_location else ""
                     # Use default location if extracted location is actually a temporal word/phrase
                     if raw_lower and (raw_lower in TEMPORAL_WORDS or raw_lower in TEMPORAL_PHRASES):
                         logger.info("temporal_location_filtered", location_source="default")
-                        location = DEFAULT_LOCATION
+                        location = home_location
                     else:
-                        location = raw_location or DEFAULT_LOCATION
+                        location = raw_location or home_location
                     time_ref = state.entities.get("time_ref")
 
                     # Detect temporal intent from query when time_ref is not set by classifier
@@ -513,7 +514,8 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
             # Check if query has location-sensitive keywords that need location context
             location_keywords = ["local", "near me", "nearby", "in my area", "around here", "close by", "in town"]
             query_lower = state.query.lower()
-            user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
+            home_location = default_location()
+            user_location = state.entities.get("location", home_location) if state.entities else home_location
 
             if any(kw in query_lower for kw in location_keywords):
                 search_query = f"{enhance_query_with_year(state.query)} {user_location}"
@@ -524,7 +526,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
             # Execute parallel search with automatic intent classification
             intent, search_results = await parallel_search_engine.search(
                 query=search_query,
-                location=DEFAULT_LOCATION,
+                location=home_location,
                 limit_per_provider=5
             )
 

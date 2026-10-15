@@ -31,7 +31,17 @@ def _controller():
 
 
 def _set_config(monkeypatch, raw: str):
-    monkeypatch.setattr(shc, "get_config", lambda: mock.MagicMock(ha_bed_warmer_entities=raw))
+    """The environment fallback, through the real config and resolver."""
+    import shared.config
+
+    monkeypatch.setenv("HA_BED_WARMER_ENTITIES", raw)
+    shared.config._clear_cache_for_tests()
+
+
+def _install_admin(**entities):
+    from shared import household
+
+    household.install_for_test(sources={"bed_warmer": entities})
 
 
 def test_unconfigured_returns_clear_not_configured_message_no_ha_calls(monkeypatch):
@@ -44,6 +54,7 @@ def test_unconfigured_returns_clear_not_configured_message_no_ha_calls(monkeypat
     )
 
     assert "isn't configured" in result.lower()
+    assert "Devices page" in result
     assert "HA_BED_WARMER_ENTITIES" in result
     ha_client.call_service.assert_not_awaited()
 
@@ -110,3 +121,30 @@ def test_configured_warm_bed_both_sides_uses_configured_level_entities(monkeypat
     assert "select.custom_left" in entity_ids_called
     assert "select.custom_right" in entity_ids_called
     assert "level 4" in result.lower()
+
+
+def test_admin_devices_page_value_is_used_over_the_environment(monkeypatch):
+    _set_config(monkeypatch, (
+        '{"level_left": "select.env_left", "level_right": "select.env_right", '
+        '"power_main": "switch.env_main", "power_side_a": "switch.a", "power_side_b": "switch.b"}'
+    ))
+    _install_admin(level_left="select.adm_left", level_right="select.adm_right",
+                   power_main="switch.adm_main", power_side_a="switch.adm_a", power_side_b="switch.adm_b")
+    ha_client = mock.MagicMock()
+    ha_client.call_service = mock.AsyncMock(return_value={})
+
+    asyncio.run(_controller()._handle_bed_warmer_intent("turn_off", {}, ha_client))
+
+    ha_client.call_service.assert_awaited_once_with("switch", "turn_off", {"entity_id": "switch.adm_main"})
+
+
+def test_a_partial_admin_value_is_not_mixed_with_the_environment(monkeypatch):
+    _set_config(monkeypatch, "")
+    _install_admin(power_main="switch.adm_main")
+    ha_client = mock.MagicMock()
+    ha_client.call_service = mock.AsyncMock()
+
+    result = asyncio.run(_controller()._handle_bed_warmer_intent("turn_off", {}, ha_client))
+
+    assert "isn't configured" in result.lower()
+    ha_client.call_service.assert_not_awaited()

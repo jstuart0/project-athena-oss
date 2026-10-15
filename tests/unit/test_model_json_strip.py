@@ -19,7 +19,6 @@ FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 OPERATOR_ENV = {
     "_get_light_groups": "HA_LIGHT_GROUPS, an operator setting",
-    "_handle_bed_warmer_intent": "HA_BED_WARMER_ENTITIES, an operator setting",
 }
 
 
@@ -73,7 +72,8 @@ def loads_sites(source: str):
 
 def test_population_floor_and_named_members():
     sites = loads_sites(CONTROLLER.read_text(encoding="utf-8"))
-    assert len(sites) >= 3
+    # The bed warmer's parse moved to shared.household (admin value, then env), so two sites remain.
+    assert len(sites) >= 2
     assert "_model_object" in {name for name, _ in sites}
     assert set(OPERATOR_ENV) <= {name for name, _ in sites}, "an allowlisted site no longer exists: drop it"
 

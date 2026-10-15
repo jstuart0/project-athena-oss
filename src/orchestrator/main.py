@@ -42,7 +42,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
-from shared import ha_auth, ha_link
+from shared import ha_auth, ha_link, household
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
@@ -149,7 +149,7 @@ from orchestrator.context import (
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
-from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_CITY, CITY_STATE_MAP, DEFAULT_TIMEZONE
+from orchestrator.utils.constants import default_location, default_city, CITY_STATE_MAP, DEFAULT_TIMEZONE
 
 # SMS integration imports
 from sms.content_detector import detect_textable_content, extract_sms_content
@@ -1178,6 +1178,15 @@ def _build_ha_channels(
     return client, HAEntityManager(ensure_permission_enforcing(client))
 
 
+# The household settings sections this process reads (one tuple, so a campaign
+# that adds a section and its resolver appends the name here in the same change).
+HOUSEHOLD_SECTIONS: tuple = ("location", "lights", "bed_warmer")
+
+# The first load never holds startup longer than the admin fetch's own timeout
+# plus a margin; on a miss the resolvers serve env until the first refresh.
+HOUSEHOLD_STARTUP_TIMEOUT_S = 2.5
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
@@ -1203,6 +1212,15 @@ async def lifespan(app: FastAPI):
 
     # Initialize admin client
     admin_client = get_admin_client()
+
+    # Household settings (location, lamp exclusions, bed warmer): admin value,
+    # then env, then the built-in default. Loaded before anything reads them
+    # (the room directory below included); a failure leaves env in force.
+    household_reader = household.configure(sections=HOUSEHOLD_SECTIONS, spawn=_runtime.spawn_background)
+    try:
+        await asyncio.wait_for(household_reader.current(), timeout=HOUSEHOLD_STARTUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("household_settings_startup_timeout")
 
     # Redis first: the Home Assistant auth gate keeps its shared state there.
     cache_client = CacheClient()
@@ -1514,18 +1532,22 @@ async def lifespan(app: FastAPI):
     # Atomic replacement of the 8 explicit if-close lines; avoids double-close window.
     # admin_client is a per-call client (not a runtime singleton) — closed explicitly.
     logger.info("Shutting down Orchestrator service")
-    # Order: drain background work, then stop capture (2 s drain, so turns that
-    # background work finishes still reach the sink), then close the clients.
-    # Each step runs even if an earlier one raises.
+    # Order: close the household reader (cancels its refresh), drain background
+    # work, then stop capture (2 s drain, so turns that background work finishes
+    # still reach the sink), then close the clients. Each step runs even if an
+    # earlier one raises.
     try:
-        await _runtime.drain_background()
+        await household_reader.aclose()
     finally:
         try:
-            await capture_sink.stop(drain_s=contract_capture.DRAIN_S)
+            await _runtime.drain_background()
         finally:
-            if admin_client:
-                await admin_client.close()
-            await _runtime.close_all()
+            try:
+                await capture_sink.stop(drain_s=contract_capture.DRAIN_S)
+            finally:
+                if admin_client:
+                    await admin_client.close()
+                await _runtime.close_all()
 
 app = FastAPI(
     title="Athena Orchestrator",
@@ -3742,7 +3764,7 @@ async def execute_tools_parallel(
 
     # Default location if not provided
     if not location:
-        location = DEFAULT_LOCATION
+        location = default_location()
 
     results = {}
     admin_client = get_admin_client()
@@ -4649,8 +4671,8 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             "plan the day", "plan a day", "plan our day", "plan this weekend"
         ]
         # City-derived phrases (3.9): deployment-specific, not a hardcoded
-        # house city. Empty DEFAULT_CITY contributes no phrases.
-        planning_keywords.extend(city_phrases(DEFAULT_CITY, ["represent {c}", "{c} experience"]))
+        # house city. Empty default city contributes no phrases.
+        planning_keywords.extend(city_phrases(default_city(), ["represent {c}", "{c} experience"]))
         # Exclude party/event planning from triggering day itinerary
         party_exclusions = ["birthday party", "party for", "party planning", "planning a party",
                            "plan a party", "anniversary party", "surprise party", "baby shower",
@@ -4776,8 +4798,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             assistant_name=assistant_name,
             **addressee.prompt_kwargs(),
         ) + "\n"
-        home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
-        search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
+        home_location = default_location()
+        home_address = home_location  # Permanent home address (for "directions from home")
+        search_location = home_location  # Current location for searches (may differ from home)
 
         # Inject base knowledge context from Admin API. The public audience
         # gets neither base knowledge nor the home address: its searches use
@@ -4812,7 +4835,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             # words name a place (a classifier "outdoor seating" is not one); else
             # home. This changes the SEARCH location, never the HOME address.
             search_location, location_source = resolve_search_location(
-                state, search_location or DEFAULT_LOCATION
+                state, search_location or default_location()
             )
             logger.info("search_location_resolved", location_source=location_source)
         except Exception as e:
@@ -5197,7 +5220,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
             if not origin:
                 # Fall back to default location from base_knowledge
-                origin = DEFAULT_LOCATION
+                origin = default_location()
                 logger.info(f"Forced directions: using default location as origin: {origin}")
 
             if destination and origin:
@@ -5458,7 +5481,7 @@ Provide a helpful answer:"""
         # Execute tools with timeout
         # Pass the resolved search location (location override, a place the user
         # named, else home) for local search enrichment
-        user_location = search_location or DEFAULT_LOCATION
+        user_location = search_location or default_location()
 
         try:
             tool_exec_start = time.time()
@@ -5553,7 +5576,7 @@ Provide a helpful answer:"""
 
                     # Location-sensitive tools need location in query (search providers ignore location param)
                     location_sensitive_tools = ["search_restaurants", "search_events", "get_weather", "search_flights"]
-                    user_location = search_location or DEFAULT_LOCATION
+                    user_location = search_location or default_location()
 
                     if function_name in location_sensitive_tools:
                         enhanced_query = f"{search_query} {context} {user_location}"
@@ -5566,7 +5589,7 @@ Provide a helpful answer:"""
                         # Use parallel search engine for web search fallback
                         intent, search_results = await psearch.search(
                             query=enhanced_query,
-                            location=DEFAULT_LOCATION,
+                            location=default_location(),
                             limit_per_provider=10,
                             force_search=True  # Force web search even for RAG intents
                         )
@@ -5673,7 +5696,7 @@ Provide a helpful answer:"""
 
                     # Location-sensitive tools need location in query (search providers ignore location param)
                     location_sensitive_tools = ["search_restaurants", "search_events", "get_weather", "search_flights"]
-                    user_location = search_location or DEFAULT_LOCATION
+                    user_location = search_location or default_location()
 
                     if function_name in location_sensitive_tools:
                         # Include location in query for local results
@@ -5685,7 +5708,7 @@ Provide a helpful answer:"""
 
                     intent, search_results = await psearch.search(
                         query=enhanced_query,
-                        location=DEFAULT_LOCATION,
+                        location=default_location(),
                         limit_per_provider=10,
                         force_search=True
                     )

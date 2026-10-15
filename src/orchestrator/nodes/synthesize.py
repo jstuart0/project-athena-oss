@@ -25,7 +25,7 @@ from orchestrator.helpers import (
     store_conversation_context,
     resolve_addressee,
 )
-from orchestrator.utils.constants import DEFAULT_CITY
+from orchestrator.utils.constants import default_city
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt, resolve_assistant_name
 from shared.base_knowledge_utils import (
@@ -84,7 +84,7 @@ async def save_synthesis_context(state: OrchestratorState, answer: Optional[str]
 
             if state.intent == IntentCategory.WEATHER:
                 # Extract location from query or use default
-                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["location"] = state.entities.get("location", default_city())
                 context_entities["query_type"] = "weather"
                 if state.retrieved_data:
                     context_params["last_data"] = state.retrieved_data
@@ -98,7 +98,7 @@ async def save_synthesis_context(state: OrchestratorState, answer: Optional[str]
             elif state.intent == IntentCategory.DINING:
                 # Extract cuisine/location preferences
                 context_entities["cuisine"] = state.entities.get("cuisine")
-                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["location"] = state.entities.get("location", default_city())
                 context_entities["query_type"] = "dining"
 
             elif state.intent == IntentCategory.NEWS:
@@ -109,7 +109,7 @@ async def save_synthesis_context(state: OrchestratorState, answer: Optional[str]
             elif state.intent == IntentCategory.EVENTS:
                 # Extract event type/location
                 context_entities["event_type"] = state.entities.get("event_type")
-                context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
+                context_entities["location"] = state.entities.get("location", default_city())
                 context_entities["query_type"] = "events"
 
             elif state.intent == IntentCategory.STREAMING:

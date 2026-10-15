@@ -14,7 +14,7 @@ from typing import Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 
 from shared.cache import get_cache_client
-from orchestrator.utils.constants import DEFAULT_CITY
+from orchestrator.utils.constants import default_city
 import structlog
 
 # Bumped when what a cached answer may contain changes. Sits right before the
@@ -453,7 +453,7 @@ def _slug(text: str) -> str:
 
 
 def _location_aliases(city: str) -> Dict[str, str]:
-    """Location-normalization alias derived from DEFAULT_CITY (3.9).
+    """Location-normalization alias derived from the default city (3.9).
 
     Replaces the old hardcoded 8-entry, single-region alias list (multiple
     neighborhood/nickname/state spellings all mapping to one region key) --
@@ -498,7 +498,8 @@ def normalize_location(text: str) -> str:
     # orchestrator.helpers first triggers the same circular partial-init
     # ImportError on maybe_post_synthesis_fallback.
     from orchestrator.helpers import query_mentions_location
-    for pattern, normalized in _location_aliases(DEFAULT_CITY).items():
+    city = default_city()
+    for pattern, normalized in _location_aliases(city).items():
         if query_mentions_location(text_lower, pattern):
             return normalized
 
@@ -522,9 +523,9 @@ def normalize_location(text: str) -> str:
     if any(phrase in text_lower for phrase in default_phrases):
         return "user_location"  # Different key than an explicit default-city query
 
-    # Empty DEFAULT_CITY means there's no deployment-specific default to key
+    # An empty default city means there's no deployment-specific default to key
     # on; fall back to a generic key rather than a hardcoded house city.
-    return f"default_{_slug(DEFAULT_CITY)}" if DEFAULT_CITY else "default_location"
+    return f"default_{_slug(city)}" if city else "default_location"
 
 
 def extract_semantic_intent(query: str) -> Tuple[str, str]:

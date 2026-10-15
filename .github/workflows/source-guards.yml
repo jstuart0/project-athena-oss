@@ -109,6 +109,26 @@ jobs:
         run: |
           python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_reader.py
 
+      # The orchestrator's household readers (location, lamp exclusions, bed
+      # warmer) and its lifespan; one process, no module-scope environment.
+      - name: Run the household orchestrator reader tests
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_orchestrator_readers.py tests/unit/test_household_orchestrator_lifespan.py
+
+      # Stubs prometheus_client and langgraph in sys.modules at import.
+      - name: Run the bed warmer tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_smart_home_bed_warmer.py
+
+      # Sets SERVICE_API_KEY and ADMIN_API_URL at import and swaps
+      # orchestrator.config_loader, so it runs alone.
+      - name: Run the OSS readiness orchestrator tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_oss_readiness_orchestrator.py
+
       - name: Run the context continuation tests (own process)
         shell: bash
         run: |

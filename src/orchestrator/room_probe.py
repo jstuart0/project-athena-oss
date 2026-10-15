@@ -34,6 +34,7 @@ from orchestrator.ha_entity_manager import _room_light_exclude_patterns, area_la
 from shared.ha_auth import HAAuthLatch
 from shared.ha_credentials import KeyLookup, StaticResolver, resolve
 from shared.ha_http import HAChannel
+from shared import household
 from shared.ha_registry import RegistrySnapshot, snapshot_fetcher
 
 UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
@@ -168,6 +169,13 @@ async def _live_states(resolver: StaticResolver, latch: HAAuthLatch) -> Mapping[
         await channel.aclose()
 
 
+async def _run_with_household(*args: Any, **kwargs: Any) -> int:
+    """Load the household settings once, so the exclusions match the live
+    process, then run the probe."""
+    await household.reader().current()
+    return await run(*args, exclude=_room_light_exclude_patterns(), **kwargs)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="orchestrator.room_probe", description=__doc__.split("\n\n")[0])
     parser.add_argument("--runs", type=int, default=10)
@@ -186,11 +194,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     resolver = StaticResolver(credentials)
     latch = HAAuthLatch(None, instance="room-probe", service_api_key=service_key)
     try:
-        return asyncio.run(run(
+        return asyncio.run(_run_with_household(
             snapshot_fetcher(resolver, latch, caller="orchestrator_registry"),
             lambda: _live_states(resolver, latch),
             runs=args.runs, shape=args.shape, show_names=args.areas,
-            utterances=_read_utterances(args.utterances), exclude=_room_light_exclude_patterns(),
+            utterances=_read_utterances(args.utterances),
         ))
     except Exception as exc:
         print(f"probe failed: {type(exc).__name__}", file=sys.stderr)
