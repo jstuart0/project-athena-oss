@@ -18,6 +18,7 @@ on:
       - "tests/unit/test_admin_frontend_mission_control_ha.py"
       - "tests/unit/test_admin_frontend_ha_reason_v1_fallback.py"
       - "tests/unit/test_admin_frontend_favorite_teams.py"
+      - "tests/unit/test_admin_frontend_household_settings.py"
       - "tests/unit/frontend_node.py"
       - "tests/fixtures/admin_frontend/**"
       - "admin/backend/app/services/health_poller.py"
@@ -50,6 +51,7 @@ on:
       - "tests/unit/test_admin_frontend_mission_control_ha.py"
       - "tests/unit/test_admin_frontend_ha_reason_v1_fallback.py"
       - "tests/unit/test_admin_frontend_favorite_teams.py"
+      - "tests/unit/test_admin_frontend_household_settings.py"
       - "tests/unit/frontend_node.py"
       - "tests/fixtures/admin_frontend/**"
       - "admin/backend/app/services/health_poller.py"
@@ -325,3 +327,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pytest -q -p no:cacheprovider tests/unit/test_admin_frontend_favorite_teams.py
+
+      - name: Run the household settings card tests (Node, zero skips)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_admin_frontend_household_settings.py

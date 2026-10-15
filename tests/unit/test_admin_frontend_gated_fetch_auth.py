@@ -37,6 +37,7 @@ GATED_PREFIXES = (
     "/api/settings/house-layout",
     "/api/settings/directions-origin-placeholders",
     "/api/settings/favorite-teams",
+    "/api/settings/household",
     "/api/llm-backends/model/",
     "/api/sms/internal/",
     "/api/debug-logs",

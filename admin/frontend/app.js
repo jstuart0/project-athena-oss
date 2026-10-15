@@ -688,6 +688,7 @@ function showTab(tabName) {
             break;
         case 'devices':
             loadDevices();
+            if (window.HouseholdSettings) [['lights', 'household-card-lights'], ['bed_warmer', 'household-card-bed-warmer'], ['jarvis_web', 'household-card-jarvis-web']].forEach(([section, id]) => HouseholdSettings.mount(section, id));
             break;
         case 'users':
             loadUsers();

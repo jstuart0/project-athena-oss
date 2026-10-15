@@ -40,6 +40,7 @@ function gatewayShowToast(message, type = 'info') {
  * Load gateway configuration from backend
  */
 async function loadGatewayConfig() {
+    if (window.HouseholdSettings) HouseholdSettings.mount('gateway', 'household-card-gateway');
     try {
         const response = await fetch('/api/gateway-config', {
             headers: getGatewayAuthHeaders()

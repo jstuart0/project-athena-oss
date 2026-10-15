@@ -14,6 +14,7 @@ let smsHistoryTotal = 0;
 // ============================================================================
 
 async function loadSMSData() {
+    if (window.HouseholdSettings) HouseholdSettings.mount('sms', 'household-card-sms');
     await Promise.all([
         loadSMSSettings(),
         loadSMSHistory(0),

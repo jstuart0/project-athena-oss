@@ -284,6 +284,48 @@
         `;
     }
 
+    const LOCATION_TIER_LABELS = { both: 'Everyone', guest: 'Guests only', household: 'Household only', owner: 'Owner only' };
+
+    /**
+     * Says whether services can use the home location: only an enabled,
+     * non-empty entry set to Everyone counts (weather and directions answer for
+     * guests too). Text only; it never blocks the card, so a failed lookup
+     * leaves the help empty.
+     */
+    async function fillLocationHelp() {
+        const help = document.getElementById('knowledge-location-help');
+        if (!help) return;
+        let entries;
+        try {
+            entries = await Athena.api('/api/base-knowledge');
+        } catch {
+            return;
+        }
+        const rows = (Array.isArray(entries) ? entries : [])
+            .filter(e => e.category === 'location' && e.key === 'default_location' && e.value);
+        const counted = rows.some(e => e.enabled && e.applies_to === 'both');
+        help.textContent = '';
+        if (counted) {
+            help.className = 'text-xs text-gray-500';
+            help.textContent = 'Athena uses this as your home location for weather, directions and local answers.';
+        } else if (rows.length) {
+            const row = rows.slice().sort((x, y) => x.id - y.id)[0];
+            const reason = row.enabled
+                ? `This location is ${LOCATION_TIER_LABELS[row.applies_to] || 'not shared with everyone'}, so weather and directions can't use it (they answer for guests too). Set it to Everyone to use it.`
+                : "This location entry is turned off, so weather and directions can't use it. Turn it on and set it to Everyone to use it.";
+            help.className = 'text-xs text-yellow-400';
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'ml-1 min-h-[44px] text-blue-400 hover:text-blue-300 underline';
+            open.textContent = 'Open Base Knowledge';
+            open.addEventListener('click', () => window.showTab('base-knowledge'));
+            help.append(reason, open);
+        } else {
+            help.className = 'text-xs text-gray-500';
+            help.textContent = "No home location set. Athena uses the server's setting, if there is one.";
+        }
+    }
+
     /**
      * Load base knowledge tab.
      */
@@ -336,6 +378,7 @@
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
                         </div>
+                        <div id="knowledge-location-help" role="status" class="hidden text-xs"></div>
                         <p class="text-xs text-gray-500">Your teams for sports questions are set on the Conversation Context page.
                             <button type="button" id="knowledge-favorite-teams-link" onclick="showTab('conversation-context'); focusFavoriteTeamsHeading()" class="text-blue-400 hover:text-blue-300 underline">Favourite teams &rarr;</button>
                         </p>
@@ -430,6 +473,8 @@
                 </button>
             </div>
         `;
+
+        fillLocationHelp();
 
         // Start time update
         updateCurrentTime();
