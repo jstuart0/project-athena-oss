@@ -35,6 +35,7 @@
     const MAX_ROOM_NAME = 64;
     const PICKER_STALE_MS = 30000;
     const OWNER_PERMISSION = 'manage_infrastructure';
+    const EMPTY_STATE_ANNOUNCEMENT = "None are listed now. Save to use only Home Assistant areas, or use the server's setting.";
 
     const SECONDARY_BUTTON_CLASS = 'min-h-[44px] px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
     const LABEL_CLASS = 'block text-sm font-medium text-gray-400 mb-1';
@@ -287,7 +288,7 @@
         const addMark = mark(addInput, addError);
         const chipList = el('ul', { class: 'flex flex-wrap gap-2 mb-2', 'aria-label': 'Lights in this room' });
         const groupHelp = el('p', { class: `${HIDDEN}${HELP_CLASS} mb-2` }, "A group answers as its bulbs. Guests reach only the bulbs they're allowed.");
-        const removeRoom = plainButton('Remove room', `${LINK_BUTTON_CLASS} mt-6`, () => env.removeRow(row));
+        const removeRoom = plainButton('Remove room', `${LINK_BUTTON_CLASS} sm:mt-6`, () => env.removeRow(row));
         const addButton = plainButton('Add', BUTTON_CLASS, () => commitLight(), false);
 
         function roomLabel() { return nameInput.value.trim() || 'this room'; }
@@ -375,7 +376,7 @@
         const row = {
             el: el('li', { class: 'mb-4 border border-dark-border rounded-lg p-3', 'data-room-row': 'lights' },
                 el('div', { class: 'flex flex-wrap items-start justify-between gap-x-3 mb-3' },
-                    el('div', { class: 'flex-1 min-w-0 sm:max-w-sm' },
+                    el('div', { class: 'flex-1 min-w-0 basis-full sm:basis-auto sm:max-w-sm' },
                         el('label', { for: nameId, class: LABEL_CLASS }, 'Room name'),
                         nameInput, nameError),
                     removeRoom),
@@ -643,7 +644,8 @@
                 setListError('');
                 render();
                 ctx.changed();
-                ctx.announce(`${type.noun.charAt(0).toUpperCase()}${type.noun.slice(1)} removed`);
+                const removed = `${type.noun.charAt(0).toUpperCase()}${type.noun.slice(1)} removed`;
+                ctx.announce(rows.length === 0 ? `${removed}. ${EMPTY_STATE_ANNOUNCEMENT}` : removed);
                 const target = rows[index] || rows[index - 1];
                 if (target) target.focusFirst(); else firstButton().focus();
             }
@@ -743,7 +745,9 @@
                 hasError() { return listFlag || rows.some(row => row.hasError()); },
                 focus() {
                     const bad = rows.find(row => row.hasError());
-                    if (bad) bad.focusInvalid(); else firstButton().focus();
+                    if (bad) bad.focusInvalid();
+                    else if (rows.length > 0) rows[0].focusFirst();
+                    else firstButton().focus();
                 },
                 setDisabled(value) { if (value === disabled) return; disabled = value; render(); },
                 refresh() {},

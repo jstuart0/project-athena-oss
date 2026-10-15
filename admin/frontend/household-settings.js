@@ -498,7 +498,7 @@
     });
 
     defineCard('lights', {
-        title: 'Room lights',
+        title: "Lights that aren't lamps",
         blurb: 'Lights that "the kitchen lights" and similar commands leave alone.',
         intro: [
             "Whenever a list is saved here, Athena also skips voice-satellite LED rings and status LEDs (names containing led_ring or status_led). A list saved here replaces the server's list.",

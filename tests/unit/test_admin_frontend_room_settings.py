@@ -99,9 +99,9 @@ def test_the_script_is_copied_and_tagged_after_the_renderer_and_before_escape_ht
 
 
 def test_the_edited_scripts_carry_the_new_buster(html):
-    for name, tag in (("room-settings.js", "lg5"), ("room-groups.js", "lg4"), ("app.js", "lg4")):
+    for name, tag in (("room-settings.js", "lg6"), ("room-groups.js", "lg4"), ("app.js", "lg4")):
         assert re.search(rf'/{re.escape(name)}\?v=20261015-{tag}"', html), name
-    assert re.search(r'/household-settings\.js\?v=20261015-hs4"', html), "edited for the signed-in token"
+    assert re.search(r'/household-settings\.js\?v=20261015-hs5"', html), "edited for the signed-in token"
 
 
 def test_the_rooms_tab_holds_both_containers_above_the_groups_and_is_named_rooms(html):
@@ -303,16 +303,18 @@ def test_a_409_keeps_the_draft_reloads_the_latest_and_reapply_sends_the_new_revi
         const shown = __in(__row(lights, 0), 'Room name').value;
         __buttons(lights, 'Re-apply my changes')[0].click();
         const reapplied = __in(__row(lights, 0), 'Room name').value;
+        const focusOnRestored = __focused === __in(__row(lights, 0), 'Room name');
         const dirty = __unsaved(lights);
         __routes['PUT ' + HH + '/room_lights'] = __rlPut([{room: 'Den', lights: ['light.sofa']}], 10);
         __saveButton(lights).click();
         await __settle();
-        return {conflict: text.includes("Someone else saved Room lights while you were editing. Your changes weren't saved. The latest version is shown below."), shown, reapplied, dirty, sent: __lastPut().body};
+        return {conflict: text.includes("Someone else saved Room lights while you were editing. Your changes weren't saved. The latest version is shown below."), shown, reapplied, focusOnRestored, dirty, sent: __lastPut().body};
         """
     )
     assert result["conflict"] is True
     assert result["shown"] == "Garage"
     assert result["reapplied"] == "Den" and result["dirty"] is True
+    assert result["focusOnRestored"] is True, "focus lands on the first restored field, not Add a room"
     assert result["sent"] == {"value": {"rooms": [{"room": "Den", "lights": ["light.sofa"]}]}, "revision": 9}
 
 
@@ -407,6 +409,33 @@ def test_a_light_group_shows_a_group_marker_and_the_guest_help():
         """
     )
     assert result == {"group": 1, "helpVisible": True, "id": True}
+
+
+def test_removing_the_last_row_announces_the_empty_state_in_the_live_region():
+    result = scenario(
+        r"""
+        const {lights, speakers} = __setup({rl: __rl([{room: 'Den', lights: ['light.sofa']}, {room: 'Hall', lights: ['light.floor_lamp']}]), sr: __sr([{key: 'assist_satellite.den', room: 'Den'}])});
+        await __mount();
+        const live = box => box.find(e => e.attrs.role === 'status').map(e => e.textContent).join('|');
+        __buttons(__row(lights, 1), 'Remove room')[0].click();
+        const afterFirst = live(lights);
+        __buttons(__row(lights, 0), 'Remove room')[0].click();
+        const afterLast = live(lights);
+        __buttons(__row(speakers, 0), 'Remove')[0].click();
+        return {afterFirst, afterLast, speakers: live(speakers)};
+        """
+    )
+    tail = "None are listed now. Save to use only Home Assistant areas, or use the server's setting."
+    assert "Room removed" in result["afterFirst"] and tail not in result["afterFirst"]
+    assert f"Room removed. {tail}" in result["afterLast"]
+    assert f"Satellite removed. {tail}" in result["speakers"]
+
+
+def test_the_two_light_cards_have_distinct_titles_and_the_name_block_wraps_on_phones(source):
+    household = CARDS.read_text(encoding="utf-8")
+    assert "title: \"Lights that aren't lamps\"" in household and "title: 'Room lights'" not in household
+    assert "title: 'Room lights'" in source
+    assert "basis-full sm:basis-auto" in source and "sm:mt-6" in source
 
 
 def test_a_saved_light_home_assistant_no_longer_has_is_marked_in_text_and_in_its_remove_label():
