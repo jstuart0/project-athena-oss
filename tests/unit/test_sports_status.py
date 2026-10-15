@@ -19,7 +19,7 @@ NOW = datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc)
 TODAY = "2026-10-11"
 
 
-def game(state, hs="14", as_="7", status=None, home="Baltimore Ravens", away="Kansas City Chiefs"):
+def game(state, hs="14", as_="7", status=None, home="Riverton Herons", away="Eastport Comets"):
     return {
         "home_team": home, "away_team": away, "home_score": hs, "away_score": as_,
         "state": state, "status": status or {"in": "LIVE - 5:00 (Q2)", "post": "FINAL", "pre": "Starts 01:00 PM ET"}[state],
@@ -27,19 +27,19 @@ def game(state, hs="14", as_="7", status=None, home="Baltimore Ravens", away="Ka
 
 
 def upcoming(state="pre", date=TODAY):
-    return {"strHomeTeam": "Baltimore Ravens", "strAwayTeam": "Kansas City Chiefs", "dateEvent": date,
+    return {"strHomeTeam": "Riverton Herons", "strAwayTeam": "Eastport Comets", "dateEvent": date,
             "strTime": "17:00", "game_state": state}
 
 
 def last(date="2026-10-04", hs="21", as_="24"):
-    return {"strHomeTeam": "Baltimore Ravens", "strAwayTeam": "Buffalo Bills", "dateEvent": date,
+    return {"strHomeTeam": "Riverton Herons", "strAwayTeam": "Lakeside Otters", "dateEvent": date,
             "intHomeScore": hs, "intAwayScore": as_, "winner": "WRONG PROVIDER VALUE"}
 
 
 def test_pre_game_is_upcoming():
     out = ss.status_headline([upcoming()], [last()], [game("pre", "0", "0")], NOW)
     assert out["state"] == "upcoming" and out["winner"] is None
-    assert "Kansas City Chiefs at Baltimore Ravens" in out["summary"]
+    assert "Eastport Comets at Riverton Herons" in out["summary"]
 
 
 def test_in_game_is_live_and_has_no_winner():
@@ -51,11 +51,11 @@ def test_in_game_is_live_and_has_no_winner():
 def test_post_game_is_final_with_the_winner_from_the_score():
     out = ss.status_headline([], [last()], [game("post", "10", "27")], NOW)
     assert out["state"] == "final"
-    assert out["winner"] == "Kansas City Chiefs"
+    assert out["winner"] == "Eastport Comets"
 
 
 def test_home_winner():
-    assert ss.status_headline([], [], [game("post", "31", "3")], NOW)["winner"] == "Baltimore Ravens"
+    assert ss.status_headline([], [], [game("post", "31", "3")], NOW)["winner"] == "Riverton Herons"
 
 
 def test_a_tie_has_no_winner():
@@ -69,7 +69,7 @@ def test_unreadable_or_missing_scores_have_no_winner():
 
 def test_last_game_winner_ignores_the_provider_field():
     out = ss.status_headline([], [last(date=TODAY, hs="9", as_="30")], [], NOW)
-    assert out["state"] == "final" and out["winner"] == "Buffalo Bills"
+    assert out["state"] == "final" and out["winner"] == "Lakeside Otters"
 
 
 def test_nothing_is_none():
@@ -92,7 +92,7 @@ def fake_client(last_events, next_events, games):
     return SimpleNamespace(get=get)
 
 
-TEAM = {"idTeam": "133", "strTeam": "Baltimore Ravens", "strLeague": "football/nfl"}
+TEAM = {"idTeam": "133", "strTeam": "Riverton Herons", "strLeague": "football/nfl"}
 
 
 def test_a_live_game_in_both_upcoming_and_live_is_reported_live_and_not_upcoming():
@@ -102,7 +102,7 @@ def test_a_live_game_in_both_upcoming_and_live_is_reported_live_and_not_upcoming
     assert data["has_live_game"] is True
     assert len(data["live_games"]) == 1
     assert [e["dateEvent"] for e in data["upcoming_games"]] == ["2026-10-18"]
-    assert "Ravens" in data["live_score_summary"]
+    assert "Herons" in data["live_score_summary"]
 
 
 def test_a_same_matchup_upcoming_row_without_game_state_is_still_removed_when_live():
@@ -115,7 +115,7 @@ def test_a_same_matchup_upcoming_row_without_game_state_is_still_removed_when_li
 
 def test_a_live_game_is_never_last():
     finished_looking = last(date=TODAY)
-    finished_looking.update(strAwayTeam="Kansas City Chiefs")
+    finished_looking.update(strAwayTeam="Eastport Comets")
     client = fake_client([finished_looking], [], [game("in")])
     data = asyncio.run(ss.team_events(client, TEAM, now=NOW))
     assert data["last_games"] == []
@@ -124,7 +124,7 @@ def test_a_live_game_is_never_last():
 def test_last_game_winner_is_recomputed_from_the_score():
     client = fake_client([last(hs="21", as_="24")], [], [])
     data = asyncio.run(ss.team_events(client, TEAM, now=NOW))
-    assert data["last_games"][0]["winner"] == "Buffalo Bills"
+    assert data["last_games"][0]["winner"] == "Lakeside Otters"
 
 
 def test_an_unmapped_league_gets_no_live_lookup():
@@ -143,7 +143,7 @@ def test_an_unmapped_league_gets_no_live_lookup():
 def test_the_live_lookup_has_no_default_league_for_a_mapped_one():
     client = fake_client([], [], [])
     asyncio.run(ss.team_events(client, TEAM, now=NOW))
-    assert client.get.live_params == {"league": "nfl", "team": "Baltimore Ravens"}
+    assert client.get.live_params == {"league": "nfl", "team": "Riverton Herons"}
 
 
 def test_only_this_teams_games_count_and_failed_requests_give_empty_lists():
@@ -179,7 +179,7 @@ def test_a_season_ended_placeholder_is_not_a_played_game():
 
 
 def test_a_row_the_provider_marks_in_progress_is_dropped_from_upcoming_whatever_the_team_spelling():
-    row = dict(upcoming("in"), strHomeTeam="Ravens", strAwayTeam="Chiefs")
+    row = dict(upcoming("in"), strHomeTeam="Herons", strAwayTeam="Comets")
     data = asyncio.run(ss.team_events(fake_client([], [row], [game("in")]), TEAM, now=NOW))
     assert data["upcoming_games"] == []
     pre = dict(row, game_state="pre")
@@ -191,7 +191,7 @@ def test_a_row_the_provider_marks_in_progress_is_dropped_from_upcoming_whatever_
 def test_a_path_shaped_league_is_passed_through_to_the_live_lookup(league):
     client = fake_client([], [], [game("in")])
     asyncio.run(ss.team_events(client, dict(TEAM, strLeague=league), now=NOW))
-    assert client.get.live_params == {"league": league, "team": "Baltimore Ravens"}
+    assert client.get.live_params == {"league": league, "team": "Riverton Herons"}
 
 
 @pytest.mark.parametrize("league", ["", "Rugby Union", "a/b/c", "x/../y", "football/nfl?x=1"])
@@ -203,7 +203,7 @@ def test_a_game_finished_today_but_not_in_last_yet_is_data_and_final():
     client = fake_client([last()], [], [game("post", "10", "27")])
     data = asyncio.run(ss.team_events(client, TEAM, now=NOW))
     assert data["last_games"][0]["dateEvent"] == TODAY
-    assert data["last_games"][0]["winner"] == "Kansas City Chiefs"
+    assert data["last_games"][0]["winner"] == "Eastport Comets"
     assert data["status"]["state"] == "final"
 
 
@@ -211,14 +211,14 @@ def test_a_final_today_row_alone_makes_the_payload_non_empty_for_the_validator()
     from orchestrator.rag_validator import ValidationResult, validator
 
     data = asyncio.run(ss.team_events(fake_client([], [], [game("post", "10", "27")]), TEAM, now=NOW))
-    result, _reason, _ = validator.validate_sports_response(data, "did the ravens win")
+    result, _reason, _ = validator.validate_sports_response(data, "did the herons win")
     assert result != ValidationResult.EMPTY
     empty = asyncio.run(ss.team_events(fake_client([], [], []), TEAM, now=NOW))
-    assert validator.validate_sports_response(empty, "did the ravens win")[0] == ValidationResult.EMPTY  # control
+    assert validator.validate_sports_response(empty, "did the herons win")[0] == ValidationResult.EMPTY  # control
 
 
 def test_a_final_today_row_already_in_last_is_not_duplicated():
-    row = dict(last(date=TODAY, hs="10", as_="27"), strAwayTeam="Kansas City Chiefs")
+    row = dict(last(date=TODAY, hs="10", as_="27"), strAwayTeam="Eastport Comets")
     data = asyncio.run(ss.team_events(fake_client([row], [], [game("post", "10", "27")]), TEAM, now=NOW))
     assert len(data["last_games"]) == 1
 
