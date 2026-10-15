@@ -8,7 +8,7 @@ Covers major retrieve branches:
  4.  WEATHER intent — onecall provider selected.
  5.  WEATHER intent — forecast endpoint used when time_ref="tomorrow".
  6.  WEATHER intent — far-future request returns limitation acknowledgment.
- 7.  WEATHER intent — temporal location filtered, DEFAULT_LOCATION used.
+ 7.  WEATHER intent — temporal location filtered, the household location used.
  8.  WEATHER intent — service URL not configured → _fallback_to_web_search.
  9.  WEATHER intent — RAG service call fails (Exception) → fallback.
 10.  WEATHER intent — EMPTY ValidationResult → fallback.
@@ -57,6 +57,7 @@ for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
 sys.path.insert(0, "src")
 
 from orchestrator.nodes import retrieve_node
+from shared import household
 from orchestrator.nodes import _runtime
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.rag_validator import ValidationResult
@@ -232,14 +233,14 @@ class TestWeatherIntent:
         v = _make_validator(ValidationResult.VALID)
         # "weekend" should be filtered as temporal expression, default location used
         state = _make_state(query="weather this weekend?", entities={"location": "weekend"})
+        household.install_for_test(sources={"location": {"city": "Testville", "state": "TS", "text": "Testville, TS"}})
         with (
             patch("orchestrator.nodes.retrieve.get_weather_provider_mode", new_callable=AsyncMock, return_value="standard"),
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://weather:8001"),
             patch("orchestrator.nodes.retrieve.validator", v),
-            patch("orchestrator.nodes.retrieve.DEFAULT_LOCATION", "Testville, TS"),
         ):
             result = _run(retrieve_node(state))
-        # Should succeed with DEFAULT_LOCATION
+        # Should succeed with the household location
         assert result.retrieved_data == weather_data
         assert rc.get.await_args.kwargs["params"]["location"] == "Testville, TS"
 
@@ -334,11 +335,11 @@ class TestTemporalLocationFilter:
         _runtime.set_rag_client(rc)
         v = _make_validator(ValidationResult.VALID)
         state = _make_state(query="what is the weather?", entities={"location": location_phrase})
+        household.install_for_test(sources={"location": {"city": "Testville", "state": "TS", "text": "Testville, TS"}})
         with (
             patch("orchestrator.nodes.retrieve.get_weather_provider_mode", new_callable=AsyncMock, return_value="standard"),
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://weather:8001"),
             patch("orchestrator.nodes.retrieve.validator", v),
-            patch("orchestrator.nodes.retrieve.DEFAULT_LOCATION", "Testville, TS"),
         ):
             _run(retrieve_node(state))
         assert rc.get.await_args.kwargs["params"]["location"] == "Testville, TS"

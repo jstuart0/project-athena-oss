@@ -1859,14 +1859,13 @@ class TestKillSwitchSingleTargetHandlers:
             assert classify_utterance(q).kind == UtteranceKind.STATE_QUESTION, q
 
 
-def _bed_warmer_config():
-    import json as _json
-    cfg = MagicMock()
-    cfg.ha_bed_warmer_entities = _json.dumps({
+def _install_bed_warmer():
+    from shared import household
+
+    household.install_for_test(sources={"bed_warmer": {
         "level_left": "select.bed_left", "level_right": "select.bed_right", "power_main": "switch.bed_main",
         "power_side_a": "switch.bed_a", "power_side_b": "switch.bed_b",
-    })
-    return cfg
+    }})
 
 
 class TestSingleTargetGatesDirect:
@@ -1886,8 +1885,8 @@ class TestSingleTargetGatesDirect:
 
         async def _drive():
             with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(query)):
-                with mock.patch.object(write_fanout, "get_config", lambda: _fake_config(6, 18)), \
-                        mock.patch.object(shc, "get_config", _bed_warmer_config):
+                _install_bed_warmer()
+                with mock.patch.object(write_fanout, "get_config", lambda: _fake_config(6, 18)):
                     answer = await calls[name]()
                 return answer, write_fanout.take_block()
 

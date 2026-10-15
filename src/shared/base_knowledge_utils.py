@@ -6,20 +6,13 @@ Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_ti
 """
 import hashlib
 import re
-import os
 from typing import List, Dict, Any, Optional
 import structlog
 from shared.assistant_profile import clean_guest_name
-from shared.config import get_config
 from shared.knowledge_tiers import NAME_KEY_CATEGORIES, OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
 from shared.local_time import local_now
 
 logger = structlog.get_logger()
-
-# OSS-First: resolved at import time from env vars (empty if unconfigured).
-_DEFAULT_CITY = get_config().default_city
-_DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
-_DEFAULT_LOCATION = ", ".join(p for p in (_DEFAULT_CITY, _DEFAULT_STATE) if p)
 
 
 def resolve_dynamic_value(value: str) -> str:
@@ -205,10 +198,12 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         knowledge_entries: List of knowledge entries from Admin API
 
     Returns:
-        The home address string, or the DEFAULT_LOCATION env var as fallback (empty if unconfigured).
+        The home address string, or the household location (Base Knowledge, else DEFAULT_CITY/DEFAULT_STATE; empty if unconfigured).
     """
+    from shared import household  # lazy: household pulls in config and the admin client
+
     if not knowledge_entries:
-        return _DEFAULT_LOCATION
+        return household.location().text
 
     # Look for property address entry
     for entry in knowledge_entries:
@@ -234,7 +229,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
             return value
 
     logger.warning("no_home_address_found_using_fallback")
-    return _DEFAULT_LOCATION
+    return household.location().text
 
 
 def extract_property_address(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:

@@ -156,12 +156,18 @@ async def _case_scene_goodbye_fallback_scene_domain(controller, ha_client):
     )
 
 
+def _install_bed_warmer():
+    from shared import household
+
+    household.install_for_test(sources={"bed_warmer": {
+        "level_left": "select.bed_level_left", "level_right": "select.bed_level_right",
+        "power_main": "switch.bed_power_main", "power_side_a": "switch.bed_power_a",
+        "power_side_b": "switch.bed_power_b",
+    }})
+
+
 async def _case_bed_warmer(controller, ha_client, monkeypatch):
-    monkeypatch.setattr(shc, "get_config", lambda: MagicMock(ha_bed_warmer_entities=(
-        '{"level_left": "select.bed_level_left", "level_right": "select.bed_level_right", '
-        '"power_main": "switch.bed_power_main", "power_side_a": "switch.bed_power_a", '
-        '"power_side_b": "switch.bed_power_b"}'
-    )))
+    _install_bed_warmer()
     return await controller._handle_bed_warmer_intent("warm_bed", {"side": "both", "level": 3}, ha_client)
 
 
@@ -308,16 +314,11 @@ class TestExecuteIntentGuestRefusalText:
 
         async def _drive():
             with mp.ha_permission_scope(perms, mode="guest") as scope:
-                import orchestrator.smart_home_controller as shc_mod
-                with mock.patch.object(shc_mod, "get_config", return_value=MagicMock(ha_bed_warmer_entities=(
-                    '{"level_left": "select.bed_level_left", "level_right": "select.bed_level_right", '
-                    '"power_main": "switch.bed_power_main", "power_side_a": "switch.bed_power_a", '
-                    '"power_side_b": "switch.bed_power_b"}'
-                ))):
-                    result = await controller.execute_intent(
-                        {"device_type": "bed_warmer", "action": "warm_bed", "parameters": {"side": "both", "level": 3}},
-                        ha_client,
-                    )
+                _install_bed_warmer()
+                result = await controller.execute_intent(
+                    {"device_type": "bed_warmer", "action": "warm_bed", "parameters": {"side": "both", "level": 3}},
+                    ha_client,
+                )
                 return result, scope
 
         result, scope = _run(_drive())

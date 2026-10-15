@@ -10,8 +10,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import structlog
 
-from shared.config import get_config
-from shared.guest_policy import parse_json_array_env
+from shared import household
 from shared.ha_registry import tokens
 
 logger = structlog.get_logger(__name__)
@@ -113,21 +112,21 @@ def _clear_room_light_exclude_cache() -> None:
 
 
 def _room_light_exclude_patterns() -> list:
-    """Compiled exclusion regexes, cached on the raw config string."""
+    """Compiled exclusion regexes: the built-in LED rule plus the household's
+    admin globs, or the environment's list when admin has none. Cached on the
+    tuple of pattern sources, so a settings change recompiles."""
     global _exclude_cache
-    raw = get_config().ha_room_light_exclude_entities
-    cached_raw, compiled = _exclude_cache
-    if cached_raw is not None and cached_raw == (raw or ""):
+    sources = household.room_light_exclude_patterns().patterns
+    cached_sources, compiled = _exclude_cache
+    if cached_sources is not None and cached_sources == sources:
         return compiled
     compiled = []
-    for index, pattern in enumerate(
-        parse_json_array_env(raw, DEFAULT_ROOM_LIGHT_EXCLUDE_PATTERNS)
-    ):
+    for index, pattern in enumerate(sources):
         try:
             compiled.append(re.compile(pattern))
         except re.error:
             logger.warning("room_light_exclude_pattern_invalid", index=index)
-    _exclude_cache = (raw or "", compiled)
+    _exclude_cache = (sources, compiled)
     return compiled
 
 

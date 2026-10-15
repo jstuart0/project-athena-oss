@@ -5136,29 +5136,18 @@ Return ONLY valid JSON."""
         import logging
         logger = logging.getLogger(__name__)
 
-        # Bed-warmer entities, configured via HA_BED_WARMER_ENTITIES (JSON
-        # object naming all 5 keys below) rather than hardcoded (DC14 item
-        # 1, OSS-First) -- this is inherently specific hardware (a Sunbeam
-        # dual-zone mattress pad via a Tuya integration), not something
-        # most deployments have.
-        raw_entities = get_config().ha_bed_warmer_entities
-        required_keys = ("level_left", "level_right", "power_main", "power_side_a", "power_side_b")
-        entities: Dict[str, str] = {}
-        if raw_entities:
-            try:
-                parsed = json.loads(raw_entities)
-                if not isinstance(parsed, dict):
-                    raise ValueError("HA_BED_WARMER_ENTITIES must be a JSON object")
-                entities = {k: str(parsed[k]) for k in required_keys if k in parsed}
-            except Exception as e:
-                logger.error(f"HA_BED_WARMER_ENTITIES invalid: {e}")
-                entities = {}
+        # Bed-warmer entities: all five come from the Devices page or, failing
+        # that, HA_BED_WARMER_ENTITIES, resolved as one unit (this is specific
+        # hardware, a dual-zone mattress pad, so most deployments have none).
+        # The permission-enforcing client above still guards every write.
+        from shared import household
 
-        if not all(k in entities for k in required_keys):
+        entities = household.bed_warmer()
+
+        if entities is None:
             return (
-                "Bed warmer isn't configured. Set HA_BED_WARMER_ENTITIES "
-                "(a JSON object naming level_left, level_right, power_main, "
-                "power_side_a and power_side_b entity IDs) to enable this."
+                "Bed warmer isn't configured. Set its devices on the Devices "
+                "page (or HA_BED_WARMER_ENTITIES)."
             )
 
         LEVEL_LEFT = entities["level_left"]

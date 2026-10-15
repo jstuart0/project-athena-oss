@@ -88,7 +88,7 @@ from shared.assistant_profile import clean_guest_name, get_assistant_profile, ge
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.service_key import note_admin_refusal, service_key_headers
 from orchestrator.config_loader import ADMIN_API_URL
-from orchestrator.utils.constants import DEFAULT_LOCATION
+from orchestrator.utils.constants import default_location
 
 logger = configure_logging("orchestrator.helpers")
 
@@ -1190,7 +1190,7 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
 
         intent, search_results = await parallel_search_engine.search(
             query=search_query,
-            location=DEFAULT_LOCATION,
+            location=default_location(),
             limit_per_provider=10,
             force_search=True
         )
@@ -1791,7 +1791,8 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
     try:
         # Location-sensitive RAG services need location in query (search providers ignore location param)
         location_sensitive_services = ["weather", "dining", "events", "flights", "airports"]
-        user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
+        home_location = default_location()
+        user_location = state.entities.get("location", home_location) if state.entities else home_location
 
         if rag_service.lower() in location_sensitive_services:
             search_query = f"{enhance_query_with_year(state.query)} {user_location}"
@@ -1803,7 +1804,7 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
         # STEP 1: Execute parallel search with increased result limit
         intent, search_results = await parallel_search_engine.search(
             query=search_query,
-            location=DEFAULT_LOCATION,
+            location=default_location(),
             limit_per_provider=10,  # Increased from 5 for better coverage
             force_search=True  # CRITICAL: Force web search even for RAG intents
         )
