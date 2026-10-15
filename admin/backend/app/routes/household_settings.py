@@ -8,6 +8,7 @@ revision is a 409 on SQLite and Postgres alike.
 """
 import json
 import time
+from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
@@ -45,18 +46,61 @@ _REFUSAL_TRACKED_MAX = 1000
 _refusal_audited_at: Dict[Tuple[int, str, str], float] = {}
 
 _OWNER_ONLY = "manage_infrastructure"
-MAX_BODY_BYTES = 1024 * 1024
+MAX_BODY_BYTES = 1024 * 1024  # sections that hold lists (feeds, sources, globs)
+MAX_SCALAR_BODY_BYTES = 64 * 1024  # every other section is a handful of short fields
+MAX_PROBLEMS = 20
+MAX_LOC_LENGTH = 64
 
 
-def _entry(spec: SectionSpec, model, revision: int, *, masked: bool) -> Dict[str, Any]:
-    value = mask_for_user(spec.name, model) if masked else dump(spec.name, model)
-    return {
+def _body_cap(spec: SectionSpec) -> int:
+    return MAX_BODY_BYTES if spec.list_fields else MAX_SCALAR_BODY_BYTES
+
+
+async def _read_capped_body(request: Request, cap: int) -> bytes:
+    """The request body, refused with 413 as soon as it is known to exceed
+    ``cap``: by its declared Content-Length before a byte is read, and by a
+    running count while it streams (a chunked or understated body)."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_content_length")
+        if declared_size > cap:
+            raise HTTPException(status_code=413, detail="payload_too_large")
+    chunks: List[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > cap:
+            raise HTTPException(status_code=413, detail="payload_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _entry(spec: SectionSpec, model, revision: int, *, masked: bool, restricted: bool = False) -> Dict[str, Any]:
+    if restricted:
+        value = None
+    else:
+        value = mask_for_user(spec.name, model) if masked else dump(spec.name, model)
+    entry = {
         "value": value,
         "stored": stored_flags(spec.name, model),
         "revision": revision,
         "required_permission": spec.required_permission,
         "writable": spec.writable,
     }
+    if restricted:
+        entry["restricted"] = True
+    return entry
+
+
+def _hidden_from(spec: SectionSpec, user: Optional[User]) -> bool:
+    """An owner-only section's values go to the owner role and to a service,
+    not to every signed-in user who may read the page."""
+    if spec.required_permission != _OWNER_ONLY:
+        return False
+    return user is None or not user.has_permission(spec.required_permission)
 
 
 @router.get("", dependencies=[Depends(require_service_or_user_permission("read"))])
@@ -67,9 +111,13 @@ async def get_household_settings(
 ):
     """The requested sections (all known ones when none are named; unknown names
     are dropped). A section with nothing stored has ``value: null`` and
-    revision 0. Anything but a verified service key gets URLs masked."""
+    revision 0. Anything but a verified service key gets URLs masked, and an
+    owner-only section's value is withheld (``restricted: true``) from a user
+    without that permission."""
     names = [n for n in SECTIONS if sections is None or n in sections]
-    masked = getattr(request.state, "auth_kind", None) != "service"
+    is_service = getattr(request.state, "auth_kind", None) == "service"
+    masked = not is_service
+    reader = getattr(request.state, "auth_user", None)
     try:
         rows = {
             r.key: r.value
@@ -89,7 +137,8 @@ async def get_household_settings(
             model, revision = (parse_value(name, located) if located else None), 0
         else:
             model, revision = parse_stored(name, rows.get(spec.key))
-        body[name] = _entry(spec, model, revision, masked=masked)
+        body[name] = _entry(spec, model, revision, masked=masked,
+                            restricted=masked and _hidden_from(spec, reader))
     return body
 
 
@@ -101,18 +150,23 @@ def _audit_refusal(db: Session, request: Request, user: User, spec: SectionSpec,
         return
     if len(_refusal_audited_at) >= _REFUSAL_TRACKED_MAX:
         _refusal_audited_at.clear()
+    try:
+        db.add(AuditLog(
+            user_id=user.id,
+            action="household_settings_refused",
+            resource_type="system_setting",
+            new_value={"section": spec.name, "reason": reason},
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            success=False,
+            error_message=reason,
+        ))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("household_settings_refusal_audit_failed", section=spec.name, error_type=type(exc).__name__)
+        return
     _refusal_audited_at[key] = now
-    db.add(AuditLog(
-        user_id=user.id,
-        action="household_settings_refused",
-        resource_type="system_setting",
-        new_value={"section": spec.name, "reason": reason},
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        success=False,
-        error_message=reason,
-    ))
-    db.commit()
 
 
 def _refuse_if_owner_only(db: Session, request: Request, user: User, spec: SectionSpec, reason: str) -> None:
@@ -124,7 +178,10 @@ def _refuse_if_owner_only(db: Session, request: Request, user: User, spec: Secti
 def _422(errors: List[Dict[str, Any]]) -> HTTPException:
     return HTTPException(
         status_code=422,
-        detail=[{"loc": list(e["loc"]), "type": e["type"]} for e in errors],
+        detail=[
+            {"loc": [p[:MAX_LOC_LENGTH] if isinstance(p, str) else p for p in e["loc"]], "type": e["type"]}
+            for e in islice(errors, MAX_PROBLEMS)
+        ],
     )
 
 
@@ -151,16 +208,17 @@ async def put_household_section(
         _audit_refusal(db, request, user, spec, "insufficient_role")
         raise HTTPException(status_code=403, detail={"error": "insufficient_role"})
 
-    raw = await request.body()
-    if len(raw) > MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="payload_too_large")
+    raw = await _read_capped_body(request, _body_cap(spec))
     try:
         body = json.loads(raw)
     except (ValueError, RecursionError):
         raise _422([{"loc": ("body",), "type": "json_invalid"}])
     if not isinstance(body, dict):
         raise _422([{"loc": ("body",), "type": "dict_type"}])
-    problems = [{"loc": (k,), "type": "extra_forbidden"} for k in body if k not in ("value", "revision")]
+    problems = [
+        {"loc": (k,), "type": "extra_forbidden"}
+        for k in islice((k for k in body if k not in ("value", "revision")), MAX_PROBLEMS)
+    ]
     revision = body.get("revision")
     if "revision" not in body:
         problems.append({"loc": ("revision",), "type": "missing"})
