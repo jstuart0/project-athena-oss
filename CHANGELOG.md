@@ -9,6 +9,57 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Athena now answers from what it actually looked up, keeps the subject of a follow-up, and no longer acts on things said around a command. A device changes only on a command clause; a time or a condition after a command goes to the automation agent instead of running early; the assistant has one name; an unknown speaker is never given the owner's name or address; and a failed turn is spoken as a short apology instead of silence.
+
+### Upgrading
+
+- **Sports: set `SPORTS_DEFAULT_TEAM` to keep a home-team default.** The built-in default team is gone. `SPORTS_DEFAULT_TEAM` (empty by default) names the team a sports question is about when the question names none. With it empty, "how did we do last night" is passed to tool calling, which has no team to look up. Set it in the `athena-config` ConfigMap or your private overlay.
+- **The semantic cache is flushed once at startup.** The first orchestrator to start on this version empties the cache, once per release and safe with several replicas, so answers cached under the old rules (invented venues, identity answers) can't replay. During a rolling update an older replica can write old-rule entries back for up to the cache TTL (at most 24 hours); they expire on their own.
+- **New optional settings.** `GATEWAY_FALLBACK_MODEL` names the Ollama model the gateway answers with when it has to pick one (empty: `ATHENA_DEFAULT_MODEL`). `ATHENA_DEFAULT_MODEL` is now a single validated setting: letters, digits and `. _ : / -`, at most 128 characters; anything else is ignored with a warning and the shipped default is used.
+- **The automation agent uses the `smart_home_control` model.** Timed and conditional commands now run on the model assigned to the `smart_home_control` component, so check that component's model if you rely on them.
+- **Optional image updates.** admin-frontend's Privacy text changes to say that the model, tools and timings are stored whenever Analytics Mode is on; admin-backend reads `ATHENA_DEFAULT_MODEL` through the shared, validated setting. Neither changes behaviour beyond that.
+
+### Added
+
+- **Spoken apology when a turn fails.** If the orchestrator returns a 5xx or can't be reached, the gateway answers with "Sorry, I couldn't finish that. Please try again in a moment." on every channel (Home Assistant's voice and text routes, `/v1/chat/completions` streaming and not), instead of an error the speaker can't voice. The turn is counted as an error in the gateway's metrics. A 4xx is unchanged (a 502 with a fixed detail).
+- **`GATEWAY_FALLBACK_MODEL`.** Names the model for the gateway's own fallback answers. An OpenAI model name that isn't mapped (`gpt-*`) now resolves to the installed fallback model rather than a model that may not be installed; a model name sent for Ollama passes through as before.
+- **`SPORTS_DEFAULT_TEAM`.** See Upgrading.
+- **Live and last-game status for a team.** A sports answer says whether the team is playing now (with the live score), has finished (winner from the final score) or has a game coming. A game in progress is never reported as the last game.
+- **Spoken commands with a time or condition.** A device command with a time or condition after it ("turn off the lights at 10 pm", "turn off the lights when I go to bed") goes to the automation agent and doesn't run now. With the agent unavailable, a condition gets "I can't wait for a condition like that yet. Tell me when you want it done, or set it up as an automation." and nothing is written. A door unlock or open request with a time or condition is never run early. A deferral applies only to the clause it belongs to: "unlock the door, then lock it in 5 minutes" unlocks now and schedules the lock.
+- **Occupancy answers as plain sentences.** "Is anyone in the office" is answered from a plain template for the room you named, with no markdown; a model is used only for a head-count over several rooms.
+- **A lint gate in CI.** A `lint.yml` workflow runs `ruff` over `src`, `admin/backend/app` and `apps` and fails on undefined names and other real errors.
+
+### Changed
+
+- **One assistant name.** The name in the prompt, the "your name" line and the agent now comes from one place. Precedence: the name saved in Assistant settings, then an assistant-name Base Knowledge entry you have edited (the shipped sample text doesn't count), then the default.
+- **Conversation capture stores the model, tools and timings whenever Analytics Mode is on.** Debug detail is no longer needed for the model that answered, the tools used (names from a fixed list) or the node timings, which are now in milliseconds. Debug detail still gates the extra columns.
+- **Which answers are cached is an allow-list.** Weather, airports, sports, flights, events, streaming, news, stocks, recipes, dining, directions and general-knowledge answers may be cached, and only when they are built from data a tool returned (a general-knowledge answer must also claim no specifics it never had). Web search, music, TV, text-me, notification, control and vehicle answers are no longer cached. A new intent isn't cached until it is listed.
+- **Markdown is stripped from spoken answers.** Asterisks, headings, backticks, bullets and link syntax are no longer read aloud.
+- **Short replies keep their subject.** "Yes.", "no thanks" and a short answer to a question Athena asked ("the second one", "downtown") continue the task they answer, on all four query routes. Replies owned by a pending Home Assistant confirmation or a "which one?" question are unchanged. The gateway, the streaming routes and the text routes now agree on this.
+- **Intent choice is one rule set.** When the language-model classifier and the pattern classifier disagree, an ordered set of rules decides (a specific, trusted pattern match now beats the model's "general info" whatever its confidence), and the streaming and non-streaming paths share one routing decision.
+- **Sports names are repaired for routing only.** A misheard team or sports word ("how did the falons do") is corrected so the question reaches the sports lookup. The corrected text is never stored and never reaches device control.
+- **Motion-control phrases go to motion control.** A motion-flow command ("disable motion") is handled by the controller, not the automation agent; a motion condition ("when there's no motion for ten minutes, ...") still goes to the agent.
+- **Overheard fragments are never web-searched.** A raw fragment of six words or fewer with no question, task or reference in it is not sent to web search, with the fragment gate on or off.
+- **Lock phrases are scoped.** "Lock up" and "lock everything" behave as before (every lock you're allowed to use). "Lock all the doors" and "are the doors locked" are door-scoped: they use door locks only (a lock whose name has a door, gate, entry, front, back, garage or deadbolt word is a door) and the reply names any lock it skipped. A status answer says the doors first and mentions other locks separately. Public and unverified callers hear only locks they may use; household callers and verified guests get the whole-house count, but a restricted lock is never named.
+- **Music failures say how to retry.** A failed music request answers "The music service didn't start that in the <room>. Say 'play <request>' to try again.", tries related music first for a genre request, and is remembered as failed.
+- **Entity state is fresh after a lock or cover write.** Lock and cover states are read with a short maximum age, and a written entity is marked stale, so a status read right after "lock the door" doesn't report the value from before the write.
+- **Jetson is documented as an unsupported prototype.** `src/jetson/` and its README now say it isn't maintained and lists its known breakages. Nothing was removed.
+
+### Fixed
+
+- **Answers no longer invent places, businesses or experiences.** A question for a venue or business ("where's a good taco place") is answered from a lookup, or says it couldn't look it up; it isn't made up from training. A definition, how-it-works or why question isn't affected. Athena no longer says it has eaten, visited or tried something. A data answer (dining, sports, weather, news, events, recipes, streaming, flights, stocks, directions) with no tool data gets a "don't invent specifics" prompt, and a tool answer with a date, time, price or phone number no tool supplied is declined when the fact-check model fails or is unavailable.
+- **An unknown speaker is no longer given the owner's name or address.** "What's my name" and "where do I live" from a caller the server can't identify are answered with a fixed sentence ("I can't tell who's speaking, so I don't know your name."), with no model call, and are never cached. Questions about the house ("what's the address here") follow the Base Knowledge audience as configured.
+- **A follow-up no longer changes topic.** "Yes." after "Want me to look for outdoor seating?" now looks for outdoor seating; a question's last turn is kept in the summary.
+- **A dead RAG address override no longer outranks a working one.** A per-intent URL override (Intent Routing) is still used first when it accepts a connection, but when it doesn't, the service registry address and then the environment variable are tried, so one stale value can't take sports, weather or airports offline. The probe is cached briefly and its log line carries no URL.
+- **"Is it ok to turn off the lights" is a question, not a command.** "ok" after "is it" or "would it be" is part of the question.
+
+### Security
+
+- **A device changes only on a command clause.** The words that may cause a write are the command clauses of what was said. Narration and reported speech ("he said turn off the lights", "my sister turns the lights off every night"), a condition ("if it gets dark, turn on the lights" is a condition for the agent), a quotation, and a statement about a device can no longer change anything. This holds for lights, climate, media, scenes, music and TV, for the automation agent's tools and for created automations, and a hostile model's tool call is refused on the same words.
+- **Scene phrases.** A scene phrase ("goodbye", "I'm home", "bedtime", "good night") that is the whole utterance (with an optional "okay" or "hey" and the assistant's name) runs its routine as before. Inside a longer sentence it needs a command frame ("run goodbye").
+- **A time or condition never unlocks or opens early.** A door unlock or open request with a time, delay, weekday or condition after it is refused by the controller and handed to the automation agent; see Added.
+- **Cache entries no longer cross audiences.** An identity answer, a turn for a named caller and an answer the audience couldn't have heard are never stored; the cache is flushed once per release (see Upgrading).
+
 ---
 
 ## [0.7.0] - 2026-10-14 — Smart-home safety, rooms from Home Assistant, private conversation capture

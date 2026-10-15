@@ -53,6 +53,8 @@ every addition.
 | `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
 | `DEFAULT_CITY` | `default_city` | `""` |
 | `SPORTS_DEFAULT_TEAM` | `sports_default_team` | `""` (no default). The team a sports question is about when the query names none. Stripped, at most 64 characters of letters, digits, spaces and `. - '`; anything else is ignored with an error log. Empty: a sports question with no team goes to tool calling |
+| `ATHENA_DEFAULT_MODEL` | `athena_default_model` | `qwen3:4b-instruct-2507-q4_K_M`. The model every component uses unless one is configured for it. One validated setting read by the orchestrator, the gateway and admin-backend: at most 128 characters of letters, digits and `. _ : / -`; an empty or invalid value logs `model_tag_invalid` and the default is used |
+| `GATEWAY_FALLBACK_MODEL` | `gateway_fallback_model` | `""` (use `ATHENA_DEFAULT_MODEL`). The Ollama model the gateway answers with when it has to pick one: its own fallback answers, and an OpenAI model name (`gpt-*`) that isn't in its mapping. A model name a client sends for Ollama passes through unchanged. Same validation as above |
 | `OIDC_ISSUER` | `oidc_issuer` | `""` |
 | `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
 | `DEMO_MODE` | `demo_mode` | `false` |
@@ -962,6 +964,21 @@ The guest's and a member's names are given to the model as quoted data
 fields, after a clean: letters, marks and `.`, `-`, `'` only (a guest's
 name at most 4 words and 64 characters; a member's first word only). A
 name that fails the clean isn't used.
+
+**An unknown speaker.** When the server can't say who is speaking (no proven
+owner, no named guest and no signed-in member), a first-person identity question gets a fixed
+sentence and no model call: "what's my name" or "who am I" answers "I can't tell
+who's speaking, so I don't know your name.", and "where do I live" answers "I
+can't tell who's speaking, so I can't say where you live." Questions about the
+house ("what's the address here", "who lives here") are not identity questions
+and follow the Base Knowledge audience as configured. An identity question
+never reads from or writes to the semantic cache. A named caller keeps their own
+paths.
+
+**One assistant name.** The name used in every prompt (and in the "your name"
+line) is, in order: the name saved in Assistant settings, an assistant-name Base
+Knowledge entry you have edited (the shipped sample text doesn't count), then
+the default ("Jarvis").
 
 Answers addressed to a named caller (the guest by name, a signed-in member)
 are never read from or written to the semantic cache, so one caller's name
@@ -1903,6 +1920,36 @@ Rules around the table:
   name; a clause that names none ("then raise it") takes the nearest earlier
   clause's device.
 
+#### Spoken commands with a time or condition
+
+Only the command clauses of what was said can cause a write. Athena splits the
+utterance into clauses and judges each one: a command ("turn off the lights"),
+narration or reported speech ("he said turn off the lights"), a quotation, a
+statement about a device, or a condition. Words in narration, a quotation or a
+condition never supply the cue for a write, whatever the model proposes. This
+applies to lights, climate, media, scenes, music and TV, to the automation
+agent's tools and to created automations.
+
+A scene phrase ("goodbye", "I'm home", "bedtime", "good night") that is the whole
+utterance, optionally with "okay" or "hey" and the assistant's name, runs its
+routine as before. Inside a longer sentence it needs a command frame ("run
+goodbye").
+
+A command with a time or a condition after (or before) it is not run now:
+
+- **Device commands** ("turn off the lights at 10 pm", "turn off the lights when
+  I go to bed") go to the automation agent, which schedules them. If the agent
+  isn't available, a condition gets "I can't wait for a condition like that yet.
+  Tell me when you want it done, or set it up as an automation." and nothing is
+  written.
+- **A door unlock or open** with a time, delay, weekday or condition is never run
+  early; the controller refuses it and the agent handles it.
+- **A deferral binds only the clause it belongs to.** "Unlock the door, then lock
+  it in 5 minutes" unlocks now and schedules the lock.
+
+The automation agent runs on the model assigned to the `smart_home_control`
+component.
+
 #### Which room Athena assumes
 
 Athena decides where a command acts once, from the words and the speaker.
@@ -2201,6 +2248,8 @@ admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 - **Short answers.** An answer from the model is "too short" only when it is empty, or shorter than the minimum (Assistant settings, "Minimum length for an unfinished answer", default 10 characters) and not a finished sentence. "Done." and "Yes!" stand; "Ok" does not. Deterministic answers are never checked, and a short finished answer no longer triggers the web-search fallback (`min_response_length` follows the same rule).
 - **Voice response limits.** `guardrails.voice_response` (Assistant settings, "Voice response"): `max_sentences` (default 3, 1 to 10; asked of the model), `max_tokens` (default 200, 32 to 1024; a hard limit on a spoken answer) and `max_tokens_long` (default 600, 64 to 2048, never below `max_tokens`; used for recipes, directions, itineraries and step-by-step answers). A token is about three quarters of a word. An answer the model was cut off in ends at its last full sentence. Text and chat answers are not limited. The admin API rejects an out-of-range or mistyped value with 422, and the services clamp whatever is stored when they read it. Saving the profile without these keys leaves the stored values alone.
 - **Overheard fragments (off by default).** `guardrails.voice_response.ambient_fragment_gate` (Assistant settings guardrails; default `false`) answers a spoken, low-confidence fragment with "Sorry, I didn't catch that." instead of running tool selection. It applies to voice only and never to commands, questions, yes/no or "the first one" style replies, media words, first-person statements, safety words ("help", "fire", "911", ...), or while a question is open. Turn it on only after trying it in your house.
+- **Fragments are never web-searched.** A raw fragment of six words or fewer with no question, task or reference in it is not sent to web search, with the fragment gate on or off.
+- **What the response cache stores.** Only an allow-list of intents is cached, each with its own lifetime: weather, airports, sports, flights (5 minutes), stocks (1 minute), news (15 minutes), dining and streaming (30 minutes), events and general knowledge (1 hour), recipes (24 hours) and directions (5 minutes). A data answer (everything except general knowledge) is stored only when a tool returned data for the turn, and a general-knowledge answer only when it claims no specifics it never had and isn't a request for a local business. Web search, music, TV, text-me, notification, control and vehicle answers, fallback answers and identity answers are never cached, and an intent that isn't listed isn't cached. The cache is emptied once at startup when a release changes these rules.
 
 ### LLM metrics and token usage
 
@@ -2209,6 +2258,8 @@ Every LLM call writes a row to `llm_performance_metrics`, including the streamed
 **Cloud backends need their SDK installed.** The router imports the provider SDKs when a model is assigned to that backend: `openai` (OpenAI and OpenAI-compatible tool calling), `anthropic`, and `google.generativeai` (the `google-generativeai` package). None of them is in the orchestrator's or gateway's locked requirements (`openai` appears only in the test lock), so a deployment that uses one adds it to its image; without it the call fails with an `ImportError` that names the package, and the request falls back as for any backend failure. The stop-reason, prompt-token and usage parsing for these three backends is tested against fake SDK objects shaped like each provider's documented response (the OpenAI ones are the SDK's own models), not against the live services; the post-roll check in the plan compares stored `prompt_tokens` with each provider's own figure.
 
 ### Error messages
+
+When the orchestrator returns a 5xx or can't be reached, the gateway answers on every channel (Home Assistant's voice and text routes and `/v1/chat/completions`, streaming or not) with a fixed spoken apology, "Sorry, I couldn't finish that. Please try again in a moment.", with HTTP 200, and counts the turn as an error. A 4xx from the orchestrator is unchanged (a 502 with a fixed detail). No exception text reaches the client.
 
 A backend's error text (hostnames, addresses, environment-variable names, class names) never reaches the model, the speaker or an API client. The assistant says a fixed phrase for the kind of failure (not set up, needs more detail, unavailable, timed out, failed); streaming clients get "Sorry, something went wrong." and a failing query route answers 500 `internal_error request_id=<id>` (the `X-Request-ID`, to find the logged cause). The one exception is a short, plain 4xx message from a RAG service (letters, digits, spaces and `.,'-`, at most 200 characters, one line), which is passed on so a tool can tell the assistant what to ask for. The raw text stays in the logs and in the tool usage metrics.
 

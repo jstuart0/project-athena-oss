@@ -465,7 +465,7 @@ project-athena/
 │   │   └── admin_config.py  # Admin API client
 │   ├── control_agent/       # Service watchdog (auto-restart)
 │   ├── mode_service/        # Owner/guest mode management
-│   └── jetson/              # NVIDIA Jetson edge deployment
+│   └── jetson/              # Jetson prototype (unsupported example)
 ├── admin/
 │   ├── backend/             # FastAPI admin API (50+ DB migrations)
 │   │   └── app/routes/      # 62 route modules
