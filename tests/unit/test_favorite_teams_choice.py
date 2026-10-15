@@ -952,6 +952,26 @@ def test_an_end_to_end_turn_with_team_we_looks_up_the_favourite_not_we(monkeypat
     ("did we beat them on sunday", (I.SPORTS, 0.85)),
     ("how did we do on the project", (I.GENERAL_INFO, 0.5)),
     ("did we win the lottery", (I.GENERAL_INFO, 0.5)),
+    ("how are we doing today", (I.GENERAL_INFO, 0.5)),
+    ("did we win the raffle today", (I.GENERAL_INFO, 0.5)),
+    ("how did we do on the test today", (I.GENERAL_INFO, 0.5)),
 ])
 def test_the_pattern_classifier_routes_we_contest_questions_with_a_cue_to_sports(query, expected):
     assert h.main._pattern_based_classification(query, return_confidence=True) == expected
+
+
+@pytest.mark.parametrize("value", ["they", "them", "their", "They"])
+def test_they_them_their_stay_a_named_team_so_a_follow_up_keeps_its_team(value):
+    assert ft.named_team(value) == value
+    rag = FakeSports({"Anytown Owls": game_info("1", last=[-1])})
+    favs = AsyncMock(return_value=(OWLS,))
+    _runtime.set_rag_client(rag)
+    state = sports_state("how did they do", entities={"team": value})
+    with (
+        mock.patch.object(ft, "favorites", favs),
+        mock.patch("orchestrator.nodes.retrieve.get_rag_service_url", AsyncMock(return_value="u")),
+        mock.patch("orchestrator.nodes.retrieve.validator", valid_validator()),
+    ):
+        run(retrieve_node(state))
+    favs.assert_not_awaited()
+    assert state.sports_default is None

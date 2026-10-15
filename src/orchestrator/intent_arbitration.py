@@ -51,28 +51,6 @@ LLM_MODERATE = 0.75
 OVERRIDE_CONFIDENCE = 0.9
 WEBSEARCH_CONFIDENCE = 0.95
 
-# "how did we do last night", "did we win the game": the household's own team.
-# Needs the speaker's "we", a contest verb and a game or time cue, so "how did we
-# do on the project" and "did we win the lottery" stay general. Not subject to
-# _TIMELESS_WORDING: "how did" here asks about a result.
-_CONTEST = re.compile(
-    r"\b(?:how(?:'d| did| do| are| have)? we (?:do|doing|been doing)"
-    r"|(?:did|do|does|will|are|were|can) we (?:\w+ )?(?:win|lose|beat|score|play|playing|tie)"
-    r"|(?:what(?:'s| is| was)|whats) our (?:score|record)"
-    r"|who (?:did|are|do) we (?:play|playing|face))\b"
-)
-_GAME_OR_TIME_CUE = re.compile(
-    r"\b(?:last night|tonight|today|yesterday|tomorrow|game|games|match|this (?:week|weekend|season)|last (?:week|weekend)|"
-    r"on (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)|this (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))\b"
-)
-
-
-def is_team_contest_question(query: str) -> bool:
-    """True for a first-person-plural contest question about a game or a day."""
-    lower = (query or "").lower().replace("\u2019", "'")
-    return bool(_CONTEST.search(lower) and _GAME_OR_TIME_CUE.search(lower))
-
-
 _UNSPECIFIC = (IntentCategory.GENERAL_INFO, IntentCategory.UNKNOWN)
 
 _SPORTS_EVIDENCE = re.compile(
@@ -104,6 +82,29 @@ _TIME_SENSITIVE_CUE = re.compile(
     r"this (?:week|weekend|morning|afternoon|evening|season)|next (?:game|week)|last night|"
     r"scores?|forecast|standings|playing|winning|schedule|outside|here)\b"
 )
+# "how did we do last night", "did we win the game": the household's own team.
+# A question is a team-contest question only when everything after the contest
+# phrase is a game or a time, so "did we win the raffle today", "how did we do
+# on the test today" and "did we beat traffic today" stay general. Present or
+# modal wording ("how are we doing", "can we play a game") is never matched.
+_SPORT_WORD = r"(?:games?|match(?:es)?|football|soccer|basketball|baseball|hockey|nfl|nba|mlb|nhl|mls|ncaa|playoffs?|season)"
+_WEEKDAY = r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)"
+_TIME = (
+    r"(?:last night|tonight|today|yesterday|this (?:week|weekend|season)|last (?:week|weekend)|"
+    r"(?:on|this|last) " + _WEEKDAY + r")"
+)
+_GAME_PHRASE = r"(?:(?:in|at|during|on|against|vs\.?)\s+)?(?:the |that |this |last |our )*" + _SPORT_WORD
+_CUES = r"(?:\s+(?:" + _GAME_PHRASE + "|" + _TIME + r"))+\s*[?.!]*\s*"
+_RESULT_OBJECT = r"(?:\s+them)?"
+_CONTEST_FORMS = re.compile(
+    r"\bhow(?: did|'d) we do" + _CUES + r"$"
+    r"|\bdid we (?:ever |finally |just )?(?:win|lose|beat|score)" + _RESULT_OBJECT + _CUES + r"$"
+    r"|\b(?:what(?:'s| is| was)|whats) our (?:score|record)" + _CUES + r"$"
+    r"|\bwho did we play" + _CUES + r"$"
+)
+_HOW_DID_WE_DO = re.compile(r"\bhow(?: did|'d) we do\b")
+
+
 _IMPLICIT_BRIGHTNESS = (
     "take it easy on my eyes", "easy on my eyes", "easy on the eyes",
     "darken it up", "tone down", "tone it down",
@@ -205,6 +206,15 @@ def _any(query: str, phrases) -> bool:
 
 def _timeless_general_knowledge(query: str) -> bool:
     return bool(_TIMELESS_WORDING.search(query)) and not _TIME_SENSITIVE_CUE.search(query)
+
+
+def is_team_contest_question(query: str) -> bool:
+    """True for a first-person-plural question about the result of a game or a
+    day ("how did we do last night", "did we win the game")."""
+    lower = (query or "").lower().replace("\u2019", "'").strip()
+    if not _CONTEST_FORMS.search(lower):
+        return False
+    return not _TIMELESS_WORDING.search(_HOW_DID_WE_DO.sub("", lower))  # "who invented the game": knowledge
 
 
 def _has_evidence(intent: IntentCategory, query: str) -> bool:

@@ -113,8 +113,10 @@ class DefaultPick:
 
 # What a classifier puts in the team slot when the speaker means their own side
 # (or nothing): "did we win" comes back as team="we". None of these names a team.
+# they/them/their are deliberately absent: "how did they do" is a follow-up about the
+# team of the earlier turn, which the prior-turn resolution supplies.
 _NOT_A_TEAM = frozenset({
-    "we", "us", "our", "ours", "my", "mine", "i", "me", "they", "them", "our team", "my team",
+    "we", "us", "our", "ours", "my", "mine", "i", "me", "our team", "my team",
     "the team", "home team", "the home team", "team", "none", "null", "nil", "n/a", "na", "unknown",
     "unspecified", "not specified", "no team",
 })
