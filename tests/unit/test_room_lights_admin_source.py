@@ -31,7 +31,7 @@ def use_sources(rig, *, admin=None, env=""):
     _runtime.set_room_directory(rd.RoomDirectoryProvider(
         rig.registry, None,
         room_lights=lambda: household.room_lights_from(section, env),
-        speaker_rooms=lambda: household.speaker_rooms_from(None, "", admin_age=None),
+        speaker_rooms=lambda: household.speaker_rooms_from(None, "", outage_age=None),
     ))
 
 
@@ -61,7 +61,7 @@ def test_a_section_with_no_rooms_falls_back_to_the_server_setting(monkeypatch):
     _runtime.set_room_directory(rd.RoomDirectoryProvider(
         rig.registry, None,
         room_lights=lambda: household.room_lights_from(RoomLightsSection(rooms=None), json.dumps({"galley": "light.hall_pair"})),
-        speaker_rooms=lambda: household.speaker_rooms_from(None, "", admin_age=None),
+        speaker_rooms=lambda: household.speaker_rooms_from(None, "", outage_age=None),
     ))
     assert resolved_ids(rig, "galley") == ["light.hall_pair"]
 
@@ -136,7 +136,7 @@ def test_the_directory_takes_satellite_rooms_and_light_rooms_from_admin(monkeypa
         rig.registry, None,
         room_lights=lambda: household.room_lights_from(
             RoomLightsSection(rooms=[RoomLightEntry(room="Sunroom", lights=["light.hall_lamp"])]), ""),
-        speaker_rooms=lambda: household.speaker_rooms_from(speakers, "", admin_age=None),
+        speaker_rooms=lambda: household.speaker_rooms_from(speakers, "", outage_age=None),
     )
     directory = provider.current()
     assert directory.resolves("sunroom") is not None and directory.resolves("loft") is not None
@@ -330,3 +330,26 @@ def test_a_guest_missing_scene_falls_to_the_all_branch_and_is_refused_not_told_a
     answer, scope = asyncio.run(go())
     assert answer is None, answer
     assert scope.denials, "the guard recorded the denied all-lights write"
+
+
+def test_the_mapping_and_its_source_come_from_one_read(monkeypatch):
+    """A resolver answer that changes between two reads (env, then admin) must not mix:
+    an env-sourced room with every id missing still falls through to the area."""
+    rig = Rig(monkeypatch)
+    use_sources(rig)
+    baseline = resolved_ids(rig, "galley")
+    answers = [
+        household.room_lights_from(None, json.dumps({"galley": "light.nope_1"})),
+        household.room_lights_from(RoomLightsSection(rooms=[RoomLightEntry(room="galley", lights=["light.nope_1"])]), ""),
+    ]
+    calls = []
+
+    def flip():
+        calls.append(1)
+        return answers[min(len(calls), 2) - 1]
+
+    _runtime.set_room_directory(rd.RoomDirectoryProvider(
+        rig.registry, None, room_lights=flip,
+        speaker_rooms=lambda: household.speaker_rooms_from(None, "", outage_age=None),
+    ))
+    assert resolved_ids(rig, "galley") == baseline and baseline

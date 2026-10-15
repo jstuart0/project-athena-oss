@@ -204,6 +204,8 @@ class _FakeReader:
         self.closed = 0
         self._inert = household.install_for_test()
 
+    failing_since = None
+
     def peek(self):
         return self._inert.peek()
 

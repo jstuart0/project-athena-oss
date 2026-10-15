@@ -1337,6 +1337,7 @@ class HouseholdSettingsCache:
         self._clock = clock
         self._snapshot = Snapshot()
         self._checked_at: Optional[float] = None
+        self._failing_since: Optional[float] = None
         self._locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
         self._fetching = False
         self._scheduled_loop: Optional["weakref.ref[asyncio.AbstractEventLoop]"] = None
@@ -1348,9 +1349,18 @@ class HouseholdSettingsCache:
     def closed(self) -> bool:
         return self._closed
 
-    def preload(self, snapshot: Snapshot) -> None:
-        """Test seam: serve ``snapshot`` as fresh forever (no fetch is ever made)."""
+    @property
+    def failing_since(self) -> Optional[float]:
+        """The clock reading of the first failed refresh after the last success, or
+        ``None`` while refreshes succeed (or none has been attempted). Idleness is
+        not failure: nothing refreshes while nobody asks."""
+        return self._failing_since
+
+    def preload(self, snapshot: Snapshot, *, failing_since: Optional[float] = None) -> None:
+        """Test seam: serve ``snapshot`` as fresh forever (no fetch is ever made).
+        ``failing_since`` pretends refreshes have been failing since that clock reading."""
         self._snapshot = snapshot
+        self._failing_since = failing_since
         self._pinned = True
 
     # -- state -----------------------------------------------------------------------------
@@ -1389,10 +1399,14 @@ class HouseholdSettingsCache:
                     body = None
                 self._checked_at = self._clock()
                 if isinstance(body, dict):
+                    self._failing_since = None
                     self._snapshot = snapshot_from_body(body, self._checked_at)
                     logger.info("household_settings_loaded sections=%d", len(self._snapshot.sections))
-                elif body is not None:
-                    logger.warning("household_settings_unexpected_body")
+                else:
+                    if self._failing_since is None:
+                        self._failing_since = self._checked_at
+                    if body is not None:
+                        logger.warning("household_settings_unexpected_body")
             finally:
                 self._fetching = False
         return self._snapshot

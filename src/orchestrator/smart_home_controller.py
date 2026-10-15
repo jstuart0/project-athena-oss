@@ -606,8 +606,9 @@ def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
     The directory provider is the single source when the lifespan has
     registered one (so tests and the directory agree); otherwise the resolver
     is read directly. Keys are ``room_key`` forms. Callers:
-    ``_resolve_room_lights``, ``_whole_house_lamp_rooms`` and
-    ``_configured_room_targets`` (``test_room_settings_drift.py`` pins the set).
+    ``_whole_house_lamp_rooms`` and ``_configured_room_targets``;
+    ``_resolve_room_lights`` reads ``_room_lights_value()`` itself, for the mapping
+    and its source from one read (``test_room_settings_drift.py`` pins both sets).
 
     The owner's authoritative lights for a room: room light commands resolve
     through it first, and the scene-activation-failed fallback uses it to dim
@@ -2685,7 +2686,9 @@ Return ONLY valid JSON."""
         logger = structlog.get_logger(__name__)
 
         key = "_".join(_tokens(room))
-        configured = _get_light_groups().get(key, ()) if key else ()
+        # One read gives the mapping and its source together (no await between).
+        room_lights = _room_lights_value()
+        configured = room_lights.mapping.get(key, ()) if key else ()
         if configured:
             entities = await self.entity_manager.get_entities()
             found: List[Dict] = []
@@ -2711,7 +2714,7 @@ Return ONLY valid JSON."""
                 result = RoomLights(found)
                 result.missing = missing
                 return result
-            if _room_lights_value().source == household.SOURCE_ADMIN:
+            if room_lights.source == household.SOURCE_ADMIN:
                 # The owner chose these lights: none of them answering means the
                 # room is not responding, never "use the whole area instead".
                 logger.info("room_lights_resolved", source="configured", targets=0)

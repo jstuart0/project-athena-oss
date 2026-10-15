@@ -262,13 +262,13 @@ def test_never_loaded_gives_env(monkeypatch):
     assert speakers().source == "env"
 
 
-def aged(seconds, **sections):
-    return hs.snapshot_from_body(body(**sections), time.monotonic() - seconds)
+def loaded(**sections):
+    return hs.snapshot_from_body(body(**sections), time.monotonic())
 
 
 def test_stale_speaker_rooms_fall_back_after_600s_logged_once(monkeypatch, caplog):
     set_env(monkeypatch, HA_SATELLITE_ROOM_MAP=ENV_SPEAKERS)
-    household.install_for_test(snapshot=aged(601, speaker_rooms=ADMIN_SPEAKERS))
+    household.install_for_test(snapshot=loaded(speaker_rooms=ADMIN_SPEAKERS), failing_for=601)
     with caplog.at_level(logging.WARNING):
         for _ in range(50):
             assert speakers().source == "env"
@@ -277,13 +277,19 @@ def test_stale_speaker_rooms_fall_back_after_600s_logged_once(monkeypatch, caplo
 
 def test_a_fresh_speaker_rooms_snapshot_is_admin(monkeypatch):
     set_env(monkeypatch, HA_SATELLITE_ROOM_MAP=ENV_SPEAKERS)
-    household.install_for_test(snapshot=aged(599, speaker_rooms=ADMIN_SPEAKERS))
+    household.install_for_test(snapshot=loaded(speaker_rooms=ADMIN_SPEAKERS), failing_for=599)
+    assert speakers().source == "admin"
+
+
+def test_an_old_snapshot_with_no_failed_refresh_is_not_stale(monkeypatch):
+    set_env(monkeypatch, HA_SATELLITE_ROOM_MAP=ENV_SPEAKERS)
+    household.install_for_test(snapshot=hs.snapshot_from_body(body(speaker_rooms=ADMIN_SPEAKERS), time.monotonic() - 100000))
     assert speakers().source == "admin"
 
 
 def test_room_lights_is_not_capped(monkeypatch):
     set_env(monkeypatch, HA_LIGHT_GROUPS=ENV_LIGHTS)
-    household.install_for_test(snapshot=aged(601, room_lights=ADMIN_LIGHTS))
+    household.install_for_test(snapshot=loaded(room_lights=ADMIN_LIGHTS), failing_for=601)
     assert lights().source == "admin"
 
 

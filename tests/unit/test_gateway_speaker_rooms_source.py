@@ -229,50 +229,103 @@ def test_the_built_map_is_memoized_until_the_revision_changes(rig):
 
 
 # -- outage and the 600 s cap -----------------------------------------------------
+# The cap counts from the FIRST failed refresh after the last success. Idle time
+# alone is never an outage: nothing refreshes while nobody asks.
 
-def test_an_outage_keeps_the_last_good_value_for_600_seconds_then_falls_back_to_env(rig, caplog):
+def room_now():
+    return dict(gw._get_satellite_room_map().entity_rooms)
+
+
+def test_a_healthy_admin_is_never_stale_however_long_the_process_sat_idle(rig, caplog):
     clock, fetch, cache = rig
 
     async def go():
         await cache.current()
+        before = room_now()
+        clock.now += 700                      # idle: no request, no refresh
+        first_after_idle = room_now()         # served from the held snapshot, before the refresh lands
+        await cache.current()
+        return before, first_after_idle, room_now()
+
+    with caplog.at_level(logging.WARNING, logger="shared.household"):
+        before, first_after_idle, after = asyncio.run(go())
+    assert before == first_after_idle == after == {STUDY_ENTITY: "Garage"}
+    assert household.speaker_rooms().source == "admin"
+    assert "speaker_rooms_admin_stale" not in [r.getMessage() for r in caplog.records]
+
+
+def test_an_outage_is_trusted_for_600_seconds_from_its_first_failure_then_falls_back_to_env_once(rig, caplog):
+    clock, fetch, cache = rig
+
+    async def go():
+        await cache.current()
+        clock.now += 700                      # a long quiet period first: not an outage
         fetch.fail = True
-        seen = []
-        for step in (61, 200, 339):          # 600 s after the load: still trusted
+        await cache.current()                 # the first failure, 700 s after the last success
+        seen = [room_now()]
+        for step in (61, 200, 338):           # 599 s after the first failure: still trusted
             clock.now += step
             await cache.current()
-            seen.append(dict(gw._get_satellite_room_map().entity_rooms))
-        clock.now += 1                       # 601 s
+            seen.append(room_now())
+        clock.now += 2                        # 601 s
         await cache.current()
-        seen.append(dict(gw._get_satellite_room_map().entity_rooms))
+        seen.append(room_now())
         return seen
 
     with caplog.at_level(logging.WARNING, logger="shared.household"):
         seen = asyncio.run(go())
         for _ in range(5):
             gw._get_satellite_room_map()
-    assert seen[:3] == [{STUDY_ENTITY: "Garage"}] * 3
-    assert seen[3] == {STUDY_ENTITY: "Env Room"}
+    assert seen[:4] == [{STUDY_ENTITY: "Garage"}] * 4
+    assert seen[4] == {STUDY_ENTITY: "Env Room"}
     assert household.speaker_rooms().source == "env"
     assert [r.getMessage() for r in caplog.records].count("speaker_rooms_admin_stale") == 1
 
 
-def test_recovery_after_the_cap_returns_to_admin(rig):
+def test_recovery_after_the_cap_returns_to_admin_and_a_later_outage_starts_a_new_clock(rig):
     clock, fetch, cache = rig
 
     async def go():
         await cache.current()
         fetch.fail = True
+        clock.now += 61
+        await cache.current()                 # the first failure
         clock.now += 700
         await cache.current()
         assert household.speaker_rooms().source == "env"
         fetch.fail = False
         clock.now += 61
         await cache.current()
-        return household.speaker_rooms().source
+        recovered = household.speaker_rooms().source
+        fetch.fail = True
+        clock.now += 61
+        await cache.current()                 # a new outage begins now
+        clock.now += 300
+        await cache.current()
+        return recovered, household.speaker_rooms().source
 
-    assert asyncio.run(go()) == "admin"
+    assert asyncio.run(go()) == ("admin", "admin")
 
 
 def test_the_gateway_configures_the_speaker_rooms_section():
     assert "speaker_rooms" in gw.HOUSEHOLD_SECTIONS
     assert household.SECTIONS["speaker_rooms"].required_permission == "manage_infrastructure"
+
+
+def test_the_version_is_an_exact_counter_that_moves_only_when_the_map_does(rig):
+    clock, fetch, cache = rig
+
+    async def go():
+        await cache.current()
+        first = household.speaker_rooms().version
+        fetch.body = body([{"key": STUDY_ENTITY, "room": "Garage"}], revision=2)   # same content, new revision
+        clock.now += 61
+        await cache.current()
+        same = household.speaker_rooms().version
+        fetch.body = body([{"key": STUDY_ENTITY, "room": "Attic"}], revision=3)
+        clock.now += 61
+        await cache.current()
+        return first, same, household.speaker_rooms().version
+
+    first, same, changed = asyncio.run(go())
+    assert same == first and changed > first

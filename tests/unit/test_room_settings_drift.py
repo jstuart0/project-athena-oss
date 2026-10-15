@@ -29,7 +29,9 @@ RESOLVER_READERS = {
 }
 # A file that has never parsed (it is not run anywhere); any other that fails to parse fails the test.
 UNPARSEABLE = {"src/jetson/athena_lite_llm.py"}
-LIGHT_GROUP_CALLERS = {"_resolve_room_lights", "_whole_house_lamp_rooms", "_configured_room_targets"}
+LIGHT_GROUP_CALLERS = {"_whole_house_lamp_rooms", "_configured_room_targets"}
+# _resolve_room_lights reads the value itself: it needs the mapping and its source from one read.
+ROOM_LIGHTS_VALUE_READERS = {"_get_light_groups", "_resolve_room_lights"}
 SCENE_FUNCTIONS = ("_handle_scene_intent", "_run_scene_fallback", "_scene_fallback_room_lights")
 
 
@@ -51,12 +53,12 @@ def attribute_readers(source: str, path: str) -> Set[Tuple[str, str]]:
     }
 
 
-def light_group_callers(source: str) -> Set[str]:
+def light_group_callers(source: str, accessor: str = "_get_light_groups") -> Set[str]:
     tree = ast.parse(source)
     return {
         enclosing_function(tree, node)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_get_light_groups"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == accessor
     }
 
 
@@ -126,15 +128,18 @@ class TestAttributeReadPlantedNegatives:
 
 # --- (b) and (c) -------------------------------------------------------------
 
-def test_the_light_group_accessor_has_exactly_three_callers():
-    assert light_group_callers(CONTROLLER.read_text(encoding="utf-8")) == LIGHT_GROUP_CALLERS
+def test_the_light_group_accessor_and_the_value_reader_have_exactly_these_callers():
+    source = CONTROLLER.read_text(encoding="utf-8")
+    assert light_group_callers(source) == LIGHT_GROUP_CALLERS
+    assert light_group_callers(source, "_room_lights_value") == ROOM_LIGHTS_VALUE_READERS
 
 
 def test_no_other_module_calls_the_accessor():
     for path in (ROOT / "src").rglob("*.py"):
         if path == CONTROLLER or path.relative_to(ROOT).as_posix() in UNPARSEABLE:
             continue
-        assert light_group_callers(path.read_text(encoding="utf-8")) == set(), path
+        text = path.read_text(encoding="utf-8")
+        assert light_group_callers(text) == set() and light_group_callers(text, "_room_lights_value") == set(), path
 
 
 def test_the_scene_fallback_never_reads_the_accessor_directly():

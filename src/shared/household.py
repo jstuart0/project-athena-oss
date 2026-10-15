@@ -22,7 +22,8 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+import itertools
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
@@ -159,10 +160,12 @@ def _inert_fetch() -> Awaitable[None]:
 
 
 def install_for_test(*, snapshot: Optional[Snapshot] = None, fetch: Optional[Callable] = None,
-                     sources: Optional[Mapping[str, Optional[dict]]] = None) -> HouseholdSettingsCache:
+                     sources: Optional[Mapping[str, Optional[dict]]] = None,
+                     failing_for: Optional[float] = None) -> HouseholdSettingsCache:
     """Hand every resolver a fake. ``sources`` maps a section to a plain dict
     (validated through its model) or ``None``; ``snapshot`` is used as given;
-    ``fetch`` builds a normal cache over that fetch."""
+    ``fetch`` builds a normal cache over that fetch; ``failing_for`` pretends
+    refreshes have been failing for that many seconds."""
     global _reader, _configured, _configured_args, _seam
     cache = HouseholdSettingsCache(fetch or _inert_fetch)
     if sources is not None:
@@ -172,7 +175,7 @@ def install_for_test(*, snapshot: Optional[Snapshot] = None, fetch: Optional[Cal
         }
         snapshot = snapshot_from_body(body, time.monotonic())
     if snapshot is not None:
-        cache.preload(snapshot)
+        cache.preload(snapshot, failing_since=None if failing_for is None else _monotonic() - failing_for)
     _reader, _configured, _configured_args, _seam = cache, None, None, True
     return cache
 
@@ -417,9 +420,11 @@ def jarvis_web() -> JarvisWeb:
 # Room lights and speaker rooms
 # ---------------------------------------------------------------------------
 
-# How long the last good speaker-room answer is trusted once every refresh has
-# failed; after that the environment's map applies (the gateway and the
-# orchestrator both resolve through here, so they agree).
+# How long the last good speaker-room answer is trusted once refreshes have been
+# failing (counted from the first failure after the last success, never from
+# idleness: nothing refreshes while no request arrives); after that the
+# environment's map applies (the gateway and the orchestrator both resolve
+# through here, so they agree).
 SPEAKER_ROOMS_STALE_AFTER_SECONDS = 600.0
 
 _monotonic: Callable[[], float] = time.monotonic
@@ -476,13 +481,13 @@ def room_lights_from(section: Optional[RoomLightsSection], env_raw: str) -> Room
 
 
 def speaker_rooms_from(section: Optional[SpeakerRoomsSection], env_raw: str, *,
-                       admin_age: Optional[float]) -> SpeakerRoomsValue:
-    """Pure: the admin entries when stored and no older than the staleness cap, else
-    the environment's map, else none. ``admin_age`` is the seconds since the last
-    successful fetch (``None`` when unknown)."""
+                       outage_age: Optional[float]) -> SpeakerRoomsValue:
+    """Pure: the admin entries when stored and the admin outage (if any) is no longer
+    than the staleness cap, else the environment's map, else none. ``outage_age`` is
+    the seconds since refreshes began failing (``None``: they are not failing)."""
     from shared.ha_registry import SatelliteRoomMap, parse_satellite_room_map
 
-    stale = admin_age is not None and admin_age > SPEAKER_ROOMS_STALE_AFTER_SECONDS
+    stale = outage_age is not None and outage_age > SPEAKER_ROOMS_STALE_AFTER_SECONDS
     if section is not None and section.entries is not None and not stale:
         devices = {e.key: e.room for e in section.entries if DEVICE_KEY_RE.fullmatch(e.key)}
         entities = {e.key: e.room for e in section.entries if e.key not in devices}
@@ -491,6 +496,9 @@ def speaker_rooms_from(section: Optional[SpeakerRoomsSection], env_raw: str, *,
         room_map, source = parse_satellite_room_map(env_raw), SOURCE_ENV if env_raw else SOURCE_DEFAULT
     content = (source, tuple(sorted(room_map.entity_rooms.items())), tuple(sorted(room_map.device_rooms.items())))
     return SpeakerRoomsValue(room_map, source, hash(content))
+
+
+_version_counter = itertools.count(1)
 
 
 class _Memo:
@@ -502,6 +510,19 @@ class _Memo:
         self.value: Any = None
         self.logged: Optional[tuple] = None
         self.stale_logged = False
+        self.content: Any = None
+
+    def versioned(self, value: Any, content: Any) -> Any:
+        """``value`` stamped with a version that is exact: the previous one when
+        ``content`` equals the previous content, else the next counter value. (The
+        pure ``*_from`` functions carry a content hash, which two different maps
+        could in principle share; the resolvers never use it.)"""
+        if self.value is not None and self.content == content:
+            version = self.value.version
+        else:
+            version = next(_version_counter)
+        self.content = content
+        return replace(value, version=version)
 
     def hit(self, snapshot: Snapshot, rest: tuple) -> bool:
         return self.value is not None and self.snapshot is snapshot and self.key == rest
@@ -531,7 +552,8 @@ def room_lights() -> RoomLightsValue:
     memo = _room_lights_memo
     if memo.hit(snapshot, rest):
         return memo.value
-    value = memo.store(snapshot, rest, room_lights_from(snapshot.sections.get("room_lights"), raw))
+    built = room_lights_from(snapshot.sections.get("room_lights"), raw)
+    value = memo.store(snapshot, rest, memo.versioned(built, (built.source, tuple(built.mapping.items()))))
     counts = (value.source, len(value.mapping), sum(len(v) for v in value.mapping.values()))
     if memo.logged != counts:
         memo.logged = counts
@@ -541,11 +563,13 @@ def room_lights() -> RoomLightsValue:
 
 def speaker_rooms() -> SpeakerRoomsValue:
     """The voice-device-to-room map: admin, then ``HA_SATELLITE_ROOM_MAP``, then none.
-    Unlike room lights the last good admin value is trusted for
-    ``SPEAKER_ROOMS_STALE_AFTER_SECONDS`` only."""
+    Unlike room lights the last good admin value is trusted only for
+    ``SPEAKER_ROOMS_STALE_AFTER_SECONDS`` after refreshes start failing; an idle
+    process whose admin is healthy is never stale."""
     snapshot = _snapshot_of("speaker_rooms")
     raw = _config().ha_satellite_room_map
-    age = _monotonic() - snapshot.loaded_at if snapshot.loaded and snapshot.loaded_at > 0 else None
+    failing_since = reader().failing_since
+    age = _monotonic() - failing_since if failing_since is not None else None
     section = snapshot.sections.get("speaker_rooms")
     stale = age is not None and age > SPEAKER_ROOMS_STALE_AFTER_SECONDS and section is not None
     rest = (snapshot.revisions.get("speaker_rooms"), raw, stale)
@@ -557,7 +581,9 @@ def speaker_rooms() -> SpeakerRoomsValue:
         memo.stale_logged = False
     if memo.hit(snapshot, rest):
         return memo.value
-    value = memo.store(snapshot, rest, speaker_rooms_from(section, raw, admin_age=age))
+    built = speaker_rooms_from(section, raw, outage_age=age)
+    content = (built.source, tuple(sorted(built.map.entity_rooms.items())), tuple(sorted(built.map.device_rooms.items())))
+    value = memo.store(snapshot, rest, memo.versioned(built, content))
     counts = (value.source, len(value.map.device_rooms), len(value.map.entity_rooms))
     if memo.logged != counts:
         memo.logged = counts

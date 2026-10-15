@@ -77,7 +77,7 @@ def provider(registry=None, admin=None, config=None, names=None, clock=None):
     return rd.RoomDirectoryProvider(
         registry, admin, light_group_names=names, monotonic=clock or Clock(),
         room_lights=lambda: household.room_lights_from(None, cfg.ha_light_groups),
-        speaker_rooms=lambda: household.speaker_rooms_from(None, cfg.ha_satellite_room_map, admin_age=None),
+        speaker_rooms=lambda: household.speaker_rooms_from(None, cfg.ha_satellite_room_map, outage_age=None),
     )
 
 
@@ -211,7 +211,7 @@ def test_current_directory_is_none_until_a_provider_is_registered():
 
 def test_a_changed_room_lights_or_speaker_rooms_version_rebuilds_the_directory():
     lights = {"value": household.room_lights_from(None, "")}
-    speakers = {"value": household.speaker_rooms_from(None, "", admin_age=None)}
+    speakers = {"value": household.speaker_rooms_from(None, "", outage_age=None)}
     p = rd.RoomDirectoryProvider(
         Registry(snapshot()), None, room_lights=lambda: lights["value"], speaker_rooms=lambda: speakers["value"],
     )
@@ -221,7 +221,7 @@ def test_a_changed_room_lights_or_speaker_rooms_version_rebuilds_the_directory()
     second = p.current()
     assert second is not first and second.resolves("sunroom") is not None
     speakers["value"] = household.speaker_rooms_from(
-        None, json.dumps({"assist_satellite.loft_voice": "loft"}), admin_age=None)
+        None, json.dumps({"assist_satellite.loft_voice": "loft"}), outage_age=None)
     third = p.current()
     assert third is not second and third.resolves("loft") is not None
 

@@ -157,7 +157,7 @@ class Rig:
             self.registry, None,
             room_lights=lambda: household.room_lights_from(None, self.cfg.ha_light_groups or ""),
             speaker_rooms=lambda: household.speaker_rooms_from(
-                None, self.cfg.ha_satellite_room_map or "", admin_age=None),
+                None, self.cfg.ha_satellite_room_map or "", outage_age=None),
         )
         _runtime.set_room_directory(provider)
         if exclude is not None:

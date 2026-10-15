@@ -49,7 +49,7 @@ def room_values():
     """The empty (default) room lights and speaker rooms, as the provider's callables."""
     return {
         "room_lights": lambda: household.room_lights_from(None, ""),
-        "speaker_rooms": lambda: household.speaker_rooms_from(None, "", admin_age=None),
+        "speaker_rooms": lambda: household.speaker_rooms_from(None, "", outage_age=None),
     }
 
 
