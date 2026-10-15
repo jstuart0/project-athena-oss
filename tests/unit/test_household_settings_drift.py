@@ -328,9 +328,42 @@ _WARMING_LIFESPANS = (
 )
 
 
+_READER_RECEIVERS = ("household_reader", "household.reader()")
+_POLL_FUNCTIONS = ("sync_household_config",)
+
+
+def _call_text(node: ast.AST) -> str:
+    return ast.unparse(node)
+
+
 def unbounded_first_loads(source: str) -> int:
-    """Calls of ``<x>.current()`` awaited on a household reader in one file."""
-    return len(re.findall(r"await\s+household_reader\.current\(\)", source))
+    """Unbounded awaits on a household reader that startup can reach: an awaited
+    ``<reader>.current()`` outside the poll function (``household_reader.current()``
+    or ``household.reader().current()``), and a lifespan awaiting
+    ``sync_household_config()`` without ``refresh=False`` (which re-fetches after
+    ``household.warm()`` has already timed out)."""
+    tree = ast.parse(source)
+    count = 0
+
+    def visit(node: ast.AST, enclosing: str) -> None:
+        nonlocal count
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            enclosing = node.name
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            call = node.value
+            func = call.func
+            if (isinstance(func, ast.Attribute) and func.attr == "current"
+                    and _call_text(func.value) in _READER_RECEIVERS and enclosing not in _POLL_FUNCTIONS):
+                count += 1
+            if (isinstance(func, ast.Name) and func.id in _POLL_FUNCTIONS and enclosing == "lifespan"
+                    and not any(k.arg == "refresh" and isinstance(k.value, ast.Constant) and k.value.value is False
+                                for k in call.keywords)):
+                count += 1
+        for child in ast.iter_child_nodes(node):
+            visit(child, enclosing)
+
+    visit(tree, "")
+    return count
 
 
 def test_the_gateway_and_rag_lifespans_bound_their_first_load():
@@ -341,8 +374,17 @@ def test_the_gateway_and_rag_lifespans_bound_their_first_load():
 
 
 def test_a_planted_unbounded_first_load_is_caught():
-    assert unbounded_first_loads("    await household_reader.current()\n") == 1
-    assert unbounded_first_loads("    await household.warm()\n") == 0
+    assert unbounded_first_loads("async def f():\n    await household_reader.current()\n") == 1
+    assert unbounded_first_loads("async def f():\n    await household.reader().current()\n") == 1
+    assert unbounded_first_loads("async def f():\n    await household.warm()\n") == 0
+
+
+def test_the_poll_function_may_refresh_but_a_lifespan_may_not_resync_unbounded():
+    poll = "async def sync_household_config(refresh=True):\n    await household.reader().current()\n"
+    assert unbounded_first_loads(poll) == 0
+    assert unbounded_first_loads(poll + "async def lifespan(app):\n    await sync_household_config()\n") == 1
+    assert unbounded_first_loads(poll + "async def lifespan(app):\n    await sync_household_config(refresh=True)\n") == 1
+    assert unbounded_first_loads(poll + "async def lifespan(app):\n    await sync_household_config(refresh=False)\n") == 0
 
 
 def test_a_planted_resolver_without_a_configured_section_is_caught():

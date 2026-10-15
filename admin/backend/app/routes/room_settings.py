@@ -18,6 +18,9 @@ logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/settings", tags=["room-settings"])
 
+# The lists name every light and voice satellite in the house, so they go to the same
+# users as the saved values (the sections' own permission).
+OWNER_ONLY = "manage_infrastructure"
 MAX_PICKER_ITEMS = 1000
 MAX_NAME_LENGTH = 100
 
@@ -49,7 +52,7 @@ def _ordered(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(items, key=lambda i: (i["friendly_name"].casefold(), i["entity_id"]))[:MAX_PICKER_ITEMS]
 
 
-@router.get("/room-lights/candidates", dependencies=[Depends(require_user_permission("read"))])
+@router.get("/room-lights/candidates", dependencies=[Depends(require_user_permission(OWNER_ONLY))])
 async def room_light_candidates() -> List[Dict[str, Any]]:
     """Every light, with ``group`` true for a light group (it answers as its bulbs)."""
     items = []
@@ -65,7 +68,7 @@ async def room_light_candidates() -> List[Dict[str, Any]]:
     return _ordered(items)
 
 
-@router.get("/speaker-rooms/satellites", dependencies=[Depends(require_user_permission("read"))])
+@router.get("/speaker-rooms/satellites", dependencies=[Depends(require_user_permission(OWNER_ONLY))])
 async def speaker_room_satellites() -> List[Dict[str, Any]]:
     items = [
         {"entity_id": state["entity_id"], "friendly_name": _friendly_name(state)}

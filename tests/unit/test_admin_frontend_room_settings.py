@@ -323,10 +323,13 @@ def test_a_non_owner_sees_the_values_read_only_and_cannot_save():
         const inputs = __inputs(lights).concat(__inputs(speakers));
         const buttons = lights.find(e => e.tagName === 'BUTTON').concat(speakers.find(e => e.tagName === 'BUTTON'));
         return {note: __text(lights).includes('Only the house owner can change these settings.'), allDisabled: inputs.length > 0 && inputs.every(i => i.disabled),
-                activeButtons: buttons.filter(b => !b.disabled && __visible(b)).map(b => b.textContent), value: __in(__row(lights, 0), 'Room name').value};
+                activeButtons: buttons.filter(b => !b.disabled && __visible(b)).map(b => b.textContent), value: __in(__row(lights, 0), 'Room name').value,
+                pickerFetches: __fetches.filter(f => f.url === LIGHTS || f.url === SATS).length, text: __text(lights) + __text(speakers)};
         """
     )
     assert result["note"] is True and result["allDisabled"] is True
+    assert result["pickerFetches"] == 0, "the pickers are owner-only: a non-owner never asks"
+    assert "isn't answering" not in result["text"]
     assert result["activeButtons"] == []
     assert result["value"] == "Den"
 

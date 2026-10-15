@@ -11,7 +11,8 @@
  * The pickers read Home Assistant through admin-backend:
  *   GET /api/settings/room-lights/candidates   lights (a group answers as its bulbs)
  *   GET /api/settings/speaker-rooms/satellites voice satellites
- * A picker that fails never blocks the card: an entity id can still be typed.
+ * Both are owner-only, like the saved values. A picker that fails never blocks the card: an
+ * entity id can still be typed.
  * Home Assistant's friendly names are data; they are only ever set as text or
  * as attribute values, never as markup.
  *
@@ -33,6 +34,7 @@
     const MAX_LIGHTS = 32;
     const MAX_ROOM_NAME = 64;
     const PICKER_STALE_MS = 30000;
+    const OWNER_PERMISSION = 'manage_infrastructure';
 
     const SECONDARY_BUTTON_CLASS = 'min-h-[44px] px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
     const LABEL_CLASS = 'block text-sm font-medium text-gray-400 mb-1';
@@ -139,7 +141,14 @@
         notify(picker);
     }
 
+    // The pickers list every light and satellite, so the server gives them to the owner only
+    // (like the saved values); anyone else never asks and sees no "not answering" notice.
+    function mayLoadPickers() {
+        return typeof global.hasPermission === 'function' && global.hasPermission(OWNER_PERMISSION) === true;
+    }
+
     function refreshPicker(picker, withGroup, force) {
+        if (!mayLoadPickers()) return;
         if (picker.status === 'loading' && !force) return;
         const fresh = picker.status === 'ok' && Date.now() - picker.at < PICKER_STALE_MS;
         if (fresh && !force) return;

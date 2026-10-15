@@ -214,9 +214,9 @@ STATES = [
 ]
 
 
-def test_the_light_picker_filters_by_domain_and_marks_groups(client, operator_user):
+def test_the_light_picker_filters_by_domain_and_marks_groups(client, test_user):
     ha_stack.build(states_fake(STATES), ha_stack.constant_source())
-    resp = client.get(LIGHTS, headers=_bearer(operator_user))
+    resp = client.get(LIGHTS, headers=_bearer(test_user))
     assert resp.status_code == 200
     items = resp.json()
     assert [i["entity_id"] for i in items] == ["light.hostile", "light.kitchen_group", "light.noname", "light.zeta"]
@@ -228,9 +228,9 @@ def test_the_light_picker_filters_by_domain_and_marks_groups(client, operator_us
     assert TOKEN not in resp.text
 
 
-def test_the_satellite_picker_lists_only_satellites(client, operator_user):
+def test_the_satellite_picker_lists_only_satellites(client, test_user):
     ha_stack.build(states_fake(STATES), ha_stack.constant_source())
-    items = client.get(SATELLITES, headers=_bearer(operator_user)).json()
+    items = client.get(SATELLITES, headers=_bearer(test_user)).json()
     assert items == [
         {"entity_id": "assist_satellite.attic", "friendly_name": "Attic speaker"},
         {"entity_id": "assist_satellite.den_sat", "friendly_name": "Den speaker"},
@@ -238,11 +238,15 @@ def test_the_satellite_picker_lists_only_satellites(client, operator_user):
 
 
 @pytest.mark.parametrize("url", [LIGHTS, SATELLITES])
-def test_the_pickers_refuse_a_service_key_and_a_user_without_read(client, viewer_user, url):
-    ha_stack.build(states_fake(STATES), ha_stack.constant_source())
+def test_the_pickers_are_owner_only(client, viewer_user, operator_user, test_user, url):
+    fake = states_fake(STATES)
+    ha_stack.build(fake, ha_stack.constant_source())
     assert client.get(url).status_code == 401
     assert client.get(url, headers=_service()).status_code == 401
     assert client.get(url, headers=_bearer(viewer_user)).status_code == 403
+    assert client.get(url, headers=_bearer(operator_user)).status_code == 403, "read and write are not enough"
+    assert fake.rest_sent == [], "a refused caller never reaches Home Assistant"
+    assert client.get(url, headers=_bearer(test_user)).status_code == 200
 
 
 class ConnectFailureHA(FakeHA):
@@ -251,19 +255,19 @@ class ConnectFailureHA(FakeHA):
 
 
 @pytest.mark.parametrize("url", [LIGHTS, SATELLITES])
-def test_a_home_assistant_failure_is_a_closed_phrase(client, operator_user, url):
+def test_a_home_assistant_failure_is_a_closed_phrase(client, test_user, url):
     ha_stack.build(ConnectFailureHA(), ha_stack.constant_source())
-    resp = client.get(url, headers=_bearer(operator_user))
+    resp = client.get(url, headers=_bearer(test_user))
     assert resp.status_code != 200
     assert resp.json()["detail"] in {ha_access.CANT_CONNECT, ha_access.FAILED}
     assert "secret-detail" not in resp.text and "ha-fixture" not in resp.text
 
 
 @pytest.mark.parametrize("url", [LIGHTS, SATELLITES])
-def test_home_assistant_not_set_up_is_a_closed_phrase(client, operator_user, url):
+def test_home_assistant_not_set_up_is_a_closed_phrase(client, test_user, url):
     fake = FakeHA()
     ha_stack.build(fake, ha_stack.absent_source())
-    resp = client.get(url, headers=_bearer(operator_user))
+    resp = client.get(url, headers=_bearer(test_user))
     assert resp.status_code != 200 and resp.json()["detail"] == ha_access.NOT_SET_UP
     assert fake.rest_sent == []
 

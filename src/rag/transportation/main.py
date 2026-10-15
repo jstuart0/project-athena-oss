@@ -532,11 +532,14 @@ async def apply_transit_config(cfg: TransitConfig, *, force: bool = False) -> bo
     return True
 
 
-async def sync_household_config() -> None:
+async def sync_household_config(refresh: bool = True) -> None:
     """One poll: refresh the household snapshot and apply what it resolves to.
-    Never raises (the poll loop survives a bad cycle)."""
+    The lifespan passes ``refresh=False`` after ``household.warm()``: startup
+    never waits on admin-backend a second time. Never raises (the poll loop
+    survives a bad cycle)."""
     try:
-        await household.reader().current()
+        if refresh:
+            await household.reader().current()
         await apply_transit_config(load_transit_config(household.transit()))
     except asyncio.CancelledError:
         raise
@@ -571,7 +574,7 @@ async def lifespan(app: FastAPI):
 
     household_reader = household.configure(sections=("transit",))
     await household.warm()
-    await sync_household_config()
+    await sync_household_config(refresh=False)
     _poll_task = asyncio.create_task(poll_household_config())
 
     yield

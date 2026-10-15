@@ -169,11 +169,12 @@ def test_a_denial_is_reraised_ahead_of_every_catch_all_in_the_scene_path():
     assert len(by_function["_scene_fallback_room_lights"]) == 1, "the configured-room write"
 
 
-def test_the_only_catch_alls_without_a_denial_handler_are_the_two_all_branches():
+def test_no_catch_all_in_the_scene_path_lacks_a_denial_handler():
     shapes = try_shapes(CONTROLLER.read_text(encoding="utf-8"), SCENE_FUNCTIONS)
     unguarded = [s for s in shapes if s[1] is None and s[2] is not None]
-    assert unguarded == [("_run_scene_fallback", None, 0), ("_run_scene_fallback", None, 0)], (
-        "a write behind a catch-all must re-raise a denial; the two 'all' branches are the documented exceptions"
+    assert unguarded == [], "a write behind a catch-all must re-raise a denial first (the two 'all' branches included)"
+    assert [s for s in shapes if s[0] == "_run_scene_fallback" and s[1] is not None and s[2] is not None] != [], (
+        "the 'all' branches are scanned and guarded"
     )
 
 

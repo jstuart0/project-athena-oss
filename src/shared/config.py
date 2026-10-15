@@ -489,10 +489,12 @@ class AthenaConfig(BaseSettings):
     #   default origin when a caller doesn't specify one. Empty means the
     #   amtrak service requires an explicit origin on every request.
     default_amtrak_station: str = Field(default="")
-    # ha_satellite_room_map: JSON object mapping a Home Assistant
-    #   assist_satellite entity ID to the room it's physically located in
+    # ha_satellite_room_map: the fallback for the admin Speaker rooms setting
+    #   (read only by shared.household.speaker_rooms; a saved admin list wins).
+    #   JSON object mapping a Home Assistant assist_satellite entity ID (or
+    #   32-hex device ID) to the room it's physically located in
     #   ({"assist_satellite.<id>": "<room>", ...}). Consumed by the gateway
-    #   (parsed lazily, not at import time — see _get_ha_satellite_room_map
+    #   (parsed lazily, not at import time — see _get_satellite_room_map
     #   in src/gateway/main.py) for both directions: entity->room (active-
     #   satellite room detection) and its inverse, room->entity (satellite
     #   announcements). Empty means satellite-based room detection and
@@ -521,11 +523,13 @@ class AthenaConfig(BaseSettings):
     #   bed_warmer intent handler reports the feature isn't configured
     #   instead of controlling a hardcoded device.
     ha_bed_warmer_entities: str = Field(default="")
-    # ha_light_groups: JSON object mapping a room name to a light-group
-    #   entity ID ({"<room>": "<light group entity>"}), used only by
+    # ha_light_groups: the fallback for the admin Room lights setting (read
+    #   only by shared.household.room_lights; a saved admin list wins). JSON
+    #   object mapping a room name to a light-group entity ID
+    #   ({"<room>": "<light group entity>"}): the lights a room command and
     #   smart_home_controller.py's scene-activation-failed fallback (dim/
     #   turn on that room's lights when the named scene/script doesn't
-    #   exist). Empty means the fallback for an absent room is skipped
+    #   exist) write. Empty means the fallback for an absent room is skipped
     #   entirely (DC17 item 1, OSS-First) -- turning on every light in the
     #   house ("all") when a specific room's group isn't configured is a
     #   house-wide regression, not a safe default.
@@ -535,14 +539,15 @@ class AthenaConfig(BaseSettings):
     #   matches one, so a voice satellite's status LED or LED ring is not
     #   treated as a room fixture. Unset uses the built-in LED-ring/status-LED
     #   pattern; "[]" opts out entirely; a malformed value falls back to the
-    #   default. Never applied to an explicit HA_LIGHT_GROUPS entry or to a
+    #   default. Never applied to an explicitly configured room's lights or to a
     #   member of a candidate group.
     ha_room_light_exclude_entities: str = Field(default="")
     # ha_areas: "auto" (default) reads Home Assistant's area, device and
     #   entity registries over its WebSocket API (read-only, in the
     #   background) so a satellite's room and a room's lights come from
     #   HA's own areas. "off" never connects; rooms then come only from
-    #   HA_SATELLITE_ROOM_MAP, HA_LIGHT_GROUPS and admin room groups. Any
+    #   the Room lights and Speaker rooms settings (or their env fallbacks,
+    #   HA_LIGHT_GROUPS and HA_SATELLITE_ROOM_MAP) and admin room groups. Any
     #   other value logs an ERROR and reads "off".
     ha_areas: Literal["auto", "off"] = Field(default="auto")
     # ha_device_client_networks: comma-separated CIDRs/addresses of clients

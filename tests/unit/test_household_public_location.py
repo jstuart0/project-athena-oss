@@ -279,12 +279,19 @@ def _default_location_calls(source: str):
             if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) == "default_location"]
 
 
+def _lacks_audience(call) -> bool:
+    import ast
+
+    first = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "audience"), None)
+    return first is None or (isinstance(first, ast.Constant) and first.value is None)
+
+
 def test_every_orchestrator_default_location_call_passes_an_audience():
     root = h.REPO_ROOT / "src" / "orchestrator"
     seen = {}
     for path in root.rglob("*.py"):
         calls = _default_location_calls(path.read_text(encoding="utf-8"))
-        bare = [c.lineno for c in calls if not (c.args or c.keywords)]
+        bare = [c.lineno for c in calls if _lacks_audience(c)]
         assert not bare, f"{path.relative_to(h.REPO_ROOT)}:{bare} call default_location() with no audience"
         if calls:
             seen[path.name] = len(calls)
@@ -294,6 +301,58 @@ def test_every_orchestrator_default_location_call_passes_an_audience():
 
 def test_a_planted_bare_default_location_call_is_caught():
     assert len(_default_location_calls("x = default_location()\n")) == 1
-    assert not [c for c in _default_location_calls("x = default_location(state.knowledge_audience)\n")
-                if not (c.args or c.keywords)]
-    assert [c for c in _default_location_calls("x = constants.default_location()\n") if not (c.args or c.keywords)]
+    assert not [c for c in _default_location_calls("x = default_location(state.knowledge_audience)\n") if _lacks_audience(c)]
+    assert [c for c in _default_location_calls("x = constants.default_location()\n") if _lacks_audience(c)]
+
+
+def test_a_literal_none_or_a_none_keyword_is_not_an_audience():
+    for source in ("x = default_location(None)\n", "x = default_location(audience=None)\n"):
+        assert [c for c in _default_location_calls(source) if _lacks_audience(c)], source
+    assert not [c for c in _default_location_calls("x = default_location(audience=a)\n") if _lacks_audience(c)]
+
+
+# The orchestrator reads the home location only inside these two functions, so the street
+# address can't reach a prompt except through default_location's audience check.
+LOCATION_READERS = {("utils/constants.py", "default_city"), ("utils/constants.py", "default_location")}
+
+
+def _household_location_reads(source: str):
+    """(function name, line) of every ``household.location()`` call, and of any
+    ``from shared.household import location`` / ``from shared import household``-free alias."""
+    import ast
+
+    found = []
+
+    def visit(node, enclosing):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            enclosing = node.name
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "location":
+            receiver = ast.unparse(node.func.value)
+            if receiver in ("household", "shared.household"):
+                found.append((enclosing, node.lineno))
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("household") and any(
+                a.name in ("location", "*") for a in node.names):
+            found.append((enclosing, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            visit(child, enclosing)
+
+    visit(ast.parse(source), "")
+    return found
+
+
+def test_the_orchestrator_reads_the_home_location_only_through_default_location():
+    root = h.REPO_ROOT / "src" / "orchestrator"
+    seen = set()
+    for path in root.rglob("*.py"):
+        relative = path.relative_to(root).as_posix()
+        for function, line in _household_location_reads(path.read_text(encoding="utf-8")):
+            assert (relative, function) in LOCATION_READERS, f"{relative}:{line} reads household.location() in {function or 'module scope'}"
+            seen.add((relative, function))
+    assert seen == LOCATION_READERS, seen
+
+
+def test_planted_location_reads_are_caught():
+    assert _household_location_reads("def f():\n    return household.location().text\n") == [("f", 2)]
+    assert _household_location_reads("def g():\n    return shared.household.location()\n") == [("g", 2)]
+    assert _household_location_reads("from shared.household import location\n") == [("", 1)]
+    assert _household_location_reads("def h(c):\n    return c.location()\n") == []

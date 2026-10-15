@@ -591,6 +591,14 @@ def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
     return None
 
 
+def _room_lights_value():
+    """The effective Room lights value (mapping plus its source). The directory
+    provider is the single source when the lifespan registered one."""
+    from orchestrator.nodes import _runtime
+    provider = _runtime.get_room_directory()
+    return provider.room_lights() if provider is not None else household.room_lights()
+
+
 def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
     """room key -> the light entity ids that room's commands write, from the
     household's Room lights setting (admin), else ``HA_LIGHT_GROUPS``.
@@ -607,10 +615,7 @@ def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
     doesn't exist. Empty means a room with no configured lights gets no scene
     fallback at all -- turning on "all" lights house-wide when one room isn't
     configured is a house-wide regression, not a safe default."""
-    from orchestrator.nodes import _runtime
-    provider = _runtime.get_room_directory()
-    value = provider.room_lights() if provider is not None else household.room_lights()
-    return dict(value.mapping)
+    return dict(_room_lights_value().mapping)
 
 
 @dataclass(frozen=True)
@@ -2706,6 +2711,13 @@ Return ONLY valid JSON."""
                 result = RoomLights(found)
                 result.missing = missing
                 return result
+            if _room_lights_value().source == household.SOURCE_ADMIN:
+                # The owner chose these lights: none of them answering means the
+                # room is not responding, never "use the whole area instead".
+                logger.info("room_lights_resolved", source="configured", targets=0)
+                result = RoomLights([])
+                result.missing = missing
+                return result
         snapshot = self._registry_snapshot()
         find_area_lights = getattr(self.entity_manager, "find_area_lights", None)
         if snapshot is not None and key and find_area_lights is not None:
@@ -3619,6 +3631,8 @@ Return ONLY valid JSON."""
 
         room_label = self._spoken_room(room)
         if not light_matches:
+            if getattr(light_matches, 'missing', 0):
+                return f"The {room_label} lights aren't responding right now."
             return f"I couldn't find any lights in the {room_label}."
 
         # Check if user wants ALL matching lights (multiple groups)
@@ -6197,6 +6211,7 @@ Return ONLY valid JSON."""
         explicit scope cue.
         """
         from . import write_fanout
+        from orchestrator.mode_permission import HAWritePermissionDenied
 
         if 'movie' in query_lower:
             # Dim the living room's lights as a fallback (a specific room's
@@ -6213,7 +6228,9 @@ Return ONLY valid JSON."""
             try:
                 await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
                 return "Good night! I've turned off the lights."
-            except:
+            except HAWritePermissionDenied:
+                raise
+            except Exception:
                 pass
         elif 'good morning' in query_lower:
             # Turn on the office's lights as a fallback (a specific room's
@@ -6238,7 +6255,9 @@ Return ONLY valid JSON."""
                 await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
                 await ha_client.call_service("lock", "lock", {"entity_id": "all"})
                 return "Goodbye! I've turned off the lights and locked the doors."
-            except:
+            except HAWritePermissionDenied:
+                raise
+            except Exception:
                 pass
         elif 'home' in query_lower:
             # Turn on the living room's lights as a fallback (a specific

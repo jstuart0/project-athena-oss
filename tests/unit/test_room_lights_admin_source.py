@@ -87,14 +87,6 @@ def test_neither_source_leaves_the_area_tier(monkeypatch):
     assert baseline and "light.hall_pair" not in baseline
 
 
-def test_when_every_configured_id_is_missing_the_area_tier_answers(monkeypatch):
-    rig = Rig(monkeypatch)
-    use_sources(rig)
-    baseline = resolved_ids(rig, "galley")
-    use_sources(rig, admin={"galley": ["light.nope_1", "light.nope_2"]})
-    assert resolved_ids(rig, "galley") == baseline
-
-
 def test_part_missing_writes_the_present_lights_and_reports_the_rest_as_not_responding(monkeypatch):
     rig = Rig(monkeypatch)
     use_sources(rig, admin={"galley": ["light.hall_lamp", "light.study_lamp", "light.nope"]})
@@ -273,3 +265,68 @@ def test_a_failed_fallback_write_is_logged_by_class_and_falls_through(monkeypatc
     assert answer is None
     failed = [e for e in logs if e["event"] == "scene_fallback_write_failed"]
     assert failed == [{"event": "scene_fallback_write_failed", "error_class": "ConnectionError", "log_level": "warning"}]
+
+
+# ---------------------------------------------------------------------------
+# Admin list with every id missing; the "all" fallback branches under a denial
+# ---------------------------------------------------------------------------
+
+def test_an_admin_list_with_every_id_missing_is_not_responding_and_never_the_area(monkeypatch):
+    rig = Rig(monkeypatch)
+    use_sources(rig, admin={"galley": ["light.nope_1", "light.nope_2"]})
+    matches = asyncio.run(rig.controller._resolve_room_lights("galley"))
+    assert list(matches) == [] and matches.missing == 2
+    answer = rig.run(light("galley"), "turn on the galley lights")
+    assert rig.written == [] and answer == "The galley lights aren't responding right now."
+
+
+def test_an_environment_list_with_every_id_missing_still_falls_through_to_the_area(monkeypatch):
+    rig = Rig(monkeypatch)
+    use_sources(rig)
+    baseline = resolved_ids(rig, "galley")
+    use_sources(rig, env=json.dumps({"galley": "light.nope_1"}))
+    assert resolved_ids(rig, "galley") == baseline and baseline
+
+
+ALL_BRANCHES = [
+    pytest.param("good night, all the lights off", "script.good_night", id="good_night"),
+    pytest.param("goodbye, all the lights off and all the doors locked", "script.leaving", id="leaving"),
+]
+
+
+@pytest.mark.parametrize("query,entity", ALL_BRANCHES)
+def test_a_denied_all_branch_write_reaches_the_caller_as_a_denial(monkeypatch, query, entity):
+    rig = fallback_rig(monkeypatch, {})
+    rig.raw.call_service = AsyncMock(side_effect=mp.HAWritePermissionDenied("denied", reason="entity_or_domain_denied"))
+
+    async def go():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(query)):
+            return await rig.controller._run_scene_fallback(query, rig.raw, query)
+
+    with pytest.raises(mp.HAWritePermissionDenied):
+        asyncio.run(go())
+    assert rig.raw.call_service.await_count == 1, "the branch reached its write, so the gate did not hide the test"
+
+
+@pytest.mark.parametrize("query,entity", ALL_BRANCHES)
+def test_a_guest_missing_scene_falls_to_the_all_branch_and_is_refused_not_told_a_basic_version(monkeypatch, query, entity):
+    rig = fallback_rig(monkeypatch, {})
+
+    async def call_service(domain, service, data):
+        if domain in ("scene", "script"):
+            raise RuntimeError("no such scene")
+
+    rig.raw.call_service = AsyncMock(side_effect=call_service)
+    perms = guest(allowed_intents=["control"], restricted_entities=[r"^light\."])
+
+    async def go():
+        with mp.ha_permission_scope(perms, mode="guest", utterance=classify_utterance(query)) as scope:
+            try:
+                answer = await rig.controller._handle_scene_intent("activate", {"entity_id": entity}, rig.raw, original_query=query)
+            except mp.HAWritePermissionDenied:
+                return None, scope
+            return answer, scope
+
+    answer, scope = asyncio.run(go())
+    assert answer is None, answer
+    assert scope.denials, "the guard recorded the denied all-lights write"
