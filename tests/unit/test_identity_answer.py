@@ -393,3 +393,16 @@ def test_a_failed_lookup_is_remembered_and_a_found_name_is_not(monkeypatch):
     helpers2, _ = _clocked(monkeypatch, [{"category": "general", "key": "assistant_name", "value": "Hal", "applies_to": "both"}])
     for _ in range(2):
         assert asyncio.run(helpers2.configured_assistant_names(owner)) == ("Hal", "Jarvis")
+
+
+def test_a_failed_profile_lookup_is_remembered_for_the_short_window_only(monkeypatch):
+    helpers = _names(monkeypatch, [])
+    monkeypatch.setattr(helpers, "get_assistant_profile", mock.AsyncMock(side_effect=ConnectionError("down")))
+    before = helpers.time.monotonic()
+    assert asyncio.run(helpers.configured_assistant_names()) == ()
+    window = helpers._assistant_names_cache["expires_at"] - before
+    assert window <= helpers.ASSISTANT_ROW_MISS_TTL_SECONDS + 1  # not the 300 s of a good lookup
+    monkeypatch.setattr(helpers, "get_assistant_profile", mock.AsyncMock(return_value={"assistant_name": "Jarvis"}))
+    helpers._assistant_names_cache["expires_at"] = 0.0  # the short window has passed
+    assert asyncio.run(helpers.configured_assistant_names()) == ("Jarvis",)
+    assert helpers._assistant_names_cache["expires_at"] - helpers.time.monotonic() > 100  # positive control

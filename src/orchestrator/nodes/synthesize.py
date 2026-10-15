@@ -311,7 +311,7 @@ Response:"""
         logger.info("addressee_resolved", kind=addressee.kind)
 
         # Inject relevant memories for context augmentation
-        if state.memory_context:
+        if state.memory_context and not (addressee.kind is None and identity_answer.mentions_identity(state.query)):
             system_context += state.memory_context
             logger.info("Memory context injected into LLM prompt")
 

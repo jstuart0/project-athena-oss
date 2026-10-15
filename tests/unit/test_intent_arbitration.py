@@ -98,3 +98,30 @@ def test_weather_phrasing_takes_the_pattern_over_general_info(query, llm_conf):
 @pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
 def test_weather_words_in_media_or_other_words_stay_general(query, llm_conf):
     assert _arb(query, G, llm_conf, W).intent == G
+
+
+# Definitional, historical and how/why wording stays general knowledge (reconcile r1, H3).
+@pytest.mark.parametrize("query,pattern", [
+    ("who invented basketball", I.SPORTS),
+    ("what are the rules of football", I.SPORTS),
+    ("explain the offside rule in soccer", I.SPORTS),
+    ("what is the history of the nfl", I.SPORTS),
+    ("history of the nfl", I.SPORTS),
+    ("how does rain form", W),
+    ("why does it snow in winter", W),
+])
+@pytest.mark.parametrize("llm_conf", [0.5, 0.9, 0.99])
+def test_timeless_wording_stays_general_info(query, pattern, llm_conf):
+    assert _arb(query, G, llm_conf, pattern).intent == G
+
+
+@pytest.mark.parametrize("query,pattern", [
+    ("what are the rules of football tonight", I.SPORTS),
+    ("how did the falcons do today", I.SPORTS),
+    ("whats the score of the giants game", I.SPORTS),
+    ("how does the forecast look", W),
+    ("why does it rain so much this week", W),
+    ("is it going to snow", W),
+])
+def test_time_sensitive_wording_still_takes_the_pattern(query, pattern):
+    assert _arb(query, G, 0.9, pattern).intent == pattern

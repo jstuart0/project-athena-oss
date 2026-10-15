@@ -149,8 +149,9 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     # is the one exception (experience_claim reads the request). Checked on a
     # tool-node turn on every path; the streamed synthesis has no validation, so
     # the check stays off for synthesized turns on the graph too, and the
-    # persona's fixed line carries them.
-    if state.tool_call_attempted and experience_claim(state.answer, state.query):
+    # persona's fixed line carries them. A turn grounded in tool data is not judged
+    # on its wording ("I visited their website and they open at 5").
+    if state.tool_call_attempted and not grounded(state) and experience_claim(state.answer, state.query):
         state.validation_passed = False
         state.validation_reason = "Hallucination detected: first-person experience claim"
         state.validation_details = ["first-person experience"]

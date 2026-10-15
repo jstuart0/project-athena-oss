@@ -262,13 +262,14 @@ def test_voice_chat_completions_stream_speaks_one_delta_then_done(rig, seam, fai
 
 
 @pytest.mark.parametrize("failure", FAILURES)
-def test_text_stream_keeps_the_generic_error_line(rig, seam, failure):
+def test_text_stream_ends_with_the_apology_and_done_like_the_non_stream_path(rig, seam, failure):
     seam(failure)
     response = _client().post("/v1/chat/completions", json=_chat_body(True))
 
     assert response.status_code == 200
-    assert response.text == gw._stream_error_line()
-    assert PHRASE not in response.text
+    events = [line[6:] for line in response.text.splitlines() if line.startswith("data: ")]
+    assert events[-1] == "[DONE]"
+    assert [json.loads(e)["choices"][0]["delta"]["content"] for e in events[:-1]] == [PHRASE]
     _assert_no_secret(rig, response.text)
     assert rig.counter.errors()
 
@@ -708,3 +709,65 @@ def test_a_valid_model_tag_is_stripped_and_kept(monkeypatch):
 
     monkeypatch.setenv("GATEWAY_FALLBACK_MODEL", "  hf.co/org/model-GGUF:Q4_K_M  ")
     assert AthenaConfig(_env_file=None).gateway_fallback_model == "hf.co/org/model-GGUF:Q4_K_M"
+
+
+def test_a_failed_conversion_is_not_converted_again_in_the_failure_handler(rig, monkeypatch):
+    """The speech Responses route answers the phrase even when the request conversion was the failure."""
+    monkeypatch.setattr(gw, "_responses_to_chat_request", mock.Mock(side_effect=RuntimeError(f"boom {SECRET}")))
+
+    response = _client().post("/v1/voice/responses", json=_responses_body(False))
+
+    assert response.status_code == 200 and response.json()["output_text"] == PHRASE
+    _assert_no_secret(rig, response.text)
+    assert gw._responses_to_chat_request.call_count == 1
+
+
+class _PartialThenBroken:
+    """An orchestrator stream that sends some content, then fails."""
+
+    def __init__(self, chunks, exc):
+        self.chunks, self.exc = chunks, exc
+
+    def stream(self, *args, **kwargs):
+        outer = self
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                class _Resp:
+                    def raise_for_status(self):
+                        return None
+
+                    async def aiter_lines(self):
+                        for chunk in outer.chunks:
+                            yield f"data: {json.dumps({'choices': [{'delta': chunk}]})}"
+                        raise outer.exc
+
+                return _Resp()
+
+            async def __aexit__(self_inner, *exc_info):
+                return False
+
+        return _Ctx()
+
+
+def _collect_stream(monkeypatch, chunks, channel):
+    monkeypatch.setattr(gw, "orchestrator_client", _PartialThenBroken(chunks, httpx.ReadError("cut")))
+    request = gw.ChatCompletionRequest(model="gpt-4", messages=[gw.ChatMessage(role="user", content="hi")], stream=True)
+
+    async def go():
+        return [line async for line in gw.stream_orchestrator_response(request, channel=channel)]
+
+    lines = asyncio.run(go())
+    return [json.loads(l[6:])["choices"][0]["delta"].get("content") for l in lines[:-1]], lines[-1]
+
+
+@pytest.mark.parametrize("channel", [gw.OutputChannel.SPEECH, gw.OutputChannel.TEXT])
+def test_the_apology_after_partial_content_starts_its_own_sentence(rig, monkeypatch, channel):
+    contents, last = _collect_stream(monkeypatch, [{"role": "assistant"}, {"content": "The forecast for"}], channel)
+    assert contents == [None, "The forecast for", f". {PHRASE}"] and last == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize("channel", [gw.OutputChannel.SPEECH, gw.OutputChannel.TEXT])
+def test_the_apology_alone_has_no_separator_when_nothing_was_said(rig, monkeypatch, channel):
+    contents, last = _collect_stream(monkeypatch, [{"role": "assistant"}], channel)  # a role-only delta is no content
+    assert contents == [None, PHRASE] and last == "data: [DONE]\n\n"

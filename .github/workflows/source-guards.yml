@@ -90,6 +90,11 @@ jobs:
         run: |
           python3 -m pytest -q -p no:cacheprovider tests/unit/test_retrieve.py
 
+      - name: Run the context continuation tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_context_continuation.py
+
       - name: Run the music node tests (own process)
         shell: bash
         run: |

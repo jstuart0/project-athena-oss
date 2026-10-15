@@ -280,7 +280,6 @@ FOLLOW_UP_ROWS = [
     ("higher", "control", "ellipsis"),
     ("turn them too", "control", "anaphora"),
     ("and the office", "control", "anaphora"),
-    ("louder", "music_play", "anaphora"),  # named member: music family
     ("turn it up", "weather", "ellipsis"),  # ellipsis wins over a different-family fresh intent
     ("warmer", "control", "anaphora"),
     ("the same one", "dining", "anaphora"),
@@ -294,7 +293,7 @@ FOLLOW_UP_ROWS = [
 
 
 def test_follow_up_rows_population_floor():
-    assert len(FOLLOW_UP_ROWS) == 20
+    assert len(FOLLOW_UP_ROWS) == 19
 
 
 @pytest.mark.parametrize(
@@ -311,6 +310,17 @@ def test_follow_ups_continue(query, prev_intent, expected_reason):
     )
     assert should_continue is True
     assert reason == expected_reason
+
+
+def test_a_transport_word_after_music_is_classified_fresh_as_music_control():
+    # Phase 9 (by design): "louder" after music is no context continuation; it is
+    # classified fresh as music_control so it reaches the music-control fast path.
+    ref_info = detect_context_reference("louder")
+    fresh_intent, fresh_confidence = main_module._pattern_based_classification("louder", return_confidence=True)
+    assert fresh_intent.value == "music_control"
+    assert decide_context_continuation(ref_info, "music_play", fresh_intent, fresh_confidence) == (
+        False, "fresh_intent",
+    )
 
 
 # ---------------------------------------------------------------------------

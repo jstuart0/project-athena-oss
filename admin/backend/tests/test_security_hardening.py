@@ -12,6 +12,7 @@ Tests for the security hardening changes:
   - Production startup rejects insecure default secrets
 """
 import os
+import subprocess
 import sys
 import hmac
 
@@ -735,7 +736,6 @@ class TestPhase2InsecureDefaults:
 
     def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
         """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
-        import subprocess
         import sys
 
         env = os.environ.copy()
@@ -927,7 +927,6 @@ class TestPhase2InsecureDefaults:
 
     def test_phase2_dev_mode_bypasses_oidc_client_id_gate(self):
         """DEV_MODE=true skips the production gate — demo-mode client id is allowed."""
-        import subprocess
         import sys
 
         env = os.environ.copy()
@@ -1115,7 +1114,6 @@ class TestAthena21StartupGate:
 
     def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
         """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
-        import subprocess
         import sys
 
         env = os.environ.copy()
@@ -1359,7 +1357,6 @@ class TestPhase1DevModePostgresGate:
 
     def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
         """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
-        import subprocess
         import sys
 
         env = os.environ.copy()
@@ -1616,7 +1613,6 @@ class TestPhase3RuntimeIssuerAndDiscoveryGate:
 
     def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
         """Run startup_event() in a subprocess via TestClient (Phase 1/2 pattern)."""
-        import subprocess
         import sys as _sys
 
         env = os.environ.copy()

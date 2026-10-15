@@ -335,11 +335,11 @@ def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: st
 # --- ungrounded answers -----------------------------------------------------------
 
 _EXPERIENCE_CLAIM = re.compile(
-    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|here|to)|eaten|tried (?:(?:the|a|an|their|some|that|this) [\w'-]+(?: [\w'-]+){0,3}|it) (?:there|here)|visited|dined|stayed at|gone to)\b"
+    r"\bI(?:'ve| have)?\s+(?:personally\s+)?(?:been (?:there|here|to)|eaten|tried (?:(?:the|a|an|their|some|that|this) [\w'-]+(?: [\w'-]+){0,3}|it) (?:there|here)|(?:visited|gone)(?: to)? (?:there|here)|dined|stayed at)\b"
     r"|\bI\s+(?:personally\s+)?(?:ate|went|dined|visited|stayed|got)\s+(?:to |at )?(?:there|here)\b"
-    r"|\bI\s+(?:personally\s+)?(?:ate at|went to|dined at|visited|stayed at)\b"
+    r"|\bI\s+(?:personally\s+)?(?:ate at|dined at|stayed at)\b"
     r"|\bI(?:'ve| have)? had (?:a|an|the|some)\b[^.?!]{0,40}\b(?:there|here)\b"
-    r"|\b(?:when|last time|the time) I (?:visited|went|ate|tried|was there)\b"
+    r"|\b(?:when|last time|the time) I (?:visited(?=\s*[,.]|\s+(?:there|here)\b)|ate|tried|was there)\b"
     r"|\bI (?:love|enjoy) (?:going|eating|ordering) (?:there|at)\b",
     re.IGNORECASE,
 )
@@ -388,6 +388,13 @@ def _has_venue_with_detail(answer: str) -> bool:
 VENUE_INTENTS: FrozenSet[IntentCategory] = frozenset({IntentCategory.DINING, IntentCategory.EVENTS})
 
 
+def _is_venue_intent(intent: Any) -> bool:
+    """By value, so an intent that arrives as a string or a stand-in with a
+    ``.value`` (not hashable) is judged like the enum."""
+    value = getattr(intent, "value", intent)
+    return isinstance(value, str) and value in {i.value for i in VENUE_INTENTS}
+
+
 def ungrounded_answer(answer: Optional[str], intent: Any, query: Optional[str], is_grounded: bool) -> bool:
     """True when the turn holds no tool data and the answer still claims what
     only data could give: a first-person experience, or (for a venue intent or a
@@ -400,7 +407,7 @@ def ungrounded_answer(answer: Optional[str], intent: Any, query: Optional[str], 
         return True
     if knowledge_question(query):
         return False
-    if intent in VENUE_INTENTS or local_business_cue(query):
+    if _is_venue_intent(intent) or local_business_cue(query):
         return _has_venue_with_detail(answer)
     return False
 

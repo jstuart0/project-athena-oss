@@ -549,6 +549,8 @@ def _unwrap_time_phrase(content: List[str]) -> Tuple[List[str], bool]:
     if content and (content[0] in _TIME_SUBORDINATORS or content[0] in _SCHEDULE_LEADS):
         for k in (2, 3, 4):
             if len(content) > k and _CONTROL_VERB_RE.match(content[k]):
+                if content[0] in _SCHEDULE_LEADS and any(w in _NARRATIVE_SUBJECTS for w in content[1:k]):
+                    return content, False  # "in the movie they unlock the door": a scene, not a place or time
                 return content[k:], True
     return content, False
 
@@ -579,6 +581,86 @@ def _schedule_led(content: Sequence[str]) -> bool:
     if any(w in _TIME_UNIT_WORDS for w in lead) and any(w in _NUMBER_WORDS or w in _TIME_UNIT_WORDS for w in lead):
         return True
     return False
+
+
+_TAIL_CONDITION_WORDS = frozenset({"when", "whenever", "once", "before", "after", "until"})
+_TAIL_DAY_WORDS = frozenset({"tonight", "tomorrow", "later"})
+_TAIL_DAYPARTS = frozenset({"morning", "evening", "afternoon"})
+_TAIL_CLOCK_WORDS = frozenset({"noon", "midnight", "sunset", "sunrise", "sundown", "dusk", "dawn"})
+_TAIL_DELAY_UNITS = frozenset({
+    "second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins", "hour", "hours", "day", "days",
+})
+_TAIL_QUANTITY_WORDS = _NUMBER_WORDS | {"couple", "few", "of"}
+_TAIL_MEDIA_VERBS = frozenset({"play", "pause", "resume", "stop", "skip"})
+_TAIL_REFERENCE_WORDS = frozenset({"that", "this", "it"})  # "after that turn off the fan" is a sequence step
+_TAIL_DOOR_VERBS = frozenset({"lock", "unlock", "open", "close", "shut", "raise", "lower"})
+_TAIL_DOOR_NOUNS = frozenset({
+    "door", "doors", "garage", "gate", "lock", "locks", "deadbolt", "blind", "blinds", "shade", "shades",
+    "curtain", "curtains", "cover", "covers",
+})
+_CLOCK_MERIDIEM = frozenset({"am", "pm", "o'clock"})
+
+
+def _delay_phrase(rest: Sequence[str]) -> bool:
+    """"5 minutes", "an hour", "half an hour", "a couple of minutes" after "in"."""
+    for k in (2, 3, 4):
+        if len(rest) >= k and rest[k - 1] in _TAIL_DELAY_UNITS:
+            return all(w[0].isdigit() or w in _TAIL_QUANTITY_WORDS for w in rest[:k - 1])
+    return False
+
+
+def _clock_phrase(rest: Sequence[str], door: bool) -> bool:
+    """A time of day after "at": "5pm", "5 30 pm", "noon", "sunset". A bare hour
+    ("at 5") counts only for a door, since "at 72" or "at 10" may be a level."""
+    if not rest:
+        return False
+    if rest[0] in _TAIL_CLOCK_WORDS:
+        return True
+    if not (rest[0].isdigit() and len(rest[0]) <= 2 and int(rest[0]) <= 24):
+        return False
+    after = rest[1:3]
+    return door or any(w in _CLOCK_MERIDIEM for w in after)
+
+
+def _tail_deferral(ws: Sequence[str], door: bool) -> Optional[str]:
+    """The first deferral in ``ws``: ``"time"`` for a delay or time of day,
+    ``"condition"`` for when/once/before/after/until, else None."""
+    for i, w in enumerate(ws):
+        rest = list(ws[i + 1:])
+        if w in _TAIL_CONDITION_WORDS and rest and rest[0] not in _TAIL_REFERENCE_WORDS:
+            return "condition"
+        if w in _TAIL_DAY_WORDS:
+            return "time"
+        if w == "in" and (_delay_phrase(rest) or (rest[:1] == ["the"] and rest[1:2] and rest[1] in _TAIL_DAYPARTS)):
+            return "time"
+        if w == "at" and _clock_phrase(rest, door):
+            return "time"
+    return None
+
+
+def _trailing_deferral(content: Sequence[str]) -> Optional[str]:
+    """A command with a time or condition after its verb ("unlock the front
+    door in 5 minutes", "open the garage at 5pm", "lock the door when I get
+    home"): not for now, whatever else the words say. Media commands keep
+    their own timing words ("play jazz until five"). Only a command for a
+    door, lock or cover is judged: a light's timer ("turn off the light after
+    5 seconds") is the sequence's and the agent's, as it has been."""
+    core, _ = _unwrap_time_phrase(list(content))
+    if len(core) < 2 or core[0] in _TAIL_MEDIA_VERBS:
+        return None
+    if core[0] not in _TAIL_DOOR_VERBS and not _TAIL_DOOR_NOUNS.intersection(core):
+        return None
+    return _tail_deferral(core[1:], core[0] in _TAIL_DOOR_VERBS)
+
+
+def _is_deferral_tail(content: Sequence[str]) -> bool:
+    """A clause that is only a time or condition for the command before it
+    ("unlock the front door, when I get home"), not a command of its own."""
+    if not content or _imperative_shape(content):
+        return False
+    return content[0] in _TAIL_CONDITION_WORDS or (
+        content[0] in _TAIL_DAY_WORDS or content[0] in ("in", "at")
+    ) and _tail_deferral(["x", *content], True) == "time"
 
 
 def _starts_negated(content: Sequence[str]) -> bool:
@@ -1139,8 +1221,9 @@ def _analyze_sentence(
         scheduled = False
         if shape:
             narration = reported or quoted or narrative
-            scheduled = not narration and _schedule_led(content)
-            conditional = cond or scheduled
+            trailing = None if narration else _trailing_deferral(content)
+            scheduled = not narration and (_schedule_led(content) or trailing == "time")
+            conditional = cond or scheduled or trailing is not None
             imperative = not (narration or conditional)
             deferred = conditional and not narration
         else:
@@ -1155,7 +1238,28 @@ def _analyze_sentence(
         out.append(Clause(
             start, end, words, sep, imperative, narration, conditional, negated, False, cue_ok, deferred, scheduled,
         ))
-    return out
+    return _defer_before_tails(out)
+
+
+_SPEECH_TAG_VERBS = frozenset({"said", "says", "asked", "asks", "replied", "yelled", "shouted", "whispered"})
+
+
+def _defer_before_tails(clauses: List[Clause]) -> List[Clause]:
+    """A command followed by a clause that is only a time or a condition
+    ("unlock the front door, when I get home") is not for now; one followed by
+    a speech tag ("unlock the front door, said nobody") is reported speech."""
+    for i in range(len(clauses) - 1):
+        c, nxt = clauses[i], clauses[i + 1]
+        tag = _content(nxt.words)
+        if c.imperative and nxt.sep == "comma" and len(tag) >= 2 and tag[0] in _SPEECH_TAG_VERBS:
+            clauses[i] = c._replace(imperative=False, narration=True, cue_ok=False)
+            continue
+        if c.imperative and nxt.sep == "comma" and _is_deferral_tail(_content(nxt.words)):
+            clauses[i] = c._replace(
+                imperative=False, conditional=True, deferred=True, cue_ok=False,
+                scheduled=_tail_deferral(["x", *_content(nxt.words)], True) == "time",
+            )
+    return clauses
 
 
 def _command_span_text(src: str, clauses: Sequence[Clause]) -> Optional[str]:
@@ -1260,6 +1364,13 @@ def has_narration(query: Optional[str], assistant_names: Iterable[str] = ()) -> 
     """Whether any clause that is not negated or empty is narration. Fails closed."""
     analysis = _analyze_or_none(query, assistant_names)
     return True if analysis is None else any(c.narration for c in _live(analysis))
+
+
+def has_deferral(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
+    """Whether any clause is a command that is not for now (a time or a
+    condition before or after it). Fails closed: an analysis that fails defers."""
+    analysis = _analyze_or_none(query, assistant_names)
+    return True if analysis is None else any(c.deferred or c.scheduled for c in _live(analysis))
 
 
 def imperative_text(query: Optional[str], assistant_names: Iterable[str] = ()) -> str:

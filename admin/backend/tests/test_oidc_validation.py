@@ -23,6 +23,7 @@ Do NOT mark these @pytest.mark.integration — they must run in default CI on ev
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 import warnings
@@ -475,7 +476,6 @@ class TestPhase3RuntimeIssuerAssertion:
     """
 
     def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
-        import subprocess
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(
             filter(None, [_SRC_PATH, _BACKEND_PATH, env.get("PYTHONPATH", "")])
@@ -852,7 +852,6 @@ class TestPhase1OIDCValidateIss:
         must remain SystemExit regardless of OIDC_VALIDATE_ISS=false.
         This gate runs before configure_oauth_client() and is independent of the flag.
         """
-        import subprocess
 
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(

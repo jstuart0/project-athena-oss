@@ -506,6 +506,7 @@ async def _profile_assistant_names() -> tuple:
     if now < _assistant_names_cache["expires_at"]:
         return _assistant_names_cache["names"]
     names: tuple = ()
+    ttl = ASSISTANT_NAME_CACHE_TTL_SECONDS
     try:
         profile = await asyncio.wait_for(
             get_assistant_profile(), timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS
@@ -514,7 +515,8 @@ async def _profile_assistant_names() -> tuple:
         names = (name,) if name else ()
     except Exception as e:
         logger.warning("assistant_name_lookup_failed", error=str(e))
-    _assistant_names_cache.update(names=names, expires_at=now + ASSISTANT_NAME_CACHE_TTL_SECONDS)
+        ttl = ASSISTANT_ROW_MISS_TTL_SECONDS  # a failed lookup is retried soon, not after the full TTL
+    _assistant_names_cache.update(names=names, expires_at=now + ttl)
     return names
 
 
@@ -1586,6 +1588,9 @@ async def _connect_probe(host: str, port: int) -> bool:
     return True
 
 
+_probe_error_types_logged: set = set()
+
+
 async def _probe_url(url: str) -> bool:
     target = _probe_origin(url)
     if target is None:
@@ -1594,6 +1599,12 @@ async def _probe_url(url: str) -> bool:
     try:
         return await asyncio.wait_for(_connect_probe(host, port), REACH_TIMEOUT_SECONDS)
     except (OSError, asyncio.TimeoutError, UnicodeError):
+        return False
+    except Exception as exc:  # unreachable, whatever the failure; a cancellation is not an Exception
+        error_type = type(exc).__name__
+        if error_type not in _probe_error_types_logged:
+            _probe_error_types_logged.add(error_type)
+            logger.warning("rag_url_probe_failed", error_type=error_type)
         return False
 
 

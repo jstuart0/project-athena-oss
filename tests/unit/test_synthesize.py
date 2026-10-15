@@ -812,3 +812,27 @@ def test_node_timings_always_set():
     result = asyncio.run(synthesize_node(state))
     assert "synthesize" in result.node_timings
     assert result.node_timings["synthesize"] >= 0.0
+
+
+def _prompt_for(query: str, memory_context: str) -> str:
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    state = _make_state(query=query, memory_context=memory_context, retrieved_data={})
+    with (
+        _patch_direct_response(None),
+        _patch_component_config(),
+        _patch_build_prompt(),
+        _patch_knowledge_context(),
+        _patch_admin_client(),
+        _patch_store_context(),
+        _patch_sms_detection(),
+    ):
+        asyncio.run(synthesize_node(state))
+    return router.generate.call_args[1].get("prompt", "")
+
+
+def test_memory_is_left_out_of_an_identity_turn_for_an_unknown_speaker():
+    memory = "[Memory: the user's address is 1 Example Row]"
+    assert "1 Example Row" not in _prompt_for("what's my name and where do I live", memory)
+    assert "1 Example Row" not in _prompt_for("remind me what address I gave you", memory)
+    assert "1 Example Row" in _prompt_for("what is a good way to cook rice", memory)  # positive control
