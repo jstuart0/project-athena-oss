@@ -20,6 +20,13 @@ data:
   # silently clobber a deployment-specific value with an absent key. Set the
   # ones you need by uncommenting; leave the rest commented to keep the
   # AthenaConfig default.
+  # Household preferences (DEFAULT_CITY, DEFAULT_STATE, DEFAULT_AMTRAK_STATION,
+  # TRANSIT_*, COMMUNITY_EVENTS_SOURCES, GATEWAY_FALLBACK_MODEL,
+  # SMS_DEFAULT_COUNTRY_CODE, HA_ROOM_LIGHT_EXCLUDE_ENTITIES and
+  # HA_BED_WARMER_ENTITIES) are fallbacks: a value saved in the admin panel
+  # wins, then the key here, then the default (docs/CONFIGURATION.md,
+  # "Household settings"). Prefer the admin panel; the keys stay for installs
+  # that already set them.
   # Install telemetry is on by default (a pseudonymous daily heartbeat from
   # admin-backend; see docs/CONFIGURATION.md "Telemetry"). To turn it off:
   # ATHENA_TELEMETRY: "off"
@@ -194,7 +201,8 @@ data:
   # guest's number can text as that guest. See .env.example.
   # TWILIO_ALLOW_UNSIGNED: "true"
   # Country code (1-3 digits) for bookings stored with a national phone
-  # number; default 1.
+  # number; default 1. A fallback: SMS Messaging -> Default country code
+  # (owner only) in the admin panel wins.
   # SMS_DEFAULT_COUNTRY_CODE: "1"
 
   # Feature flags

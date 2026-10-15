@@ -304,7 +304,8 @@ OLLAMA_URL=http://localhost:11434
 HA_URL=http://your-home-assistant:8123
 HA_TOKEN=your-long-lived-access-token
 
-# Location defaults for RAG queries (leave blank if not needed)
+# Location defaults for RAG queries (leave blank if not needed). Fallbacks:
+# the home location set in the admin panel (Base Knowledge) wins.
 DEFAULT_CITY=
 DEFAULT_STATE=
 DEFAULT_TIMEZONE=UTC

@@ -51,9 +51,9 @@ every addition.
 | `DATABASE_URL` | `database_url` | `""` |
 | `SERVICE_API_KEY` | `service_api_key` | `""` |
 | `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
-| `DEFAULT_CITY` | `default_city` | `""` |
+| `DEFAULT_CITY` | `default_city` | `""`. A fallback: the home location in Base Knowledge (Everyone) wins; see [Household settings](#household-settings) |
 | `ATHENA_DEFAULT_MODEL` | `athena_default_model` | `qwen3:4b-instruct-2507-q4_K_M`. The model every component uses unless one is configured for it. One validated setting read by the orchestrator, the gateway and admin-backend: at most 128 characters of letters, digits and `. _ : / -`; an empty or invalid value logs `model_tag_invalid` and the default is used |
-| `GATEWAY_FALLBACK_MODEL` | `gateway_fallback_model` | `""` (use `ATHENA_DEFAULT_MODEL`). The Ollama model the gateway answers with when it has to pick one: its own fallback answers, and an OpenAI model name (`gpt-*`) that isn't in its mapping. A model name a client sends for Ollama passes through unchanged. Same validation as above |
+| `GATEWAY_FALLBACK_MODEL` | `gateway_fallback_model` | `""` (use `ATHENA_DEFAULT_MODEL`). The Ollama model the gateway answers with when it has to pick one: its own fallback answers, and an OpenAI model name (`gpt-*`) that isn't in its mapping. A model name a client sends for Ollama passes through unchanged. Same validation as above. A fallback: the admin Gateway Settings card wins; see [Household settings](#household-settings) |
 | `OIDC_ISSUER` | `oidc_issuer` | `""` |
 | `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
 | `DEMO_MODE` | `demo_mode` | `false` |
@@ -875,6 +875,8 @@ The Dashboard's Home Assistant card describes the connection Athena actually use
 | `MIN_TEMP` | `65` | Minimum guest temperature |
 | `MAX_TEMP` | `75` | Maximum guest temperature |
 
+These four, and the appliance entities under "jarvis-web appliance and media entities", are fallbacks: the Devices page's **Jarvis web app** card wins when it holds a value (see [Household settings](#household-settings)).
+
 ### Mode and permissions (ATHENA-69)
 
 Every Home Assistant write the orchestrator makes is authorized against the
@@ -1106,7 +1108,8 @@ the sender's number, as Twilio sends it (E.164, `+` and 10-15 digits), equals
 the booking's phone number normalised to E.164. A booking stored as a national
 number (`(555) 012-3456`, `020 7946 0000`) gets `SMS_DEFAULT_COUNTRY_CODE`
 (default `1`; 1-3 digits, no `+`; an invalid value logs
-`sms_default_country_code_invalid` and uses `1`). A mismatched country code
+`sms_default_country_code_invalid` and uses `1`). The SMS Messaging page's
+**Default country code** card (owner only) wins over the variable once saved. A mismatched country code
 fails closed: the stay doesn't match and the sender gets the unknown-number
 reply. Alphanumeric senders never match. Only confirmed, not-deleted bookings
 count, in three phases, first match wins:
@@ -2076,8 +2079,10 @@ bulb at most once.
    a lamp when `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` matches it, when Home Assistant
    marks it hidden, disabled or categorised, or when it sits on a voice
    satellite's device (its LED ring). A relay or fan modelled as a light in
-   Home Assistant is excluded by listing it in
-   `HA_ROOM_LIGHT_EXCLUDE_ENTITIES`, for example
+   Home Assistant is excluded on the Devices page (**Room lights**, owner
+   only) by listing its entity id or a pattern such as `light.bath_fan_*`;
+   the built-in LED rule always applies on top of that list. Without a saved
+   list, `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` is read as before, for example
    `["(?:^|[._])(?:led_ring|status_led)(?:_|$)", "^light\\.bath_fan_relay$"]`
    (setting the variable replaces the built-in pattern, so keep it in the
    list). A group assigned to the area is written as itself only when every
@@ -2087,7 +2092,7 @@ bulb at most once.
    (`kitchen` matches `light.kitchen_ceiling`, not `light.master_kitchen`). A
    requested part ("hall and nook") that has no such light falls back to a
    whole-word match anywhere in the name, for that part only. Lights matching
-   `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` (by default an id with `led_ring` or
+   the exclusion list (by default an id with `led_ring` or
    `status_led`, such as a voice satellite's ring) are left out here, as in
    the area tier and "all the lights".
 4. **Synonyms.** `hall`/`hallway`/`corridor`/`foyer`, `bath`/`bathroom`/
@@ -2742,11 +2747,51 @@ The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in bo
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEFAULT_CITY` | *(empty)* | Default city for weather |
-| `DEFAULT_STATE` | *(empty)* | Default state |
+| `DEFAULT_CITY` | *(empty)* | Fallback home city for weather and local answers. The Base Knowledge home location (Everyone) wins when set |
+| `DEFAULT_STATE` | *(empty)* | Fallback state, used with `DEFAULT_CITY` |
 | `DEFAULT_COUNTRY` | `US` | Default country |
 | `DEFAULT_TIMEZONE` | `UTC` | The property's IANA zone (for example `America/New_York`). It's the assistant's clock: the time and date in prompts and fast-path answers, "today"/"tomorrow", year inference for spoken dates, event/sports/transit day windows, and scheduled "at 7:00" waits. The process `TZ` is never used for these, so a UTC pod still answers in local time. The images ship the zone database (`tzdata`). An empty or unknown value falls back to UTC and logs `local_timezone_invalid` once |
-| `DEFAULT_AMTRAK_STATION` | *(empty)* | Default Amtrak station code |
+| `DEFAULT_AMTRAK_STATION` | *(empty)* | Fallback Amtrak station code. The **Amtrak station** card on Directions & Local Area wins when set |
+
+### Household settings
+
+Preferences that used to come only from environment variables are set in the admin panel. Each one resolves in the same order, in every service: **the admin setting, then the environment variable, then the built-in default.** An install that sets only the environment behaves exactly as before, with the same parsing; the variables are now fallbacks, not the preferred place. Changes apply without a restart.
+
+| Section | Where in the admin panel | Who can save | Fallback environment variable(s) |
+|---------|--------------------------|--------------|----------------------------------|
+| `location` | Memory & Context → Base Knowledge, the home location entry. Read-only here | Not saved here (Base Knowledge's own permissions) | `DEFAULT_CITY`, `DEFAULT_STATE` |
+| `amtrak` | Directions & Local Area → **Amtrak station** | Users with `write` | `DEFAULT_AMTRAK_STATION` |
+| `transit` | Directions & Local Area → **Transit** | Users with `write` | `TRANSIT_REGION_NAME`, `TRANSIT_GTFS_FEEDS`, `TRANSIT_STATIC_SERVICES` |
+| `community_events` | Directions & Local Area → **Community events** | Users with `write` | `COMMUNITY_EVENTS_SOURCES` |
+| `gateway` | Gateway Settings → **Gateway fallback model** | Users with `write` | `GATEWAY_FALLBACK_MODEL`, then `ATHENA_DEFAULT_MODEL` |
+| `sms` | SMS Messaging → **Default country code** | Owner only | `SMS_DEFAULT_COUNTRY_CODE` |
+| `lights` | Devices (Home Assistant devices Athena uses) → **Room lights** | Owner only | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` |
+| `bed_warmer` | Devices → **Bed warmer** | Owner only | `HA_BED_WARMER_ENTITIES` |
+| `jarvis_web` | Devices → **Jarvis web app** | Owner only | `DEFAULT_ROOM`, `CLIMATE_ENTITY`, `MIN_TEMP`, `MAX_TEMP`, `OVEN_ENTITY_ID`, `FRIDGE_ENTITY_ID`, `FREEZER_ENTITY_ID`, `STOVE_COOK_MODE_SENSOR_ID`, `STOVE_DISPLAY_TEMP_SENSOR_ID`, `STOVE_TIMER_SENSOR_ID`, `FRIDGE_DOOR_SENSOR_ID` |
+
+The "owner" sections need the owner-only `manage_infrastructure` permission, because they decide what a voice command can switch or who a text message belongs to. An operator sees these cards read-only, with a note saying so, and the API doesn't return their values to a user without the permission (`restricted: true`). Anyone with shell access can still use the environment variables.
+
+**Unset, empty and units.**
+- A field that is empty or absent is *unset*: the service falls through to the environment, then the default. An emptied text box is stored as unset, never as an empty string.
+- An empty **list** is an answer: "none". An empty feed list means no admin feeds, and the environment's list is not consulted.
+- Some fields resolve as a unit: the five bed-warmer entities, and the Jarvis web thermostat's minimum and maximum. The admin value wins only when every field of the unit is saved; otherwise the whole unit comes from the environment, then the default.
+
+**Pickup and outages.** Each service re-reads admin's values at most every 60 seconds and keeps the last good copy if admin-backend is unreachable. A service that starts while admin-backend is down uses the environment until it can reach it. A service that can't reach the admin API at all (no admin URL set) is an environment-only install. Roll order doesn't matter: a reader that starts before admin-backend has the new routes gets a 404 and uses the environment.
+
+**Home location.** The location is not saved on a household card. It comes from the Base Knowledge home location entry (category `location`, key `default_location`), and only an **enabled** entry set to **Everyone** counts (the lowest id when there are several), because weather and directions answer for guests too. An entry for any other audience is ignored, and the card on Memory & Context says why. This is a change from earlier releases, where the location text came from `DEFAULT_CITY`/`DEFAULT_STATE` only: a Base Knowledge city now wins over `DEFAULT_CITY`. The city and state are used only when the saved city settings match the entry's text; for a street address or any other free text, Athena uses the text as given and takes the *city* (for weather, cache keys and keywords) from `DEFAULT_CITY`.
+
+**Lamp exclusions.** The Room lights card takes entity ids and patterns written as `light.name_*` (a `light.` prefix, then letters, digits, underscores and up to three `*`, at most 50 items of 128 characters; a leading `*` and `light.*` are refused). They add to the built-in rule, which always applies: a voice satellite's LED ring and any `led_ring` or `status_led` light never count as a room lamp. Only while nothing is saved does `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` apply, with its old meaning (its `[]` still turns the built-in off).
+
+**Feeds, sources and URLs.**
+- Transit feeds, static services and community-event sources are lists of at most 20 items (500 stops per static service). Each feed or source URL is `http` or `https`, with no user name or fragment and no private, cluster, link-local or loopback host (`localhost`, `.svc`, `.cluster.local`, `.internal`, `.local`, `.lan`, `.home.arpa` and private or reserved IP addresses, written in any form). A name that merely *resolves* to a private address passes at save time and is blocked when it is fetched. The refusal text never repeats the host. `max_bytes` is between 1 MiB and 100 MiB.
+- A feed that needs a private host is configured in the environment with `allow_private: true`. That flag is env-only: the cards and routes can't set it.
+- A user reading the settings sees each URL as `scheme://host` with `url_masked: true`; only a service key gets the whole URL. Saving with the masked form for the same item keeps the stored URL (the card shows the URL read-only with a **Replace URL** button); any other use of the mask is refused (`url_masked_edit`), and a new full URL replaces the stored one.
+- Errors, `/health` messages and logs name a host, never a URL (a key in a path or query string can't leak). The transit and events services' own routes follow it: `GET /events/sources` returns `host` instead of `url`, and `GET /transit/route/{route_id}` reports its `feed_config` with `host` instead of `url` and without `origin` or `allow_private`. Anything that parsed those `url` fields needs the host form.
+- Transit feeds are fetched one at a time, so a many-feed install's first load is slower than before.
+
+**API.** `GET /api/settings/household` takes a service key or a signed-in user with `read`, and `?sections=a&sections=b` limits it; names it doesn't know are dropped, so a newer reader can talk to an older admin-backend. Each section is `{"value": {...} | null, "revision": n, ...}` (`null` and revision 0 when nothing is stored). `PUT /api/settings/household/{section}` takes `{"value": {...}, "revision": n}` from a signed-in user with `write`; the section's own permission is checked first (`403 insufficient_role`), then the body (`422` listing field names and rule words, never the submitted text; `413` above 1 MiB for list sections, 64 KiB for the rest), then the revision (`409 stale_revision` if someone else saved first; reload and retry). `location` answers `405 section_read_only`. Every save writes a `household_settings_update` audit row with the old and new values (hosts or field names only for URLs; the Jarvis web default room is redacted), and a refused save on an owner-only section writes a `household_settings_refused` row, at most once per user, section and reason per minute. There's no database migration.
+
+**Adding a section** (for example another campaign's): append a `_spec(...)` to the registry in `src/shared/household_settings.py` (with its model, whether it is writable, and its permission), add its resolver to `RESOLVERS` in `src/shared/household.py`, and add the section name to the `configure(sections=...)` tuple of every process that reads it, in the same change. `tests/unit/test_household_settings_drift.py` fails when a resolver's section isn't configured by any process, and when any other module reads one of these settings from the environment or `AthenaConfig`.
 
 ### Favourite teams
 
@@ -2770,21 +2815,25 @@ The teams a sports question means when it names none ("how did we do last night"
 
 The transportation and community_events services ship with no region baked
 in. Unset means the service reports "not configured" via `/health` and its
-data routes return 503. See `.env.example` for the full JSON schema and a
-worked Denver example, including a feed with an optional `bounds` box.
+data routes return 503. Set them on the admin **Directions & Local Area** page
+(the **Transit** and **Community events** cards); the variables below are the
+fallback when nothing is saved there. See `.env.example` for the full JSON
+schema and a worked Denver example, including a feed with an optional `bounds`
+box.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRANSIT_REGION_NAME` | *(empty)* | Display label only, purely cosmetic |
-| `TRANSIT_GTFS_FEEDS` | *(empty)* | JSON object of GTFS feed definitions (`{feed_id: {name, agency, url, type, free, bounds?, max_bytes?, allow_private?}}`) |
-| `TRANSIT_STATIC_SERVICES` | *(empty)* | JSON object of non-GTFS transit services with fixed schedules (e.g. a seasonal ferry) |
-| `COMMUNITY_EVENTS_SOURCES` | *(empty)* | JSON array of community-event sources. Each entry's `type` selects the parser: `link_scan`, `event_cards`, `tribe_events_api`, `squarespace_eventlist`. `link_scan` and `event_cards` are best-effort heuristics, validated only against their reference site's HTML structure — a source's markup can drift without notice. `tribe_events_api` and `squarespace_eventlist` are schema-level: they call a documented REST API and a stable Squarespace markup convention, respectively, rather than guessing at page structure. |
+| `TRANSIT_REGION_NAME` | *(empty)* | Fallback display label only, purely cosmetic |
+| `TRANSIT_GTFS_FEEDS` | *(empty)* | Fallback (the **Transit** card wins once a list is saved). JSON object of GTFS feed definitions (`{feed_id: {name, agency, url, type, free, bounds?, max_bytes?, allow_private?}}`) |
+| `TRANSIT_STATIC_SERVICES` | *(empty)* | Fallback (the **Transit** card wins once a list is saved). JSON object of non-GTFS transit services with fixed schedules (e.g. a seasonal ferry) |
+| `COMMUNITY_EVENTS_SOURCES` | *(empty)* | Fallback (the **Community events** card wins once a list is saved). JSON array of community-event sources. Each entry's `type` selects the parser: `link_scan`, `event_cards`, `tribe_events_api`, `squarespace_eventlist`. `link_scan` and `event_cards` are best-effort heuristics, validated only against their reference site's HTML structure — a source's markup can drift without notice. `tribe_events_api` and `squarespace_eventlist` are schema-level: they call a documented REST API and a stable Squarespace markup convention, respectively, rather than guessing at page structure. |
 
 **Caveats**:
 - **Feed `type` vocabulary.** `search_transit`'s `transit_type` filter is a prefix match on a GTFS feed's `type` (`bus`, `metro`, `light_rail`, `rail`, `ferry`, `commuter_bus`) and on a static service's fixed `"ferry_terminal"` stop type. Use one of the tool's own enum words as the feed's `type`, not a synonym (`metro`, not `subway`) — a mismatch just means the filter never matches, not an error.
 - **Departures use container-local time.** `GET /transit/departures` and `/transit/query`'s `departures`/`search`/`nearby` modes read the container's wall clock (`datetime.now()`), not the feed's own timezone.
 - **`search_transit` reachability.** The orchestrator offers `search_transit` on a `directions`-intent query only when the query itself reads as transit-phrased (bus, train, stop, departure, route number, ...) — a plain driving/walking directions request never sees it.
 - **`bounds` is exclusive.** A GTFS feed's optional `bounds` box (`min_lat`/`max_lat`/`min_lon`/`max_lon`) filters stops with a strict `<` comparison on every edge — a stop exactly on a boundary value is excluded, not included.
+- **`allow_private` is env-only.** The admin cards can't set it and the settings routes refuse it; only an item in `TRANSIT_GTFS_FEEDS` or `COMMUNITY_EVENTS_SOURCES` can carry `allow_private`, and an item saved in admin never exempts a private host. The residual below applies to those env items.
 - **`allow_private` residual.** Both feed and event-source fetches go through the shared SSRF guard (`shared.url_safety.safe_get`) with, by default, no private hosts allowed on any hop. Setting `allow_private: true` on one feed/source exempts only that entry's own hostname — on every hop, not just the first. That means the named host resolving to a different private address later (DNS rebinding) or redirecting to itself at a private address are both accepted as operator trust for that one host; a redirect to any *other* private host is still blocked. This is stricter than the CONTRIBUTING.md Class 3 exemption, deliberately — these fetch third-party content, and a hijacked upstream redirect shouldn't reach cluster-internal addresses.
 - **The maintainer-leak CI gate has documented non-goals** — it deliberately doesn't catch a team/place name that doesn't contain the configured home city, a bare latitude with no longitude, or a Linux `/home/<user>` path (only `/Users/…` is ruled). Run `python3 scripts/check-maintainer-leaks.py --help` for the full list before assuming an example value is automatically safe.
 
@@ -3018,8 +3067,8 @@ rather than guessing a device/room your HA instance doesn't have. See
 | `HA_SATELLITE_ROOM_MAP` | *(empty)* | An override, not a requirement: JSON object mapping a Voice PE `assist_satellite` entity ID, or a 32-character Home Assistant device ID, to its room. Rooms normally come from Home Assistant's areas (see "Which room Athena assumes"); an entry here wins over the area. Room names are matched like `HA_LIGHT_GROUPS` keys. Satellite announcements (room to entity) use the entity ID entries only; device-ID entries are never an announce target. |
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
-| `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
-| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light is dropped when it matches, whether it was picked for a room by its area or only by name, and in "all the lights" (an area's lamps and the leaves of a light group alike); it still never applies to an `HA_LIGHT_GROUPS` entry itself (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. |
+| `HA_BED_WARMER_ENTITIES` | *(empty)* | Fallback (the Devices page's **Bed warmer** card wins when all five are saved). JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
+| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | Fallback, read only while no list is saved on the Devices page's **Room lights** card (a saved list adds to the built-in LED rule; `[]` here still turns the built-in off). JSON array of regexes (`re.search` on the entity id). A light is dropped when it matches, whether it was picked for a room by its area or only by name, and in "all the lights" (an area's lamps and the leaves of a light group alike); it still never applies to an `HA_LIGHT_GROUPS` entry itself (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. |
 | `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
 | `HA_AREAS` | `auto` | `auto` reads Home Assistant's area, device and entity registries over its WebSocket API (read-only, in the background; needs `HA_URL` and `HA_TOKEN`). `off` never connects. Any other value logs an error and reads `off`. See "Which room Athena assumes". |
 | `HA_DEVICE_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs or addresses of clients whose Home Assistant device id the gateway believes, for the speaker's room, per-device sessions and follow-ups. A request that presents the gateway's own API key is trusted too. Empty and no gateway key: a device id is ignored. Keep it narrow (Home Assistant's address as `/32`); an entry wider than /24 (IPv4) or /64 (IPv6) logs `ha_device_client_networks_wide`, and one overlapping `TRUSTED_PROXY_CIDRS` is ignored with an error. |
@@ -3043,7 +3092,8 @@ A room missing one of the helpers an action needs gets a plain reply and nothing
 
 ### jarvis-web appliance and media entities
 
-Plain `os.getenv` reads in `apps/jarvis-web/backend/main.py`, not `AthenaConfig`
+Fallbacks for the Devices page's **Jarvis web app** card (see [Household settings](#household-settings)).
+Read from the environment by jarvis-web's household reader, not `AthenaConfig`
 fields — set directly on the jarvis-web Deployment/container, not via the
 shared `athena-config` ConfigMap. Same contract as the table above: empty
 means the endpoint reports the feature isn't configured, instead of

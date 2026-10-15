@@ -136,6 +136,7 @@ When contributing code that requires configuration:
 - For configuration values not yet in `AthenaConfig`, you have two options:
   1. **(Preferred)** Add a new field to `AthenaConfig` in `src/shared/config.py`, document it in `.env.example`, and read via `get_config().field_name`.  This is how the OSS-First convention extends — every new env var lands in the central object.
   2. Read directly via `os.getenv("VAR_NAME", default)` if the variable is local to a single module and unlikely to be needed elsewhere.  Document in `.env.example`.  Be aware that any other module needing the same value will end up duplicating the resolution logic — prefer option 1 for cross-cutting values.
+- A household preference (a city, a station, a list of feeds, an entity a person would change in the admin panel) is not a new env var by itself: add a section to the household settings registry and read it through `shared.household` (see `docs/CONFIGURATION.md`, "Household settings"). The env var, where one exists, is only the fallback, and `tests/unit/test_household_settings_drift.py` fails on a second reader.
 - Add every new environment variable to `.env.example` with a clear inline comment describing its purpose and an example value.
 - Use sensible defaults that work for local development; emit a log warning when a critical variable is missing rather than failing silently or falling back to a hardcoded value.
 
@@ -164,7 +165,7 @@ to stay complete — when you add a field, add its row here too.
 | `database_url` | `DATABASE_URL` | `""` | PostgreSQL connection string |
 | `service_api_key` | `SERVICE_API_KEY` | `""` | Service-to-service auth key; HMAC secret for OpenAI-compatible sessions and the orchestrator's ingress-auth check |
 | `default_timezone` | `DEFAULT_TIMEZONE` | `UTC` | |
-| `default_city` | `DEFAULT_CITY` | `""` | |
+| `default_city` | `DEFAULT_CITY` | `""` | Fallback: the Base Knowledge home location wins |
 | `oidc_issuer` | `OIDC_ISSUER` | `""` | Whitespace stripped |
 | `oidc_client_id` | `OIDC_CLIENT_ID` | `""` | Whitespace stripped |
 | `oidc_validate_iss` | `OIDC_VALIDATE_ISS` | `true` | Set `false` only if your IdP deliberately returns a mismatched issuer URL |
