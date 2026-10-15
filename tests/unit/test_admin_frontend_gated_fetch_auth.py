@@ -38,6 +38,8 @@ GATED_PREFIXES = (
     "/api/settings/directions-origin-placeholders",
     "/api/settings/favorite-teams",
     "/api/settings/household",
+    "/api/settings/room-lights",
+    "/api/settings/speaker-rooms",
     "/api/llm-backends/model/",
     "/api/sms/internal/",
     "/api/debug-logs",

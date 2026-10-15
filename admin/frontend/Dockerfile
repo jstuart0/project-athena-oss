@@ -75,6 +75,7 @@ COPY oss-profiles.js /usr/share/nginx/html/
 COPY conversations.js /usr/share/nginx/html/
 COPY household-settings.js /usr/share/nginx/html/
 COPY household-settings-lists.js /usr/share/nginx/html/
+COPY room-settings.js /usr/share/nginx/html/
 COPY escape-html.js /usr/share/nginx/html/
 
 # Fix permissions

@@ -1715,7 +1715,7 @@
                     <div class="sidebar-category-items">
                         <button onclick="showTab('room-groups')" data-route="room-groups" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="home" class="sidebar-icon"></i>
-                            <span>Room Groups</span>
+                            <span>Rooms</span>
                         </button>
                         <button onclick="showTab('devices')" data-route="devices" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="smartphone" class="sidebar-icon"></i>
@@ -2044,7 +2044,7 @@
             <!-- Room Groups Tab -->
             <div id="tab-room-groups" class="tab-content hidden">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-semibold text-white">Room Groups & Aliases</h2>
+                    <h2 class="text-2xl font-semibold text-white">Rooms</h2>
                     <div class="flex gap-2">
                         <button onclick="loadRoomGroups()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
                             <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
@@ -2054,6 +2054,11 @@
                         </button>
                     </div>
                 </div>
+
+                <div id="household-card-room-lights"></div>
+                <div id="household-card-speaker-rooms"></div>
+
+                <h3 class="text-lg font-semibold text-white mb-3">Room groups and aliases</h3>
 
                 <!-- Info Banner -->
                 <div class="bg-blue-900/30 border border-blue-700 rounded-lg p-4 mb-6">
@@ -5132,7 +5137,7 @@
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20261015-enter"></script>
 
-    <script src="/app.js?v=20261015-hs"></script>
+    <script src="/app.js?v=20261015-lg4"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20261015-fav2"></script>
     <script src="/routing.js?v=20260913"></script>
@@ -5153,7 +5158,7 @@
     <script src="/service-bypass.js?v=20260913"></script>
     <script src="/service-control.js?v=20261014-ha"></script>
     <script src="/gateway-settings.js?v=20261015-hs"></script>
-    <script src="/room-groups.js?v=20260930"></script>
+    <script src="/room-groups.js?v=20261015-lg4"></script>
     <script src="/guest-context.js?v=20260930"></script>
     <script src="/calendar-sources.js?v=20260929-cal3"></script>
     <script src="/memory-management.js?v=20260929c"></script>
@@ -5176,6 +5181,7 @@
     <script src="/telemetry.js?v=20261001"></script>
     <script src="/household-settings.js?v=20261015-hs2"></script>
     <script src="/household-settings-lists.js?v=20261015-hs2"></script>
+    <script src="/room-settings.js?v=20261015-lg4"></script>
     <script src="/escape-html.js?v=20260913"></script>
 </body>
 </html>
