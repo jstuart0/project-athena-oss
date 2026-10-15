@@ -2916,6 +2916,45 @@
                     </button>
                 </div>
 
+                <!-- Favourite Teams -->
+                <div id="favorite-teams-card" class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
+                    <div class="flex justify-between items-start gap-4 mb-2">
+                        <div>
+                            <h3 id="favorite-teams-heading" class="text-lg font-semibold text-white">Favourite teams</h3>
+                            <p class="text-sm text-gray-400 mt-1">The teams Athena means by "we" and "us"</p>
+                        </div>
+                        <div class="flex items-center gap-3 shrink-0">
+                            <span id="favorite-teams-dirty" class="hidden text-xs text-yellow-400">Unsaved changes</span>
+                            <button type="button" id="favorite-teams-save" disabled class="min-h-[44px] px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+                        </div>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-4">Used when a sports question names no team, e.g. "how did we do last night". If Athena can't tell which game you mean, it uses the team at the top. Changes reach the assistant within a minute.</p>
+                    <p id="favorite-teams-message" role="alert" class="hidden text-sm mb-3"></p>
+                    <span id="favorite-teams-status" class="sr-only" role="status" aria-live="polite"></span>
+                    <div id="favorite-teams-container" aria-labelledby="favorite-teams-heading">
+                        <p class="text-sm text-gray-400">Loading…</p>
+                    </div>
+                    <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+                        <div>
+                            <label for="favorite-team-name" class="block text-sm font-medium text-gray-400 mb-2">Team name</label>
+                            <input type="text" id="favorite-team-name" maxlength="64" autocomplete="off" disabled aria-describedby="favorite-team-name-error"
+                                   class="w-full min-h-[44px] px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors disabled:opacity-50">
+                            <p id="favorite-team-name-error" role="alert" class="hidden text-xs text-red-400 mt-1"></p>
+                        </div>
+                        <div>
+                            <label for="favorite-team-league" class="block text-sm font-medium text-gray-400 mb-2">League</label>
+                            <select id="favorite-team-league" disabled aria-describedby="favorite-team-league-help"
+                                    class="w-full min-h-[44px] px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors disabled:opacity-50">
+                                <option value="">Any league</option>
+                            </select>
+                            <p id="favorite-team-league-help" class="text-xs text-gray-500 mt-1">Pick a league if the name is shared, e.g. Giants</p>
+                        </div>
+                        <div class="md:pt-7">
+                            <button type="button" id="favorite-team-add" disabled class="min-h-[44px] px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Add team</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Main Settings Card -->
                 <div class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
                     <h3 class="text-lg font-semibold text-white mb-4">General Settings</h3>
@@ -2944,7 +2983,10 @@
                 <!-- Sports Teams -->
                 <div class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
                     <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-lg font-semibold text-white">Sports Team Disambiguation</h3>
+                        <div>
+                            <h3 class="text-lg font-semibold text-white">Ambiguous team names</h3>
+                            <p class="text-sm text-gray-400 mt-1">Which team a shared name like "Giants" means</p>
+                        </div>
                         <button onclick="showCreateSportsTeamModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
                             ➕ Add Team
                         </button>
@@ -5070,13 +5112,13 @@
     <script src="/activity-sidebar.js?v=20260913"></script>
     <script src="/mission-control.js?v=20261014-ha"></script>
     <script src="/voice-pipelines.js?v=20261014-ha"></script>
-    <script src="/memory-context.js?v=20260927b"></script>
+    <script src="/memory-context.js?v=20261015-fav"></script>
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20260108"></script>
 
     <script src="/app.js?v=20261014-ha2"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
-    <script src="/conversation.js?v=20260913"></script>
+    <script src="/conversation.js?v=20261015-fav"></script>
     <script src="/routing.js?v=20260913"></script>
     <script src="/metrics.js?v=20260913"></script>
     <script src="/analytics.js?v=20260913"></script>

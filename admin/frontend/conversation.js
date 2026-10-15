@@ -8,6 +8,10 @@
 // ============================================================================
 
 async function loadConversationSettings() {
+    // Its own request and its own error handling: a failure or a 403 here never
+    // hides the cards below, and theirs never hides this one.
+    loadFavoriteTeams();
+
     try {
         const response = await fetch(`${API_BASE}/api/conversation/settings`, {
             headers: {
@@ -299,6 +303,389 @@ function showCreateClarificationTypeModal() {
 }
 
 // ============================================================================
+// FAVOURITE TEAMS
+// ============================================================================
+// An ordered list of the household's teams, each with an optional league. It is
+// built with createElement/textContent only (a team name is data, never markup)
+// and saved whole with the revision it was loaded at.
+
+const FAVORITE_TEAMS_URL = '/api/settings/favorite-teams';
+const FAVORITE_TEAM_NAME_RULE = "Use letters, numbers, spaces and . - ' only";
+const FAVORITE_TEAM_STALE_MESSAGE = "Someone else changed this list while you were editing. Your changes weren't saved. The latest list is shown below; make your changes again.";
+const FAVORITE_TEAM_REJECTED_MESSAGE = "A team name wasn't accepted. Names use letters, numbers, spaces and . - ' only (up to 64 characters), a list holds up to 8 teams, and a team can't appear twice.";
+const FAVORITE_TEAM_LEAVE_MESSAGE = 'You have unsaved changes to Favourite teams. Leave without saving?';
+
+const favoriteTeamsState = {
+    view: 'loading',      // loading | ready | error | forbidden
+    teams: [],            // the working copy: [{name, league}]
+    saved: '[]',          // JSON of the last saved/loaded list
+    revision: 0,
+    leagues: [],          // [{code, label, sport}] from the server
+    max: 8,
+    saving: false,
+    wired: false,
+};
+
+function normalizeFavoriteName(value) {
+    return String(value == null ? '' : value).trim().normalize('NFC');
+}
+
+function favoriteNameRuleOk(name) {
+    if (name.length < 1 || name.length > 64) return false;
+    for (const ch of name) {
+        if (!/[\p{L}\p{N}]/u.test(ch) && " .-'".indexOf(ch) === -1) return false;
+    }
+    return true;
+}
+
+// '' when the name can be added, else the sentence naming the broken rule.
+function favoriteTeamProblem(rawName, teams, max) {
+    const name = normalizeFavoriteName(rawName);
+    if (!name) return 'Enter a team name';
+    if (!favoriteNameRuleOk(name)) return FAVORITE_TEAM_NAME_RULE;
+    const lower = name.toLowerCase();
+    if (teams.some(t => t.name.toLowerCase() === lower)) return 'That team is already in the list';
+    if (teams.length >= max) return `Up to ${max} teams`;
+    return '';
+}
+
+function moveFavoriteTeam(teams, index, delta) {
+    const target = index + delta;
+    if (index < 0 || index >= teams.length || target < 0 || target >= teams.length) return teams.slice();
+    const copy = teams.slice();
+    const [moved] = copy.splice(index, 1);
+    copy.splice(target, 0, moved);
+    return copy;
+}
+
+function favoriteTeamsDirty() {
+    return favoriteTeamsState.view === 'ready' && JSON.stringify(favoriteTeamsState.teams) !== favoriteTeamsState.saved;
+}
+
+function favoriteLeagueLabel(code) {
+    const league = favoriteTeamsState.leagues.find(l => l.code === code);
+    return league ? league.label : 'Any league';
+}
+
+function favoriteTeamsEl(id) {
+    return document.getElementById(id);
+}
+
+function setFavoriteTeamsMessage(text, tone) {
+    const el = favoriteTeamsEl('favorite-teams-message');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = `${text ? '' : 'hidden '}text-sm mb-3 ${tone === 'error' ? 'text-red-400' : 'text-green-400'}`;
+}
+
+function announceFavoriteTeams(text) {
+    const el = favoriteTeamsEl('favorite-teams-status');
+    if (el) el.textContent = text || '';
+}
+
+function setFavoriteNameError(text) {
+    const el = favoriteTeamsEl('favorite-team-name-error');
+    const input = favoriteTeamsEl('favorite-team-name');
+    if (el) {
+        el.textContent = text || '';
+        el.className = `${text ? '' : 'hidden '}text-xs text-red-400 mt-1`;
+    }
+    if (input) input.setAttribute('aria-invalid', text ? 'true' : 'false');
+}
+
+function updateFavoriteTeamsControls() {
+    const ready = favoriteTeamsState.view === 'ready';
+    const dirty = favoriteTeamsDirty();
+    const save = favoriteTeamsEl('favorite-teams-save');
+    if (save) {
+        save.disabled = !dirty || favoriteTeamsState.saving;
+        save.textContent = favoriteTeamsState.saving ? 'Saving…' : 'Save';
+    }
+    const marker = favoriteTeamsEl('favorite-teams-dirty');
+    if (marker) marker.className = `${dirty ? '' : 'hidden '}text-xs text-yellow-400`;
+    ['favorite-team-name', 'favorite-team-league', 'favorite-team-add'].forEach(id => {
+        const el = favoriteTeamsEl(id);
+        if (el) el.disabled = !ready || favoriteTeamsState.saving;
+    });
+}
+
+function populateFavoriteLeagues() {
+    const select = favoriteTeamsEl('favorite-team-league');
+    if (!select) return;
+    select.textContent = '';
+    const any = document.createElement('option');
+    any.value = '';
+    any.textContent = 'Any league';
+    select.appendChild(any);
+    const groups = new Map();
+    favoriteTeamsState.leagues.forEach(league => {
+        if (!groups.has(league.sport)) {
+            const group = document.createElement('optgroup');
+            group.label = league.sport;
+            groups.set(league.sport, group);
+            select.appendChild(group);
+        }
+        const option = document.createElement('option');
+        option.value = league.code;
+        option.textContent = league.label;
+        groups.get(league.sport).appendChild(option);
+    });
+}
+
+function favoriteButton(text, label, onClick, disabled) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    button.disabled = !!disabled;
+    button.className = 'min-h-[44px] min-w-[44px] px-3 py-1 bg-dark-bg border border-dark-border rounded-lg text-gray-300 text-sm hover:bg-dark-border disabled:opacity-40 disabled:cursor-not-allowed';
+    button.addEventListener('click', onClick);
+    return button;
+}
+
+// focus: {index, kind: 'up' | 'down' | 'remove'}, or {name: true} for the name input.
+function renderFavoriteTeams(focus) {
+    const container = favoriteTeamsEl('favorite-teams-container');
+    if (!container) return;
+    container.textContent = '';
+    const view = favoriteTeamsState.view;
+
+    if (view !== 'ready') {
+        const note = document.createElement('p');
+        note.className = 'text-sm text-gray-400';
+        if (view === 'loading') {
+            note.textContent = 'Loading…';
+        } else if (view === 'forbidden') {
+            note.textContent = "You don't have permission to view this setting";
+        } else {
+            note.textContent = "Couldn't load your favourite teams. ";
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.textContent = 'Retry';
+            retry.className = 'min-h-[44px] px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm';
+            retry.addEventListener('click', () => loadFavoriteTeams(true));
+            note.appendChild(retry);
+        }
+        container.appendChild(note);
+        updateFavoriteTeamsControls();
+        return;
+    }
+
+    const teams = favoriteTeamsState.teams;
+    if (teams.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'text-sm text-gray-400';
+        empty.textContent = 'No favourite teams yet. Add one below.';
+        container.appendChild(empty);
+    }
+
+    const list = document.createElement('ol');
+    list.className = 'space-y-2';
+    const targets = [];
+    teams.forEach((team, index) => {
+        const row = document.createElement('li');
+        row.className = 'flex items-center gap-3 bg-dark-bg border border-dark-border rounded-lg p-2';
+
+        const position = document.createElement('span');
+        position.className = 'w-6 text-center text-sm text-gray-500';
+        position.textContent = String(index + 1);
+
+        const text = document.createElement('div');
+        text.className = 'flex-1 min-w-0';
+        const name = document.createElement('div');
+        name.className = 'font-medium text-white truncate';
+        name.textContent = team.name;
+        const league = document.createElement('div');
+        league.className = 'text-xs text-gray-400';
+        league.textContent = favoriteLeagueLabel(team.league);
+        text.appendChild(name);
+        text.appendChild(league);
+
+        const up = favoriteButton('▲', `Move ${team.name} up`, () => moveFavorite(index, -1, 'up'), index === 0);
+        const down = favoriteButton('▼', `Move ${team.name} down`, () => moveFavorite(index, 1, 'down'), index === teams.length - 1);
+        const remove = favoriteButton('Remove', `Remove ${team.name}`, () => removeFavorite(index), false);
+        targets.push({ up, down, remove });
+
+        row.appendChild(position);
+        row.appendChild(text);
+        row.appendChild(up);
+        row.appendChild(down);
+        row.appendChild(remove);
+        list.appendChild(row);
+    });
+    if (teams.length > 0) container.appendChild(list);
+
+    updateFavoriteTeamsControls();
+
+    if (focus) {
+        let target = null;
+        if (focus.name) {
+            target = favoriteTeamsEl('favorite-team-name');
+        } else if (targets[focus.index]) {
+            const row = targets[focus.index];
+            // A disabled arrow can't take focus: hand it to the other arrow.
+            target = row[focus.kind].disabled ? (focus.kind === 'up' ? row.down : row.up) : row[focus.kind];
+        }
+        if (target && !target.disabled) target.focus();
+    }
+}
+
+function moveFavorite(index, delta, kind) {
+    const moved = favoriteTeamsState.teams[index];
+    favoriteTeamsState.teams = moveFavoriteTeam(favoriteTeamsState.teams, index, delta);
+    setFavoriteTeamsMessage('');
+    renderFavoriteTeams({ index: index + delta, kind });
+    announceFavoriteTeams(`${moved.name} moved to position ${index + delta + 1} of ${favoriteTeamsState.teams.length}`);
+}
+
+function removeFavorite(index) {
+    const [removed] = favoriteTeamsState.teams.splice(index, 1);
+    setFavoriteTeamsMessage('');
+    const remaining = favoriteTeamsState.teams.length;
+    // Focus goes to the next Remove button, else the previous one, else the name input.
+    const focus = remaining === 0 ? { name: true } : { index: Math.min(index, remaining - 1), kind: 'remove' };
+    renderFavoriteTeams(focus);
+    announceFavoriteTeams(`${removed.name} removed`);
+}
+
+function addFavoriteTeam() {
+    const input = favoriteTeamsEl('favorite-team-name');
+    const select = favoriteTeamsEl('favorite-team-league');
+    if (!input || favoriteTeamsState.view !== 'ready') return;
+    const problem = favoriteTeamProblem(input.value, favoriteTeamsState.teams, favoriteTeamsState.max);
+    if (problem) {
+        setFavoriteNameError(problem);
+        input.focus();
+        return;
+    }
+    setFavoriteNameError('');
+    setFavoriteTeamsMessage('');
+    const name = normalizeFavoriteName(input.value);
+    favoriteTeamsState.teams.push({ name, league: select && select.value ? select.value : null });
+    input.value = '';
+    renderFavoriteTeams();
+    input.focus();
+    announceFavoriteTeams(`${name} added at position ${favoriteTeamsState.teams.length}`);
+}
+
+function applyFavoriteTeamsPayload(data) {
+    favoriteTeamsState.teams = (data.teams || []).map(t => ({ name: t.name, league: t.league || null }));
+    favoriteTeamsState.saved = JSON.stringify(favoriteTeamsState.teams);
+    favoriteTeamsState.revision = data.revision || 0;
+    favoriteTeamsState.leagues = data.leagues || favoriteTeamsState.leagues;
+    favoriteTeamsState.max = data.max || favoriteTeamsState.max;
+}
+
+// force: reload even over unsaved edits (Retry, and after a conflict). A plain
+// reload (the page's Refresh) keeps edits that haven't been saved.
+async function loadFavoriteTeams(force) {
+    initFavoriteTeams();
+    if (!force && favoriteTeamsDirty()) return;
+    favoriteTeamsState.view = 'loading';
+    renderFavoriteTeams();
+    try {
+        const response = await fetch(`${API_BASE}${FAVORITE_TEAMS_URL}`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+        if (response.status === 403) {
+            favoriteTeamsState.view = 'forbidden';
+        } else if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        } else {
+            applyFavoriteTeamsPayload(await response.json());
+            populateFavoriteLeagues();
+            favoriteTeamsState.view = 'ready';
+        }
+    } catch (error) {
+        console.error('Failed to load favourite teams:', error);
+        favoriteTeamsState.view = 'error';
+    }
+    renderFavoriteTeams();
+}
+
+async function saveFavoriteTeams() {
+    if (!favoriteTeamsDirty() || favoriteTeamsState.saving) return;
+    favoriteTeamsState.saving = true;
+    setFavoriteTeamsMessage('');
+    updateFavoriteTeamsControls();
+    try {
+        const response = await fetch(`${API_BASE}${FAVORITE_TEAMS_URL}`, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ teams: favoriteTeamsState.teams, revision: favoriteTeamsState.revision })
+        });
+        if (response.ok) {
+            applyFavoriteTeamsPayload(await response.json());
+            favoriteTeamsState.saving = false;
+            renderFavoriteTeams();
+            setFavoriteTeamsMessage('Saved. Changes reach the assistant within a minute.', 'success');
+            announceFavoriteTeams('Favourite teams saved');
+            return;
+        }
+        favoriteTeamsState.saving = false;
+        if (response.status === 409) {
+            await loadFavoriteTeams(true);
+            setFavoriteTeamsMessage(FAVORITE_TEAM_STALE_MESSAGE, 'error');
+        } else if (response.status === 422) {
+            setFavoriteTeamsMessage(FAVORITE_TEAM_REJECTED_MESSAGE, 'error');
+        } else if (response.status === 403) {
+            setFavoriteTeamsMessage("You don't have permission to change this setting.", 'error');
+        } else {
+            setFavoriteTeamsMessage("Couldn't save your favourite teams. Try again in a moment.", 'error');
+        }
+    } catch (error) {
+        console.error('Failed to save favourite teams:', error);
+        setFavoriteTeamsMessage("Couldn't save your favourite teams. Check your connection and try again.", 'error');
+    }
+    favoriteTeamsState.saving = false;
+    updateFavoriteTeamsControls();
+}
+
+// Listeners for the card's static markup, attached once.
+function initFavoriteTeams() {
+    if (favoriteTeamsState.wired) return;
+    const save = favoriteTeamsEl('favorite-teams-save');
+    const add = favoriteTeamsEl('favorite-team-add');
+    const input = favoriteTeamsEl('favorite-team-name');
+    if (!save || !add || !input) return;
+    favoriteTeamsState.wired = true;
+    save.addEventListener('click', saveFavoriteTeams);
+    add.addEventListener('click', addFavoriteTeam);
+    input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            addFavoriteTeam();
+        }
+    });
+    input.addEventListener('input', () => setFavoriteNameError(''));
+}
+
+window.addEventListener('beforeunload', event => {
+    if (favoriteTeamsDirty()) {
+        event.preventDefault();
+        event.returnValue = '';
+    }
+});
+
+// Leaving the tab with unsaved favourites asks first (showTab is app.js's).
+(function guardFavoriteTeamsOnTabSwitch() {
+    if (typeof window.showTab !== 'function') return;
+    const original = window.showTab;
+    window.showTab = function (tabName) {
+        if (tabName !== 'conversation-context' && favoriteTeamsDirty() && !window.confirm(FAVORITE_TEAM_LEAVE_MESSAGE)) {
+            return undefined;
+        }
+        return original.apply(this, arguments);
+    };
+})();
+
+// ============================================================================
 // SPORTS TEAMS
 // ============================================================================
 
@@ -335,7 +722,7 @@ function renderSportsTeams(teams) {
         <div class="bg-dark-bg border border-dark-border rounded-lg p-4">
             <div class="flex justify-between items-start mb-2">
                 <div>
-                    <h4 class="font-medium text-white">${team.team_name || 'Unknown Team'}</h4>
+                    <h4 class="font-medium text-white">${escapeHtml(team.team_name || 'Unknown Team')}</h4>
                 </div>
                 <span class="px-2 py-1 rounded text-xs ${team.requires_disambiguation ? 'bg-yellow-900/30 text-yellow-400' : 'bg-gray-900/30 text-gray-400'}">
                     ${team.requires_disambiguation ? 'Needs Clarification' : 'No Clarification'}
@@ -347,7 +734,7 @@ function renderSportsTeams(teams) {
                     <div class="flex flex-wrap gap-1 mt-1">
                         ${team.options.map(opt => `
                             <span class="px-2 py-0.5 bg-blue-900/30 text-blue-400 rounded text-xs">
-                                ${opt.label || opt.id} ${opt.sport ? `(${opt.sport})` : ''}
+                                ${escapeHtml(opt.label || opt.id)} ${opt.sport ? `(${escapeHtml(opt.sport)})` : ''}
                             </span>
                         `).join('')}
                     </div>
