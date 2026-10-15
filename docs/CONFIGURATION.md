@@ -52,7 +52,6 @@ every addition.
 | `SERVICE_API_KEY` | `service_api_key` | `""` |
 | `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
 | `DEFAULT_CITY` | `default_city` | `""` |
-| `SPORTS_DEFAULT_TEAM` | `sports_default_team` | `""` (no default). The team a sports question is about when the query names none. Stripped, at most 64 characters of letters, digits, spaces and `. - '`; anything else is ignored with an error log. Empty: a sports question with no team goes to tool calling |
 | `ATHENA_DEFAULT_MODEL` | `athena_default_model` | `qwen3:4b-instruct-2507-q4_K_M`. The model every component uses unless one is configured for it. One validated setting read by the orchestrator, the gateway and admin-backend: at most 128 characters of letters, digits and `. _ : / -`; an empty or invalid value logs `model_tag_invalid` and the default is used |
 | `GATEWAY_FALLBACK_MODEL` | `gateway_fallback_model` | `""` (use `ATHENA_DEFAULT_MODEL`). The Ollama model the gateway answers with when it has to pick one: its own fallback answers, and an OpenAI model name (`gpt-*`) that isn't in its mapping. A model name a client sends for Ollama passes through unchanged. Same validation as above |
 | `OIDC_ISSUER` | `oidc_issuer` | `""` |

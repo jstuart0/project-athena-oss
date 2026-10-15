@@ -157,6 +157,7 @@ _ROUTE_PATTERN = re.compile(
     r"""|/api/internal/intent-metrics"""
     r"""|/api/settings/house-layout"""
     r"""|/api/settings/directions-origin-placeholders"""
+    r"""|/api/settings/favorite-teams"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}

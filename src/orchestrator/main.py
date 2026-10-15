@@ -173,7 +173,7 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
-from orchestrator import answer_route, turn_capture
+from orchestrator import answer_route, favorite_teams, turn_capture
 from orchestrator.answer_route import Route
 from orchestrator import followup
 from orchestrator.followup import last_exchange_from_session
@@ -4905,6 +4905,17 @@ DIRECTIONS: When using get_directions:
 - If user says "directions to [place]", origin={search_location}, destination=[place]
 - If user says "directions from home to [place]", origin={home_address}, destination=[place]"""
 
+        # A sports question that names no team is about the household's favourites:
+        # the same decision the retrieve node made when the turn came through it.
+        sports_decision = None
+        if state.intent == IntentCategory.SPORTS and not state.entities.get("team"):
+            sports_decision = state.sports_default or await favorite_teams.decide(
+                request_text(state), state.knowledge_audience
+            )
+            state.sports_default = sports_decision
+            if sports_decision.candidates:
+                system_content += "\n" + favorite_teams.tool_context(sports_decision)
+
         # Build messages for LLM tool calling
         messages = [
             {
@@ -5232,6 +5243,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
             # built from the request, and only from a tool this turn was offered.
             forced_calls = forced_tool_calls(
                 state, offered={t["function"]["name"] for t in tools}, search_location=search_location,
+                default_team=sports_decision.first if sports_decision else None,
             )
             if forced_calls:
                 tool_calls = forced_calls

@@ -133,6 +133,7 @@ FIRST_IMPORTS = [
     "orchestrator.sports_status",
     "orchestrator.intent_arbitration",
     "orchestrator.entity_repair",
+    "orchestrator.favorite_teams",
 ]
 
 # The sibling modules the live-conversation campaign added under src/orchestrator
@@ -147,6 +148,7 @@ CAMPAIGN_MODULES = frozenset({
     "orchestrator.sports_status",
     "orchestrator.intent_arbitration",
     "orchestrator.entity_repair",
+    "orchestrator.favorite_teams",
 })
 
 
@@ -177,7 +179,7 @@ def test_orchestrator_modules_import_cleanly_in_any_first_position():
 
 
 def test_every_module_the_campaign_added_is_a_first_import():
-    assert len(CAMPAIGN_MODULES) == 7
+    assert len(CAMPAIGN_MODULES) == 8
     assert CAMPAIGN_MODULES <= set(FIRST_IMPORTS)
     assert len(FIRST_IMPORTS) == len(set(FIRST_IMPORTS))
     for module in CAMPAIGN_MODULES:

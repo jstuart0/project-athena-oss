@@ -691,23 +691,6 @@ class AthenaConfig(BaseSettings):
     #   string on purpose: pydantic's bool parsing would also accept
     #   1/yes/on. Ignored whenever TWILIO_AUTH_TOKEN is set.
     twilio_allow_unsigned: str = Field(default="")
-    # sports_default_team: the team a sports question is about when the query
-    #   names none. Empty (the default) means no default: a sports question
-    #   with no team goes to tool calling instead.
-    sports_default_team: str = Field(default="")
-
-    @field_validator("sports_default_team", mode="before")
-    @classmethod
-    def _validate_sports_default_team(cls, v: object) -> str:
-        value = v.strip() if isinstance(v, str) else ""
-        if len(value) <= 64 and all(c.isalnum() or c in " .-'" for c in value):
-            return value
-        logger.error(
-            "sports_default_team_invalid: SPORTS_DEFAULT_TEAM must be at most 64 characters of "
-            "letters, digits, spaces and . - ' (got %d characters); using no default",
-            len(value),
-        )
-        return ""
 
     @field_validator("sms_default_country_code", mode="before")
     @classmethod

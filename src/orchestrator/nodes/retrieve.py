@@ -17,13 +17,13 @@ import time
 
 import structlog
 
-from shared.config import get_config
-
 from orchestrator.nodes._runtime import (
     get_rag_client,
     get_parallel_search_engine,
     get_result_fusion,
 )
+from orchestrator import favorite_teams
+from orchestrator.grounding import request_text
 from orchestrator.model_safe_errors import RAGToolError, model_safe_error
 from orchestrator.rag_validator import validator, ValidationResult
 from orchestrator.sports_status import team_events
@@ -41,9 +41,96 @@ from orchestrator.helpers import (
 logger = structlog.get_logger(__name__)
 
 
-def _sports_team(state: OrchestratorState) -> str:
-    """The team the query names, else the install's configured default (empty: none)."""
-    return state.entities.get("team") or get_config().sports_default_team
+async def _use_sports_events(state: OrchestratorState, team: str, events_data: dict) -> None:
+    """Validate one team's sports data and keep it, or fall back to web search."""
+    validation_result, reason, suggestions = validator.validate_sports_response(
+        events_data, state.query
+    )
+
+    if validation_result == ValidationResult.VALID:
+        # Response is good, use it
+        state.retrieved_data = events_data
+        state.data_source = "TheSportsDB"
+        state.citations.append(f"Sports data from TheSportsDB for {team}")
+        logger.debug(f"Sports RAG validation passed: {reason}")
+
+    elif validation_result in [ValidationResult.EMPTY, ValidationResult.INVALID]:
+        # Data is empty or invalid, trigger web search fallback
+        logger.warning(
+            f"Sports RAG validation failed: {validation_result.value} - {reason}"
+        )
+        if suggestions:
+            logger.info(f"Fallback suggestion: {suggestions}")
+        await _fallback_to_web_search(state, "Sports", reason)
+
+    elif validation_result == ValidationResult.NEEDS_RETRY:
+        # Data structure mismatch (e.g., got schedule when query wants scores)
+        logger.info(
+            f"Sports RAG needs retry: {reason}. Suggestions: {suggestions}"
+        )
+        # For now, fall back to web search for retry scenarios
+        await _fallback_to_web_search(state, "Sports", reason)
+
+
+async def _retrieve_sports(state: OrchestratorState) -> None:
+    """Sports data for the team the query names, else for the favourite it means.
+
+    A named team is looked up as is. With none named, ``favorite_teams.decide``
+    says which favourites the question can mean (none: empty data, which sends
+    the turn to tool calling) and ``resolve_default`` picks one; the pick is
+    recorded on the state so a later forced tool call names the same team.
+    """
+    named = state.entities.get("team")
+    search_team = None
+    if not named:
+        decision = await favorite_teams.decide(request_text(state), state.knowledge_audience)
+        state.sports_default = decision
+        if decision.declined:
+            # No team named and none to mean: nothing to search. Empty data sends
+            # the turn to tool calling (by league) through the empty-RAG trigger.
+            state.retrieved_data = {}
+            return
+
+    # Get dynamic RAG service URL and update client if needed
+    service_url = await get_rag_service_url("sports")
+    if not service_url:
+        logger.error("Sports RAG service URL not configured")
+        await _fallback_to_web_search(state, "Sports", "service not configured")
+        return
+
+    try:
+        # Update RAG client URL if different from default
+        rag_client.update_service_url("sports", service_url)
+
+        if named:
+            team, params = named, {"query": named}
+        else:
+            pick = await favorite_teams.resolve_default(rag_client, decision, request_text(state))
+            state.sports_default = favorite_teams.Decision((pick.team,))
+            team, search_team = pick.team.name, pick.team
+            if pick.looked_up:
+                if pick.failure is not None:
+                    raise pick.failure
+                if pick.events is not None:
+                    await _use_sports_events(state, team, pick.events)
+                return
+            params = favorite_teams.search_params(search_team)
+
+        search_response = await rag_client.get("sports", "/sports/teams/search", params=params)
+        if not search_response.success:
+            raise RAGToolError(search_response, "Sports team search failed")
+
+        search_data = search_response.data
+
+        if search_data.get("teams"):
+            events_data = await team_events(
+                rag_client, search_data["teams"][0], team_name=team
+            )
+            await _use_sports_events(state, team, events_data)
+
+    except Exception as e:
+        # RAG service failed - fall back to web search
+        await _fallback_to_web_search(state, "Sports", str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -329,72 +416,8 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # RAG service failed - fall back to web search
                     await _fallback_to_web_search(state, "Airports", str(e))
 
-        elif state.intent == IntentCategory.SPORTS and not _sports_team(state):
-            # No team named and no configured default: nothing to search. Empty
-            # data sends the turn to tool calling (by league) through the
-            # empty-RAG trigger.
-            state.retrieved_data = {}
-
         elif state.intent == IntentCategory.SPORTS:
-            team = _sports_team(state)
-
-            # Get dynamic RAG service URL and update client if needed
-            service_url = await get_rag_service_url("sports")
-            if not service_url:
-                logger.error("Sports RAG service URL not configured")
-                await _fallback_to_web_search(state, "Sports", "service not configured")
-            else:
-                try:
-                    # Update RAG client URL if different from default
-                    rag_client.update_service_url("sports", service_url)
-
-                    search_response = await rag_client.get(
-                        "sports",
-                        "/sports/teams/search",
-                        params={"query": team}
-                    )
-                    if not search_response.success:
-                        raise RAGToolError(search_response, "Sports team search failed")
-
-                    search_data = search_response.data
-
-                    if search_data.get("teams"):
-                        events_data = await team_events(
-                            rag_client, search_data["teams"][0], team_name=team
-                        )
-
-                        # Validate Sports RAG response quality
-                        validation_result, reason, suggestions = validator.validate_sports_response(
-                            events_data, state.query
-                        )
-
-                        if validation_result == ValidationResult.VALID:
-                            # Response is good, use it
-                            state.retrieved_data = events_data
-                            state.data_source = "TheSportsDB"
-                            state.citations.append(f"Sports data from TheSportsDB for {team}")
-                            logger.debug(f"Sports RAG validation passed: {reason}")
-
-                        elif validation_result in [ValidationResult.EMPTY, ValidationResult.INVALID]:
-                            # Data is empty or invalid, trigger web search fallback
-                            logger.warning(
-                                f"Sports RAG validation failed: {validation_result.value} - {reason}"
-                            )
-                            if suggestions:
-                                logger.info(f"Fallback suggestion: {suggestions}")
-                            await _fallback_to_web_search(state, "Sports", reason)
-
-                        elif validation_result == ValidationResult.NEEDS_RETRY:
-                            # Data structure mismatch (e.g., got schedule when query wants scores)
-                            logger.info(
-                                f"Sports RAG needs retry: {reason}. Suggestions: {suggestions}"
-                            )
-                            # For now, fall back to web search for retry scenarios
-                            await _fallback_to_web_search(state, "Sports", reason)
-
-                except Exception as e:
-                    # RAG service failed - fall back to web search
-                    await _fallback_to_web_search(state, "Sports", str(e))
+            await _retrieve_sports(state)
 
         elif state.intent == IntentCategory.WEBSEARCH and not web_search_allowed(state):
             state.retrieved_data = {}

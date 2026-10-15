@@ -44,7 +44,7 @@ POPULATION_TEST = REPO_ROOT / "admin" / "backend" / "tests" / "test_route_auth_p
 GATED_PATH = re.compile(
     r"/api/(?:room-groups|user-sessions/device|voice-automations"
     r"|internal/emerging-intents|internal/intent-metrics"
-    r"|settings/house-layout|settings/directions-origin-placeholders"
+    r"|settings/house-layout|settings/directions-origin-placeholders|settings/favorite-teams"
     r"|alerts/public/(?:create|resolve-by-entity|stuck-sensors/reconcile)"
     r"|cloud-llm-usage(?![\w/-])"
     r"|cloud-providers/pricing/"
@@ -96,7 +96,7 @@ PREDECESSOR_TARGETS = {
         "resolve_room_group", "get_room_groups", "get_user_session_by_device",
         "create_voice_automation", "get_voice_automations", "archive_voice_automation",
         "restore_voice_automation", "delete_voice_automation",
-        "archive_guest_automations", "restore_guest_automations",
+        "archive_guest_automations", "restore_guest_automations", "get_favorite_teams",
     },
     "src/orchestrator/intent_discovery.py": {
         "find_similar_emerging_intent", "create_emerging_intent",
@@ -458,16 +458,16 @@ def _predecessor_keys():
 
 # C1 -----------------------------------------------------------------------
 
-def test_population_is_the_sixty_seven_callers():
+def test_population_is_the_sixty_eight_callers():
     results = _all_results()
     every = {(rel, name) for rel, names in TARGETS.items() for name in names}
-    assert len(results) == 67, sorted(every - set(results))
+    assert len(results) == 68, sorted(every - set(results))
     assert len(TARGETS) == 18
     assert not _reviewed_keys() & _predecessor_keys()
     empty = sorted(k for k, calls in results.items() if not calls)
     assert not empty, f"named callers with no gated call found: {empty}"
     names = {n for _r, n in results}
-    for named in ("get_user_session_by_device", "create_voice_automation", "record_intent_metric"):
+    for named in ("get_user_session_by_device", "create_voice_automation", "record_intent_metric", "get_favorite_teams"):
         assert named in names
     for named in (
         ("src/gateway/main.py", "get_feature_flag"),
@@ -482,7 +482,7 @@ def test_population_is_the_sixty_seven_callers():
         return {area: sum(1 for rel, _n in keys if area_of(rel) == area) for area in AREAS}
 
     assert count(_reviewed_keys()) == {"shared": 26, "orchestrator": 16, "edge": 9}
-    assert count(_predecessor_keys()) == {"shared": 10, "orchestrator": 6, "edge": 0}
+    assert count(_predecessor_keys()) == {"shared": 11, "orchestrator": 6, "edge": 0}
 
 
 # C2 -----------------------------------------------------------------------
@@ -594,6 +594,12 @@ async def merged_helper(client, u):
 async def other_headers(client, u):
     return await client.get(f"{u}/api/features/public", headers={"Accept": "application/json"})
 
+async def favorites_unheadered(client, u):
+    return await client.get(f"{u}/api/settings/favorite-teams")
+
+async def favorites_headered(self, u):
+    return await self.client.get(f"{u}/api/settings/favorite-teams", headers=self._service_key_headers())
+
 async def two_calls(client, u):
     url = f"{u}/api/llm-backends/metrics"
     first = await client.post(url, json={}, headers={"X-Service-Key": "k"})
@@ -605,6 +611,7 @@ def test_planted_self_test():
     names = {
         "unheadered", "headered", "via_client", "via_variable", "ungated",
         "via_shared_helper", "merged_helper", "other_headers", "two_calls",
+        "favorites_unheadered", "favorites_headered",
     }
     results = scan(PLANTED, names)
     assert set(results) == names
@@ -621,6 +628,8 @@ def test_planted_self_test():
     assert keyed("merged_helper") == [True]
     assert keyed("other_headers") == [False]
     assert keyed("two_calls") == [True, False]
+    assert keyed("favorites_unheadered") == [False]
+    assert keyed("favorites_headered") == [True]
 
 
 # C6 / C10: which reviewed route a call lands on ---------------------------

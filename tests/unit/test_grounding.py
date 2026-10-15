@@ -107,6 +107,55 @@ def test_sports_without_a_team_is_not_forced(monkeypatch):
     assert grounding.forced_tool_calls(_state("any game on", I.SPORTS), offered=ALL_TOOLS, search_location="x") == []
 
 
+def _forced_sports(default_team, **fields):
+    state = _state("how did we do last night", I.SPORTS, **fields)
+    calls = grounding.forced_tool_calls(state, offered=ALL_TOOLS, search_location="x", default_team=default_team)
+    return calls[0]["function"]["arguments"] if calls else None
+
+
+def test_a_favourite_with_a_league_in_the_tool_enum_is_forced_with_its_league():
+    from shared.favorite_teams import FavoriteTeam
+
+    assert _forced_sports(FavoriteTeam(name="Owls", league="nfl")) == {"team": "Owls", "league": "nfl"}
+
+
+@pytest.mark.parametrize("league", ["ligue-1", "liga-mx", "europa-league", None])
+def test_a_favourite_outside_the_tool_enum_or_with_no_league_is_forced_by_name_only(league):
+    from shared.favorite_teams import FavoriteTeam
+
+    assert _forced_sports(FavoriteTeam(name="Owls", league=league)) == {"team": "Owls"}
+
+
+def test_the_tool_enum_here_matches_the_tool_schema():
+    from orchestrator import rag_tools
+
+    schema = next(
+        t["function_schema"]["function"]
+        for t in rag_tools.TOOL_DEFINITIONS
+        if t["function_schema"]["function"]["name"] == "get_sports_scores"
+    )
+    assert set(schema["parameters"]["properties"]["league"]["enum"]) == grounding._SPORTS_TOOL_LEAGUES
+
+
+def test_no_favourite_and_no_entity_is_not_forced():
+    assert _forced_sports(None) is None
+
+
+def test_a_named_team_beats_the_favourite_in_the_forced_call():
+    from shared.favorite_teams import FavoriteTeam
+
+    args = _forced_sports(FavoriteTeam(name="Owls", league="nfl"), entities={"team": "Giants"})
+    assert args == {"team": "Giants"}
+
+
+def test_the_forced_team_never_comes_from_the_environment():
+    import inspect
+
+    assert "get_config" not in inspect.getsource(grounding._sports_team)
+    assert "get_config" not in inspect.getsource(grounding._sports_arguments)
+    assert "sports_default_team" not in inspect.getsource(grounding)
+
+
 @pytest.mark.parametrize("intent", [I.STOCKS, I.DIRECTIONS, I.WEBSEARCH, I.MUSIC_PLAY, I.CONTROL, I.TESLA])
 def test_these_intents_are_never_forced_here(intent):
     assert grounding.forced_tool_calls(_state("anything at all", intent), offered=ALL_TOOLS, search_location="x") == []

@@ -19,6 +19,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional
 
 from orchestrator.model_safe_errors import is_error_object
 from orchestrator.state import IntentCategory
+from shared.favorite_teams import FavoriteTeam
 
 DECLINE_TEXT = "I couldn't look that up right now."
 
@@ -285,24 +286,44 @@ def _tool_call(index: int, name: str, arguments: Dict[str, Any]) -> Dict[str, An
 
 
 def _sports_team(state: Any) -> Optional[str]:
+    """The team the request names; None when it names none."""
     entities = _field(state, "entities") or {}
     team = entities.get("team")
     if isinstance(team, str) and team.strip():
         return team.strip()
-    from shared.config import get_config
-
-    return get_config().sports_default_team or None
+    return None
 
 
-def _forced_arguments(tool: str, state: Any, text: str, search_location: str) -> Optional[Dict[str, Any]]:
+# The leagues get_sports_scores accepts (rag_tools.py); a favourite in another
+# league is passed by name only.
+_SPORTS_TOOL_LEAGUES = frozenset({
+    "nfl", "college-football", "nba", "college-basketball", "wnba", "mlb", "nhl", "mls",
+    "premier-league", "la-liga", "bundesliga", "serie-a", "champions-league", "international",
+})
+
+
+def _sports_arguments(state: Any, default_team: Any) -> Optional[Dict[str, Any]]:
+    named = _sports_team(state)
+    if named:
+        return {"team": named}
+    if default_team is None:
+        return None
+    arguments: Dict[str, Any] = {"team": default_team.name}
+    if default_team.league in _SPORTS_TOOL_LEAGUES:
+        arguments["league"] = default_team.league
+    return arguments
+
+
+def _forced_arguments(
+    tool: str, state: Any, text: str, search_location: str, default_team: Any = None
+) -> Optional[Dict[str, Any]]:
     term = search_term(text)
     if tool == "search_restaurants":
         return {"location": search_location, "term": term} if search_location else None
     if tool == "get_weather":
         return {"location": search_location} if search_location else None
     if tool == "get_sports_scores":
-        team = _sports_team(state)
-        return {"team": team} if team else None
+        return _sports_arguments(state, default_team)
     if tool == "get_news":
         return {"query": term}
     if tool == "search_events":
@@ -312,7 +333,9 @@ def _forced_arguments(tool: str, state: Any, text: str, search_location: str) ->
     return None
 
 
-def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: str) -> List[Dict[str, Any]]:
+def forced_tool_calls(
+    state: Any, *, offered: Iterable[str], search_location: str, default_team: Optional[FavoriteTeam] = None,
+) -> List[Dict[str, Any]]:
     """The tool call a data turn makes when the model made none.
 
     Built only when the mapped tool is in ``offered`` (the tool names left after
@@ -328,7 +351,7 @@ def forced_tool_calls(state: Any, *, offered: Iterable[str], search_location: st
         return []
     if knowledge_question(text):  # a definition is answered, not looked up
         return []
-    arguments = _forced_arguments(tool, state, text, search_location)
+    arguments = _forced_arguments(tool, state, text, search_location, default_team)
     return [_tool_call(0, tool, arguments)] if arguments else []
 
 

@@ -4,6 +4,7 @@ Admin Configuration Client
 Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
+import asyncio
 import os
 import re
 import time
@@ -15,6 +16,7 @@ from shared.admin_url import get_admin_url, path_segment
 from shared.ha_credentials import NON_INJECTABLE_KEY_SERVICES
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
+from shared.favorite_teams import FavoriteTeam, parse_teams
 from shared.knowledge_tiers import entry_visible
 
 # How long the raw base-knowledge list is reused. Five seconds bounds how long a
@@ -22,7 +24,18 @@ from shared.knowledge_tiers import entry_visible
 # GET per five seconds.
 BASE_KNOWLEDGE_CACHE_TTL_SECONDS = 5.0
 
+# How long the favourite-team list is trusted, and the gap between attempts while
+# admin-backend is unreachable. Freshness is decided by a timestamp, never by the
+# value being truthy: an empty list is an answer like any other.
+FAVORITE_TEAMS_TTL_SECONDS = 60.0
+FAVORITE_TEAMS_TIMEOUT_SECONDS = 2.0
+
 logger = structlog.get_logger()
+
+
+def _clock() -> float:
+    return time.monotonic()
+
 
 CallerMode = Literal["owner", "guest"]
 
@@ -116,6 +129,12 @@ class AdminConfigClient:
         self._llm_backends_cache_time = 0.0
         self._features_cache: Optional[Dict[str, bool]] = None
         self._features_cache_time = 0.0
+
+        # Favourite teams: last good value, when it was last asked for (success or
+        # failure), and the lock that lets concurrent turns share one request.
+        self._favorite_teams: Tuple[FavoriteTeam, ...] = ()
+        self._favorite_teams_checked_at: Optional[float] = None
+        self._favorite_teams_lock = asyncio.Lock()
 
         # Tool calling configuration cache
         self._tool_calling_settings_cache: Optional[Dict[str, Any]] = None
@@ -520,6 +539,42 @@ class AdminConfigClient:
 
         # Return empty dict to trigger hardcoded defaults
         return {}
+
+    def _favorite_teams_fresh(self) -> bool:
+        checked = self._favorite_teams_checked_at
+        return checked is not None and _clock() - checked < FAVORITE_TEAMS_TTL_SECONDS
+
+    async def get_favorite_teams(self) -> Tuple[FavoriteTeam, ...]:
+        """The household's favourite teams, in order.
+
+        Fetched at most once per 60 seconds, by one request however many turns
+        ask at once. When admin-backend can't answer, the last good list is
+        returned (``()`` if there never was one) and the next attempt waits the
+        same 60 seconds, so no turn ever queues behind an outage.
+        """
+        if self._favorite_teams_fresh():
+            return self._favorite_teams
+        async with self._favorite_teams_lock:
+            if self._favorite_teams_fresh():
+                return self._favorite_teams
+            try:
+                response = await self.client.get(
+                    f"{self.admin_url}/api/settings/favorite-teams",
+                    headers=self._service_key_headers(),
+                    timeout=FAVORITE_TEAMS_TIMEOUT_SECONDS,
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    teams = parse_teams(payload.get("teams") if isinstance(payload, dict) else None, source="admin")
+                    self._favorite_teams = teams
+                    logger.info("favorite_teams_loaded", count=len(teams))
+                else:
+                    note_admin_refusal(response.status_code, "/api/settings/favorite-teams")
+                    logger.warning("favorite_teams_fetch_failed", status_code=response.status_code)
+            except Exception as e:
+                logger.warning("favorite_teams_fetch_error", error_type=type(e).__name__)
+            self._favorite_teams_checked_at = _clock()
+            return self._favorite_teams
 
     async def is_feature_enabled(self, feature_name: str) -> Optional[bool]:
         """

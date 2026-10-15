@@ -162,6 +162,7 @@ class OrchestratorState(BaseModel):
     start_time: float = Field(default_factory=time.time)
     node_timings: Dict[str, float] = Field(default_factory=dict)
     timing_tracker: Optional[Any] = Field(default=None, exclude=True)  # TimingTracker instance for granular timing
+    sports_default: Optional[Any] = Field(default=None, exclude=True)  # favorite_teams.Decision: the favourites a no-team sports question can mean (set by retrieve or tool_call)
     error: Optional[str] = None
 
     # LLM Token Metrics (for frontend display)

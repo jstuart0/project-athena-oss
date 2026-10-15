@@ -36,6 +36,7 @@ GATED_PREFIXES = (
     "/api/settings/ollama-url",
     "/api/settings/house-layout",
     "/api/settings/directions-origin-placeholders",
+    "/api/settings/favorite-teams",
     "/api/llm-backends/model/",
     "/api/sms/internal/",
     "/api/debug-logs",

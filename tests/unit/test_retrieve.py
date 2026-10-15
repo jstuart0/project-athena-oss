@@ -483,33 +483,46 @@ class TestSportsIntent:
         assert result.intent == IntentCategory.GENERAL_INFO
         assert "retrieve" in result.node_timings
 
-    def test_a_configured_default_team_is_used_when_the_query_names_none(self):
-        rc = self._make_sports_rc()
+    def test_a_favourite_is_used_when_the_query_names_none(self):
+        from shared.favorite_teams import FavoriteTeam
+        from shared.knowledge_tiers import KnowledgeAudience
+
+        rc = self._make_sports_rc(team_data={"idTeam": "1", "strTeam": "Anytown Owls", "strLeague": "football/nfl"})
         _runtime.set_rag_client(rc)
         v = _make_validator(ValidationResult.VALID)
         state = _make_state(query="how are they doing?", intent=IntentCategory.SPORTS, entities={})
-        cfg = MagicMock(sports_default_team="Ravens")
+        state.knowledge_audience = KnowledgeAudience(
+            mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False
+        )
+        favs = (FavoriteTeam(name="Anytown Owls", league="nfl"),)
         with (
-            patch("orchestrator.nodes.retrieve.get_config", return_value=cfg),
+            patch("orchestrator.favorite_teams.favorites", new_callable=AsyncMock, return_value=favs),
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
             patch("orchestrator.nodes.retrieve.validator", v),
         ):
             result = _run(retrieve_node(state))
-        assert rc.get.call_args_list[0].kwargs["params"] == {"query": "Ravens"}
-        assert result.retrieved_data["team"] == "Ravens"
+        assert rc.get.call_args_list[0].kwargs["params"] == {"query": "Anytown Owls", "league": "nfl"}
+        assert result.retrieved_data["team"] == "Anytown Owls"
 
-    def test_a_named_team_beats_the_configured_default(self):
+    def test_a_named_team_beats_the_favourites(self):
+        from shared.favorite_teams import FavoriteTeam
+        from shared.knowledge_tiers import KnowledgeAudience
+
         rc = self._make_sports_rc()
         _runtime.set_rag_client(rc)
         state = _make_state(query="Ravens?", intent=IntentCategory.SPORTS, entities={"team": "Ravens"})
-        cfg = MagicMock(sports_default_team="Giants")
+        state.knowledge_audience = KnowledgeAudience(
+            mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False
+        )
+        favs = AsyncMock(return_value=(FavoriteTeam(name="Anytown Owls", league="nfl"),))
         with (
-            patch("orchestrator.nodes.retrieve.get_config", return_value=cfg),
+            patch("orchestrator.favorite_teams.favorites", favs),
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://sports:8004"),
             patch("orchestrator.nodes.retrieve.validator", _make_validator(ValidationResult.VALID)),
         ):
             _run(retrieve_node(state))
         assert rc.get.call_args_list[0].kwargs["params"] == {"query": "Ravens"}
+        favs.assert_not_awaited()
 
     def test_sports_service_url_not_configured_triggers_fallback(self):
         rc = _make_rag_client()

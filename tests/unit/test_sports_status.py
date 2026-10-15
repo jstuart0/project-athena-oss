@@ -240,31 +240,11 @@ def test_equal_scores_are_a_tie_in_events_and_headlines():
     assert ss.status_headline([], [], [game("post", "17", "3")], NOW)["tie"] is False
 
 
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        (None, ""),  # unset: no default team
-        ("", ""),
-        ("  Real Madrid  ", "Real Madrid"),
-        ("St. Louis-Blues O'Neil", "St. Louis-Blues O'Neil"),
-        ("x" * 64, "x" * 64),
-        ("x" * 65, ""),
-        ("Team; drop table", ""),
-        ("Team\nnewline", ""),
-        ("<b>Team</b>", ""),
-    ],
-)
-def test_sports_default_team_is_stripped_validated_and_empty_by_default(monkeypatch, raw, expected):
+def test_the_default_team_is_an_admin_setting_not_an_environment_variable():
     from shared.config import AthenaConfig
 
-    if raw is None:
-        monkeypatch.delenv("SPORTS_DEFAULT_TEAM", raising=False)
-    else:
-        monkeypatch.setenv("SPORTS_DEFAULT_TEAM", raw)
-    assert AthenaConfig(_env_file=None).sports_default_team == expected
-
-
-def test_the_default_team_is_documented_and_never_named_in_code():
-    assert "SPORTS_DEFAULT_TEAM" in (ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
-    assert "SPORTS_DEFAULT_TEAM=" in (ROOT / "config.env.example").read_text(encoding="utf-8")
+    assert "sports_default_team" not in AthenaConfig.model_fields
+    assert "SPORTS_DEFAULT_TEAM" not in (ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+    assert "SPORTS_DEFAULT_TEAM" not in (ROOT / "config.env.example").read_text(encoding="utf-8")
     assert '"Ravens"' not in (ROOT / "src/orchestrator/nodes/retrieve.py").read_text(encoding="utf-8")
+    assert '"Ravens"' not in (ROOT / "src/orchestrator/favorite_teams.py").read_text(encoding="utf-8")
