@@ -2149,6 +2149,10 @@ def _resume_open_task(state: OrchestratorState, prev_context: Any, ref_info: Dic
 # question. It is an occupancy question only when a room is also named, so
 # "is anyone in the Beatles" is left to the classifier.
 _PEOPLE_IN_ROOM_RE = re.compile(r"\b(?:any|some)(?:one|body)\s+(?:(?:is|are|was|were|else)\s+)?(?:in|inside|at)\b")
+# "tell anyone in the kitchen ...", "let anybody in the den know": an announcement.
+_ANNOUNCE_TO_PEOPLE_RE = re.compile(
+    r"\b(?:tell|let|notify|announce|page|alert|warn|call|ask|text|message|say|shout|yell)\b.*\b(?:any|some)(?:one|body)\b"
+)
 
 
 async def classify_node(state: OrchestratorState) -> OrchestratorState:
@@ -2903,6 +2907,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     ]
     is_sensor_query = any(p in query_lower for p in sensor_patterns) or (
         has_room and not room_mention.in_exclusion and bool(_PEOPLE_IN_ROOM_RE.search(query_lower))
+        and not _ANNOUNCE_TO_PEOPLE_RE.search(query_lower)
     )
 
     if is_sensor_query:

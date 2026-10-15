@@ -69,6 +69,10 @@ COMMON_ROOM_WORDS: Tuple[str, ...] = (
 # Words that never name a room on their own, so a room named "On" or "Lights"
 # can't be matched, and a piece of a longer name made only of these ("room"
 # from "Living Room") isn't a partial match.
+# Whole-house and location words: a registry area or alias named "Home" must
+# not turn "is anyone home" or "lights at home" into a room. Exclusion
+# detection keeps treating them as content words ("keep the ones here on").
+_LOCATION_TOKENS = ("home", "here", "there", "inside", "place")
 _NON_ROOM_TOKENS = frozenset({
     "the", "a", "an", "of", "in", "on", "off", "at", "to", "and", "or", "my", "our", "your",
     "it", "them", "that", "this", "please", "light", "lights", "lamp", "lamps", "room", "rooms",
@@ -76,9 +80,7 @@ _NON_ROOM_TOKENS = frozenset({
     "everywhere", "house", "whole", "entire", "both", "each", "one", "up", "down", "mode",
     "scene", "color", "colour", "level", "percent", "bright", "brightness", "status",
     "is", "are", "what", "which", "any", "some", "with", "for", "lit", "group", "area",
-    # Whole-house and location words: a registry area or alias named "Home"
-    # must not turn "is anyone home" or "lights at home" into a room.
-    "home", "here", "there", "inside", "place",
+    *_LOCATION_TOKENS,
 })
 
 EXCLUSION_PHRASES: Tuple[Tuple[str, ...], ...] = (
@@ -463,7 +465,7 @@ _TRAILING_DEFERRAL_WORDS = frozenset({"excluded", "excepted"})
 _SKIPPED_AFTER_DEFERRAL = (
     _OBJECT_FILLER | _LIGHT_NOUNS | _PLACE_PREPOSITIONS | frozenset({"ones", "one", "those", "them", "it"})
 )
-_PLAIN_WORDS = _OBJECT_FILLER | _SCOPE_WORDS | _NON_ROOM_TOKENS | frozenset({"it", "them", "that"})
+_PLAIN_WORDS = _OBJECT_FILLER | _SCOPE_WORDS | (_NON_ROOM_TOKENS - frozenset(_LOCATION_TOKENS)) | frozenset({"it", "them", "that"})
 
 
 def _phrase_at(toks: Sequence[str], i: int) -> int:

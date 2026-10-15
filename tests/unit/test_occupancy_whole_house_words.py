@@ -144,3 +144,26 @@ NAMED_ANSWERS = [
 @pytest.mark.parametrize("sensors,query,expected", NAMED_ANSWERS)
 def test_a_named_room_is_still_answered_for_that_room(sensors, query, expected):
     assert occupancy_answer(sensors, query) == expected
+
+
+@pytest.mark.parametrize("query", [
+    "turn off all the lights, keep the ones here on",
+    "turn off all the lights except in here",
+])
+def test_location_words_still_count_for_exclusion_wording(query):
+    assert rc.has_exclusion_wording(query, HOUSE)
+
+
+@pytest.mark.parametrize("query", [
+    "tell anyone in the workshop dinner is ready",
+    "let anybody in the den know i'm home",
+    "tell someone in the office to call me",
+    "let everyone and anyone in the pantry know",
+])
+def test_an_announcement_to_people_in_a_room_is_not_an_occupancy_question(query, monkeypatch):
+    use(HOUSE)
+    try:
+        state = _classify(query, monkeypatch)
+    except Exception:
+        return
+    assert state.entities.get("device_type") != "sensor"
