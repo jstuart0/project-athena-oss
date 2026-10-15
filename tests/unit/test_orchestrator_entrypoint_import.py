@@ -36,6 +36,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STUB_DIR = REPO_ROOT / "tests" / "fixtures" / "entrypoint_import_stubs"
 
@@ -127,7 +129,25 @@ FIRST_IMPORTS = [
     "orchestrator.grounding",
     "orchestrator.answer_route",
     "orchestrator.semantic_cache",
+    "orchestrator.followup",
+    "orchestrator.sports_status",
+    "orchestrator.intent_arbitration",
+    "orchestrator.entity_repair",
 ]
+
+# The sibling modules the live-conversation campaign added under src/orchestrator
+# (after e9a1b0b). Each one must be a FIRST_IMPORTS entry: a new module that is
+# only ever imported after `orchestrator.nodes` hides a partial-init cycle.
+CAMPAIGN_BASE = "e9a1b0b"
+CAMPAIGN_MODULES = frozenset({
+    "orchestrator.grounding",
+    "orchestrator.answer_route",
+    "orchestrator.identity_answer",
+    "orchestrator.followup",
+    "orchestrator.sports_status",
+    "orchestrator.intent_arbitration",
+    "orchestrator.entity_repair",
+})
 
 
 def _run_first_import(module: str):
@@ -154,6 +174,27 @@ def test_orchestrator_modules_import_cleanly_in_any_first_position():
     assert len(FIRST_IMPORTS) >= 3 and "orchestrator.fast_path" in FIRST_IMPORTS
     for module in FIRST_IMPORTS:
         _assert_clean_import(_run_first_import(module), f"`import {module}` as the first import")
+
+
+def test_every_module_the_campaign_added_is_a_first_import():
+    assert len(CAMPAIGN_MODULES) == 7
+    assert CAMPAIGN_MODULES <= set(FIRST_IMPORTS)
+    assert len(FIRST_IMPORTS) == len(set(FIRST_IMPORTS))
+    for module in CAMPAIGN_MODULES:
+        assert (REPO_ROOT / "src" / (module.replace(".", "/") + ".py")).is_file(), module
+
+
+def test_the_campaign_modules_are_exactly_the_files_added_under_src_orchestrator():
+    """Set equality with the commit range, where the base commit is present (a
+    shallow CI checkout has no base to diff against; the pinned set above still holds)."""
+    if subprocess.run(["git", "cat-file", "-e", CAMPAIGN_BASE], cwd=REPO_ROOT, capture_output=True).returncode != 0:
+        pytest.skip("campaign base commit not in this checkout")
+    out = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=A", CAMPAIGN_BASE, "--", "src/orchestrator/*.py"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    added = {path[len("src/"):-len(".py")].replace("/", ".") for path in out if path.count("/") == 2}
+    assert added == CAMPAIGN_MODULES, sorted(added ^ CAMPAIGN_MODULES)
 
 
 def test_the_first_import_check_detects_a_cycle(tmp_path):
