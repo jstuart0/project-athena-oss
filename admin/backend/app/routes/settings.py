@@ -7,6 +7,7 @@ and Athena assistant profile / guardrails. Settings are stored in the database.
 import os
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator, model_validator
 import structlog
@@ -15,12 +16,21 @@ import json
 from app.database import get_db
 from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.auth.oidc import get_current_user
-from app.models import User, Secret, SystemSetting
+from app.models import AuditLog, User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
 from app.utils.url_validators import validate_host, is_local_host, redact_url_userinfo
 from app.utils.rag_urls import check_ssrf_safe
 from shared.assistant_profile import clamp_voice_response
 from shared.config import get_config
+from shared.favorite_teams import (
+    MAX_FAVORITE_TEAMS,
+    SETTING_CATEGORY as FAVORITE_TEAMS_CATEGORY,
+    SETTING_KEY as FAVORITE_TEAMS_KEY,
+    FavoriteTeamsUpdate,
+    league_catalog,
+    parse_stored,
+    stored_value,
+)
 
 logger = structlog.get_logger()
 
@@ -644,6 +654,98 @@ async def save_house_layout_settings(
         db.rollback()
         logger.error("failed_to_save_house_layout", error=str(e), user=current_user.username)
         raise HTTPException(status_code=500, detail=f"Failed to save house layout: {str(e)}")
+
+
+# ============================================================================
+# Favourite teams
+# ============================================================================
+
+def _favorite_teams_response(teams, revision: int) -> Dict[str, Any]:
+    return {
+        "teams": [{"name": t.name, "league": t.league} for t in teams],
+        "revision": revision,
+        "leagues": league_catalog(),
+        "max": MAX_FAVORITE_TEAMS,
+    }
+
+
+@router.get("/favorite-teams", dependencies=[Depends(require_service_or_user_permission("read"))])
+async def get_favorite_teams(db: Session = Depends(get_db)):
+    """The household's favourite teams, in order, with the revision to send back on save.
+
+    The orchestrator reads it with the service key; a signed-in user needs read
+    permission. A database failure is a 500, never an empty list, so a reader
+    can't mistake an outage for "no favourites".
+    """
+    try:
+        row = db.query(SystemSetting).filter(SystemSetting.key == FAVORITE_TEAMS_KEY).first()
+    except Exception as e:
+        logger.error("favorite_teams_read_failed", error_type=type(e).__name__)
+        raise HTTPException(status_code=500, detail="Failed to read favourite teams")
+    teams, revision = parse_stored(row.value if row else None)
+    return _favorite_teams_response(teams, revision)
+
+
+@router.put("/favorite-teams")
+async def save_favorite_teams(
+    update: FavoriteTeamsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user_permission("write")),
+):
+    """Replace the whole list. ``revision`` must be the one the caller loaded;
+    a mismatch (someone saved in between) is 409 ``stale_revision``.
+    Names are validated by the request model before this runs."""
+    try:
+        row = (
+            db.query(SystemSetting)
+            .filter(SystemSetting.key == FAVORITE_TEAMS_KEY)
+            .with_for_update()
+            .first()
+        )
+        old_teams, current_revision = parse_stored(row.value if row else None)
+        if update.revision != current_revision:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="stale_revision")
+
+        new_revision = current_revision + 1
+        value = stored_value(update.teams, new_revision)
+        if row is None:
+            db.add(SystemSetting(
+                key=FAVORITE_TEAMS_KEY,
+                value=value,
+                description="Favourite sports teams, in order",
+                category=FAVORITE_TEAMS_CATEGORY,
+            ))
+        else:
+            row.value = value
+        db.add(AuditLog(
+            user_id=user.id,
+            action="favorite_teams_update",
+            resource_type="system_setting",
+            old_value={"count": len(old_teams)},
+            new_value={
+                "count": len(update.teams),
+                "leagues": sorted({t.league for t in update.teams if t.league}),
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            success=True,
+        ))
+        db.flush()
+        db.commit()
+    except HTTPException:
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="stale_revision")
+    except Exception as e:
+        db.rollback()
+        logger.error("favorite_teams_save_failed", error_type=type(e).__name__)
+        raise HTTPException(status_code=500, detail="Failed to save favourite teams")
+
+    logger.info("favorite_teams_saved", count=len(update.teams))
+    return _favorite_teams_response(tuple(update.teams), new_revision)
 
 
 # ============================================================================

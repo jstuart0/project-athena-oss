@@ -272,6 +272,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/settings.py", "get_oidc_settings"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/settings.py", "save_assistant_profile"): (2, OPERATOR_AUDIT),
     ("admin/backend/app/routes/settings.py", "save_directions_origin_placeholders"): (2, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/settings.py", "save_favorite_teams"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/settings.py", "save_house_layout_settings"): (2, OPERATOR_AUDIT),
     ("admin/backend/app/routes/settings.py", "save_llm_memory_settings"): (2, OPERATOR_AUDIT),
     ("admin/backend/app/routes/settings.py", "save_oidc_settings"): (2, OPERATOR_AUDIT),
