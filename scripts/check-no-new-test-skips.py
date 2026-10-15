@@ -113,6 +113,16 @@ SANCTIONED = {
         "UNREACHABLE IN CI: actions/setup-node pins the node version before this "
         "workflow runs, so `shutil.which('node')` never returns None there."
     ),
+    (
+        "tests/unit/test_lint_gate.py",
+        '@pytest.mark.skipif(shutil.which("ruff") is None',
+    ): (
+        "The two tests that run ruff against a planted undefined name. They run only in "
+        ".github/workflows/lint.yml, where ruff is installed from the hash-locked "
+        "requirements; the other workflows' pytest runs have no ruff, and this file is "
+        "not part of them. UNREACHABLE IN CI where it matters: the lint job installs ruff "
+        "before the step that runs this file, so `shutil.which('ruff')` is never None there."
+    ),
 }
 
 SKIP_RE = re.compile(r"^\+.*pytest\.mark\.skip")

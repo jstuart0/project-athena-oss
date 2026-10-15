@@ -702,7 +702,8 @@ class TestSequences:
         "they unlock the front door and then wait 5 minutes and lock it",
         "she said unlock the front door, then turn off the lights in 5 minutes",
         "maybe unlock the front door and then lock it in 5 minutes",
-        "unlock the front door and in 5 minutes lock it",
+        "in 5 minutes unlock the front door, then turn on the lights",
+        "unlock the front door in 5 minutes and then lock it",
     ])
     def test_a_sequence_never_unlocks_now_for_narration_or_a_deferral(self, monkeypatch, query):
         rig = SequenceRig(monkeypatch, THREE_LOCKS)
@@ -710,6 +711,20 @@ class TestSequences:
                  step("lock", {"device_type": "lock", "room": "front_door"})]
         text = rig.run_plan(steps, query)
         assert text is not None and rig.calls == [], (query, text)
+
+    @pytest.mark.parametrize("query", [
+        "unlock the front door, then lock it in 5 minutes",
+        "unlock the front door and lock it again in ten minutes",
+        "unlock the front door and in 5 minutes lock it",
+    ])
+    def test_a_deferral_qualifies_only_its_own_clause(self, monkeypatch, query):
+        # D27: the unlock is for now, the lock is the later step.
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("lock", {"device_type": "lock", "room": "front_door"})]
+        steps[0]["delay_after"] = 300
+        assert rig.plan(steps, query) is None, query
+        assert rig.openings == [] or rig.openings == [("lock", "unlock", "lock.front_door")]
 
     def test_the_sequence_door_rule_has_a_positive_control(self, monkeypatch):
         rig = SequenceRig(monkeypatch, THREE_LOCKS)

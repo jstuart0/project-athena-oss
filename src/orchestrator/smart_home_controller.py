@@ -21,7 +21,7 @@ from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import (
-    UtteranceClassification, UtteranceKind, classify_utterance, has_deferral, has_narration, imperative_text,
+    UtteranceClassification, UtteranceKind, classify_utterance, clause_deferral_for, has_deferral, has_narration, imperative_text,
     is_indoor_temperature_question,
 )
 from shared.ha_registry import room_key, tokens as _words
@@ -1682,7 +1682,7 @@ class SmartHomeController:
     @staticmethod
     def _door_command_refusal(
         device_type: Any, action: Any, query: Optional[str], utterance: Optional[UtteranceClassification],
-        *, carried_words: bool, confirmed: bool,
+        *, carried_words: bool, confirmed: bool, per_clause: bool = False,
     ) -> Optional[str]:
         """The answer when the words don't ask for this lock or cover to move
         now, else None. A door never moves for a time or a condition ("in 5
@@ -1696,7 +1696,15 @@ class SmartHomeController:
             return None
         import logging
         log = logging.getLogger(__name__)
-        if (utterance is not None and utterance.deferred) or has_deferral(query):
+        deferred = None
+        if per_clause:
+            # A sequence plan: only the clause that holds this step's verb qualifies it
+            # ("unlock the door, then lock it in 5 minutes" unlocks now).
+            verbs = OPENING_VERBS.get(access_target.canonical_device_type(device_type), ((), ()))[0]
+            deferred = clause_deferral_for(query, verbs)
+        if deferred is None:
+            deferred = (utterance is not None and utterance.deferred) or has_deferral(query)
+        if deferred:
             log.info("deferred_door_command_refused")
             return NO_WRITE_CUE_TEXT
         if carried_words or confirmed or not access_target.is_opening_action(
@@ -3013,7 +3021,7 @@ Return ONLY valid JSON."""
                 # The same rule as a single command: a command no one reported and no time or
                 # condition qualifies ("she said unlock the front door, then ...").
                 refusal = self._door_command_refusal(
-                    domain, step.get('action'), query, None, carried_words=False, confirmed=False,
+                    domain, step.get('action'), query, None, carried_words=False, confirmed=False, per_clause=True,
                 )
                 if refusal is not None:
                     return refusal

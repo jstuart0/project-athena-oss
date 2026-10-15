@@ -596,12 +596,14 @@ _TAIL_HOUR_WORDS = frozenset({
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
 })
 _TAIL_WEEKDAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"})
+_TAIL_RECURRING_DAYS = _TAIL_WEEKDAYS | {d + "s" for d in _TAIL_WEEKDAYS} | {"weekday", "weekdays", "weekend", "weekends"}
 _TAIL_RECURRENCE_UNITS = frozenset({
     "night", "day", "morning", "evening", "afternoon", "week", "weekday", "weekend", "hour", "minute", "time",
     *_TAIL_WEEKDAYS,
 })
 _TAIL_EXTRA_CONDITION_WORDS = frozenset({"if", "unless", "while", "every", "each"})  # for a door, any of these defers
 _TAIL_MEDIA_VERBS = frozenset({"play", "pause", "resume", "stop", "skip"})
+_TAIL_TIME_SUBORDINATORS = frozenset({"before", "after", "until"})
 _TAIL_REFERENCE_WORDS = frozenset({"that", "this", "it"})  # "after that turn off the fan" is a sequence step
 _TAIL_DOOR_VERBS = frozenset({"lock", "unlock", "open", "close", "shut", "raise", "lower"})
 _TAIL_DOOR_NOUNS = frozenset({
@@ -649,7 +651,7 @@ def _tail_deferral(ws: Sequence[str], door: bool, *, door_clause: bool = False) 
                 w not in ("every", "each") or rest[0] in _TAIL_RECURRENCE_UNITS  # "every door" is a quantity
             ):
                 return "condition"
-            if w == "on" and rest[0] in _TAIL_WEEKDAYS:
+            if w == "on" and rest[0] in _TAIL_RECURRING_DAYS:
                 return "time"
             if w == "this" and rest[0] in _TAIL_DAYPARTS | {"weekend", "week"}:
                 return "time"
@@ -657,8 +659,10 @@ def _tail_deferral(ws: Sequence[str], door: bool, *, door_clause: bool = False) 
                 return "time"
             if w == "at" and rest[0] == "night" and _TAIL_DOOR_NOUNS.intersection(ws):
                 return "time"
-        if w in _TAIL_CONDITION_WORDS and rest and rest[0] not in _TAIL_REFERENCE_WORDS:
-            return "condition"
+        if w in _TAIL_CONDITION_WORDS and rest and not (
+            w in _TAIL_TIME_SUBORDINATORS and rest[0] in _TAIL_REFERENCE_WORDS  # "after that turn off the fan"
+        ):
+            return "condition"  # "when it gets dark" is a condition, whatever follows
         if w in _TAIL_DAY_WORDS:
             return "time"
         if w == "in" and (_delay_phrase(rest) or (rest[:1] == ["the"] and rest[1:2] and rest[1] in _TAIL_DAYPARTS)):
@@ -1431,6 +1435,23 @@ def has_narration(query: Optional[str], assistant_names: Iterable[str] = ()) -> 
     """Whether any clause that is not negated or empty is narration. Fails closed."""
     analysis = _analyze_or_none(query, assistant_names)
     return True if analysis is None else any(c.narration for c in _live(analysis))
+
+
+def clause_deferral_for(
+    query: Optional[str], verbs: Iterable[str], assistant_names: Iterable[str] = (),
+) -> Optional[bool]:
+    """Whether the clauses that hold one of ``verbs`` are deferred (a time or a
+    condition before or after them), judged clause by clause: in "unlock the
+    door, then lock it in 5 minutes" the unlock clause is not deferred. None
+    when no clause holds a verb (the caller judges the whole utterance)."""
+    analysis = _analyze_or_none(query, assistant_names)
+    if analysis is None:
+        return True
+    wanted = set(verbs)
+    held = [c for c in _live(analysis) if wanted.intersection(c.words)]
+    if not held:
+        return None
+    return any(c.deferred or c.scheduled for c in held)
 
 
 def has_deferral(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
