@@ -714,8 +714,8 @@ class TestSequences:
 
     @pytest.mark.parametrize("query", [
         "unlock the front door, then lock it in 5 minutes",
-        "unlock the front door and lock it again in ten minutes",
-        "unlock the front door and in 5 minutes lock it",
+        "unlock the front door and then lock it in 5 minutes",
+        "unlock the front door. Lock it in 5 minutes.",
     ])
     def test_a_deferral_qualifies_only_its_own_clause(self, monkeypatch, query):
         # D27: the unlock is for now, the lock is the later step.
@@ -725,6 +725,23 @@ class TestSequences:
         steps[0]["delay_after"] = 300
         assert rig.plan(steps, query) is None, query
         assert rig.openings == [] or rig.openings == [("lock", "unlock", "lock.front_door")]
+
+    @pytest.mark.parametrize("query", [
+        "in 5 minutes lock the front door and unlock the back door",
+        "unlock the back door and lock the front door in 5 minutes",
+        # D28: and/plus/also join one group, so the deferral covers the unlock too (these were
+        # positives under D27's per-clause rule; only then, a comma or a sentence break scope a clause).
+        "unlock the front door and lock it again in ten minutes",
+        "unlock the front door and in 5 minutes lock it",
+        "unlock the front door also lock it in 5 minutes",
+    ])
+    def test_a_deferral_on_an_and_joined_group_covers_every_opening_in_it(self, monkeypatch, query):
+        rig = SequenceRig(monkeypatch, THREE_LOCKS)
+        steps = [step("unlock", {"device_type": "lock", "room": "front_door"}),
+                 step("lock", {"device_type": "lock", "room": "front_door"})]
+        steps[0]["delay_after"] = 300
+        text = rig.plan(steps, query)
+        assert text is not None and rig.calls == [], (query, text)
 
     def test_the_sequence_door_rule_has_a_positive_control(self, monkeypatch):
         rig = SequenceRig(monkeypatch, THREE_LOCKS)

@@ -1448,10 +1448,32 @@ def clause_deferral_for(
     if analysis is None:
         return True
     wanted = set(verbs)
-    held = [c for c in _live(analysis) if wanted.intersection(c.words)]
+    clauses = [c for c in analysis.clauses if not c.empty]
+    held = [i for i, c in enumerate(clauses) if not c.negated and wanted.intersection(c.words)]
     if not held:
         return None
-    return any(c.deferred or c.scheduled for c in held)
+    for i in held:
+        lo = hi = i
+        while lo > 0 and _and_joined(analysis.text, clauses[lo - 1], clauses[lo]):
+            lo -= 1
+        while hi + 1 < len(clauses) and _and_joined(analysis.text, clauses[hi], clauses[hi + 1]):
+            hi += 1
+        if any(c.deferred or c.scheduled for c in clauses[lo:hi + 1]):
+            return True  # a time or condition on a coordinated group covers all of it
+    return False
+
+
+_COORDINATORS = frozenset({"and", "plus", "also"})
+
+
+def _and_joined(text: str, first: Clause, second: Clause) -> bool:
+    """Whether only and/plus/also (no "then", comma or sentence break) joins the
+    two clauses: a deferral phrase on either then covers both (D28)."""
+    if second.sep != "conj":
+        return False
+    between = text[first.end:second.start]
+    words = _WORD_RE.findall(between)
+    return bool(words) and all(w in _COORDINATORS for w in words) and not re.search(r"[,.;!?\n]", between)
 
 
 def has_deferral(query: Optional[str], assistant_names: Iterable[str] = ()) -> bool:
