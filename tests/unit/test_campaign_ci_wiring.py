@@ -78,6 +78,9 @@ GLOBS = (
     "tests/unit/test_identity_routes.py",
     "tests/unit/test_synthesize.py",
     "tests/unit/test_gateway_spoken_failure.py",
+    "tests/unit/test_rag_region_config.py",
+    "tests/unit/test_transit_tool_wiring.py",
+    "tests/unit/test_base_knowledge_public_caller_headers.py",
     "tests/unit/test_model_literal_drift.py",
     "tests/unit/test_clause_rule.py",
     "tests/unit/test_command_text.py",
@@ -206,6 +209,7 @@ CAMPAIGN_TESTS = (
     "admin/backend/tests/test_household_settings_routes.py",
     "admin/backend/tests/test_household_settings_real_seam.py",
     "admin/backend/tests/integration/test_household_settings_postgres.py",
+    "tests/unit/test_household_rag_readers.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

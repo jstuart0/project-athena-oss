@@ -512,7 +512,7 @@ def test_R8_amtrak_unset_schedule_400_query_error_dict_health_null(monkeypatch):
 
 def test_R8_amtrak_set_default_origin_uppercased(monkeypatch):
     module = _reload_amtrak(monkeypatch, DEFAULT_AMTRAK_STATION="was")
-    assert module.DEFAULT_ORIGIN == "WAS"
+    assert module._default_origin() == "WAS"
 
 
 # ---------------------------------------------------------------------------

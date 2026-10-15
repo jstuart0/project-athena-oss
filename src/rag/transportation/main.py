@@ -1,11 +1,13 @@
 """Transportation RAG Service - Region-Configurable Transit Integration
 
-Provides transit data for an operator-configured region via two JSON env
-vars: TRANSIT_GTFS_FEEDS (GTFS feed URLs) and TRANSIT_STATIC_SERVICES
-(non-GTFS services with fixed schedules, e.g. a ferry or water taxi). See
-.env.example for the schema and CONTRIBUTING.md's SSRF guard section for the
-per-feed allow_private flag. Neither variable set means the service reports
-"not configured" rather than serving any hardcoded region's data.
+Provides transit data for a configured region: GTFS feeds and non-GTFS static
+services with fixed schedules (e.g. a ferry or water taxi). They are set under
+"Directions & Local Area" in the admin UI, with the TRANSIT_GTFS_FEEDS and
+TRANSIT_STATIC_SERVICES env vars as the fallback (see .env.example for the
+schema and CONTRIBUTING.md's SSRF guard section for the per-feed allow_private
+flag, which only an env feed can carry). Nothing set means the service reports
+"not configured" rather than serving any hardcoded region's data. A change in
+the admin UI is picked up within a minute and reloads the data.
 
 Endpoints:
 - GET /health - Health check
@@ -29,7 +31,7 @@ from typing import Dict, Any, List, NamedTuple, Optional, Tuple
 from dataclasses import dataclass, asdict
 from math import radians, sin, cos, sqrt, atan2
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
 import httpx
 from contextlib import asynccontextmanager
@@ -38,12 +40,15 @@ from bs4 import BeautifulSoup
 # Import shared utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
+from shared import household
 from shared.cache import CacheClient
 from shared.config import get_config
+from shared.household import TransitSettings
+from shared.household_settings import url_host
 from shared.local_time import local_now
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
-from shared.url_safety import safe_get, SsrfBlockedError
+from shared.url_safety import SsrfBlockedError, fetch_failure_reason, safe_get
 
 # Configure logging
 logger = configure_logging("transportation-rag")
@@ -56,15 +61,22 @@ SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8025"))
 
 _BOUNDS_KEYS = ("min_lat", "max_lat", "min_lon", "max_lon")
 
+HOUSEHOLD_POLL_SECONDS = 60.0
+NOT_CONFIGURED_MESSAGE = (
+    "not configured: add transit feeds or static services under Directions & Local Area "
+    "in the admin UI (or set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES)"
+)
+
 
 class TransitConfig(NamedTuple):
-    """Parsed TRANSIT_GTFS_FEEDS / TRANSIT_STATIC_SERVICES config.
+    """Parsed transit config (admin settings, else TRANSIT_GTFS_FEEDS /
+    TRANSIT_STATIC_SERVICES).
 
     Never raises: a malformed value produces configured=False plus an error
     string naming the key and, where applicable, the feed/service id -- so
     one operator typo can only make this service report not-configured, not
     crash-loop the pod (every RAG deployment shares one ConfigMap via
-    envFrom).
+    envFrom). The error never carries a URL.
     """
     configured: bool
     feeds: Dict[str, Dict[str, Any]]
@@ -73,7 +85,12 @@ class TransitConfig(NamedTuple):
     error: Optional[str]
 
 
-def _validate_bounds(feed_id: str, bounds: Any) -> Tuple[Optional[str], Optional[Dict[str, float]]]:
+def _where(item: Dict[str, Any], env_name: str) -> str:
+    """Names the setting an item came from in an error: the env var, or the admin section."""
+    return env_name if item.get("origin") == "env" else "Transit settings"
+
+
+def _validate_bounds(feed_id: str, bounds: Any, where: str = "TRANSIT_GTFS_FEEDS") -> Tuple[Optional[str], Optional[Dict[str, float]]]:
     """Validate a feed's optional `bounds` box. Returns (error, None) when
     invalid, or (None, normalized_bounds) when valid -- normalized_bounds
     has every value coerced to float (DC14 item 5), so a JSON author who
@@ -83,80 +100,82 @@ def _validate_bounds(feed_id: str, bounds: Any) -> Tuple[Optional[str], Optional
     filtered. Comparisons at filter time are exclusive at the edges, so
     bounds here are validated as strict min < max (2.2, R11)."""
     if not isinstance(bounds, dict) or set(bounds.keys()) != set(_BOUNDS_KEYS):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds must have exactly {sorted(_BOUNDS_KEYS)}", None
+        return f"{where}: feed '{feed_id}' bounds must have exactly {sorted(_BOUNDS_KEYS)}", None
     try:
         min_lat, max_lat, min_lon, max_lon = (float(bounds[k]) for k in _BOUNDS_KEYS)
     except (TypeError, ValueError):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds values must be numeric", None
+        return f"{where}: feed '{feed_id}' bounds values must be numeric", None
     if not (min_lat < max_lat):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lat must be less than max_lat", None
+        return f"{where}: feed '{feed_id}' bounds min_lat must be less than max_lat", None
     if not (min_lon < max_lon):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lon must be less than max_lon", None
+        return f"{where}: feed '{feed_id}' bounds min_lon must be less than max_lon", None
     normalized = {"min_lat": min_lat, "max_lat": max_lat, "min_lon": min_lon, "max_lon": max_lon}
     return None, normalized
 
 
-def load_transit_config(cfg) -> TransitConfig:
-    """Parse TRANSIT_* config. Never raises."""
-    region_name = cfg.transit_region_name
+def load_transit_config(settings: TransitSettings) -> TransitConfig:
+    """Check the resolved transit settings. Never raises."""
+    region_name = settings.region_name
+    if settings.error:
+        return TransitConfig(False, {}, {}, region_name, settings.error)
     feeds: Dict[str, Dict[str, Any]] = {}
     static_services: Dict[str, Dict[str, Any]] = {}
 
-    feeds_raw = cfg.transit_gtfs_feeds
-    if feeds_raw:
-        try:
-            parsed = json.loads(feeds_raw)
-        except json.JSONDecodeError as e:
-            return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: invalid JSON: {e}")
-        if not isinstance(parsed, dict):
-            return TransitConfig(False, {}, {}, region_name, "TRANSIT_GTFS_FEEDS: must be a JSON object")
-        for feed_id, feed in parsed.items():
-            if not isinstance(feed, dict) or not feed.get("name"):
-                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' missing 'name'")
-            if not feed.get("url"):
-                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' missing 'url'")
-            bounds = feed.get("bounds")
-            if bounds is not None:
-                err, normalized_bounds = _validate_bounds(feed_id, bounds)
-                if err:
-                    return TransitConfig(False, {}, {}, region_name, err)
-                feed = {**feed, "bounds": normalized_bounds}
-            feeds[feed_id] = feed
+    for feed in settings.feeds:
+        feed_id = feed["id"]
+        where = _where(feed, "TRANSIT_GTFS_FEEDS")
+        if not feed.get("name"):
+            return TransitConfig(False, {}, {}, region_name, f"{where}: feed '{feed_id}' missing 'name'")
+        if not feed.get("url"):
+            return TransitConfig(False, {}, {}, region_name, f"{where}: feed '{feed_id}' missing 'url'")
+        bounds = feed.get("bounds")
+        if bounds is not None:
+            err, normalized_bounds = _validate_bounds(feed_id, bounds, where)
+            if err:
+                return TransitConfig(False, {}, {}, region_name, err)
+            feed = {**feed, "bounds": normalized_bounds}
+        feeds[feed_id] = feed
 
-    static_raw = cfg.transit_static_services
-    if static_raw:
-        try:
-            parsed = json.loads(static_raw)
-        except json.JSONDecodeError as e:
-            return TransitConfig(False, {}, {}, region_name, f"TRANSIT_STATIC_SERVICES: invalid JSON: {e}")
-        if not isinstance(parsed, dict):
-            return TransitConfig(False, {}, {}, region_name, "TRANSIT_STATIC_SERVICES: must be a JSON object")
-        for service_id, svc in parsed.items():
-            if not isinstance(svc, dict) or not svc.get("name"):
-                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_STATIC_SERVICES: service '{service_id}' missing 'name'")
-            static_services[service_id] = svc
+    for svc in settings.static_services:
+        service_id = svc["id"]
+        if not svc.get("name"):
+            where = _where(svc, "TRANSIT_STATIC_SERVICES")
+            return TransitConfig(False, {}, {}, region_name, f"{where}: service '{service_id}' missing 'name'")
+        static_services[service_id] = svc
 
     configured = bool(feeds) or bool(static_services)
     return TransitConfig(configured, feeds, static_services, region_name, None)
 
 
-transit_config: TransitConfig = load_transit_config(get_config())
+transit_config: TransitConfig = load_transit_config(household.transit())
 
 # Per-feed fetch failures (e.g. SSRF-blocked), surfaced in /health's message.
+# Reasons never carry a URL (see shared.url_safety.fetch_failure_reason).
 fetch_errors: Dict[str, str] = {}
+
+# Reload state (D16): each change of config bumps the generation, cancels the
+# previous reload and commits only if it is still the newest.
+_generation = 0
+_reload_task: Optional["asyncio.Task[None]"] = None
+_target: Optional[TransitConfig] = None
+_poll_task: Optional["asyncio.Task[None]"] = None
 
 # Cache client
 cache: Optional[CacheClient] = None
 
+def _empty_transit_data() -> Dict[str, Any]:
+    return {
+        "stops": {},       # stop_id -> stop info
+        "routes": {},      # route_id -> route info
+        "trips": {},       # trip_id -> trip info
+        "stop_times": {},  # stop_id -> list of stop times
+        "agencies": {},    # agency_id -> agency info
+        "last_updated": None
+    }
+
+
 # In-memory transit data
-transit_data: Dict[str, Any] = {
-    "stops": {},       # stop_id -> stop info
-    "routes": {},      # route_id -> route info
-    "trips": {},       # trip_id -> trip info
-    "stop_times": {},  # stop_id -> list of stop times
-    "agencies": {},    # agency_id -> agency info
-    "last_updated": None
-}
+transit_data: Dict[str, Any] = _empty_transit_data()
 
 
 @dataclass
@@ -224,9 +243,14 @@ def _in_bounds(bounds: Optional[Dict[str, float]], lat: float, lon: float) -> bo
     return bounds["min_lat"] < lat < bounds["max_lat"] and bounds["min_lon"] < lon < bounds["max_lon"]
 
 
-async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Download and parse a GTFS feed."""
-    logger.info(f"Downloading GTFS feed: {feed_id} from {feed_config['url']}")
+async def download_and_parse_gtfs(
+    feed_id: str, feed_config: Dict[str, Any], errors: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Download and parse a GTFS feed. A failure is recorded in ``errors``
+    (default: the module's ``fetch_errors``) as a reason without the URL."""
+    if errors is None:
+        errors = fetch_errors
+    logger.info(f"Downloading GTFS feed: {feed_id} from {url_host(feed_config['url'])}")
 
     result = {
         "stops": [],
@@ -242,13 +266,14 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
     # D13: operator-configured fetch URL. By default no
     # allowed_private_hosts is passed, so every hop -- including the first
     # -- is validated against the private-address block. allow_private:true
-    # on this feed exempts only this feed's own hostname, on any hop; a
-    # redirect to any OTHER private host is still blocked. Stricter than the
+    # on an env-configured feed exempts only this feed's own hostname, on any
+    # hop; a redirect to any OTHER private host is still blocked. An admin
+    # feed never gets the exemption, whatever it carries. Stricter than the
     # CONTRIBUTING.md Class 3 exemption because this fetches third-party
     # content and a hijacked upstream redirect shouldn't reach
     # cluster-internal addresses.
     safe_get_kwargs: Dict[str, Any] = {}
-    if feed_config.get("allow_private"):
+    if feed_config.get("origin") == "env" and feed_config.get("allow_private"):
         safe_get_kwargs["allowed_private_hosts"] = [httpx.URL(url).host]
 
     try:
@@ -261,12 +286,14 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
         )
         response.raise_for_status()
     except SsrfBlockedError as e:
-        logger.warning("transit_feed_ssrf_blocked", feed_id=feed_id, reason=str(e))
-        fetch_errors[feed_id] = str(e)
+        reason = fetch_failure_reason(e, url)
+        logger.warning("transit_feed_ssrf_blocked", feed_id=feed_id, reason=reason)
+        errors[feed_id] = reason
         return result
     except Exception as e:
-        logger.error(f"Error downloading/parsing {feed_id}: {e}")
-        fetch_errors[feed_id] = str(e)
+        reason = fetch_failure_reason(e, url)
+        logger.error(f"Error downloading {feed_id}: {reason}")
+        errors[feed_id] = reason
         return result
 
     try:
@@ -350,40 +377,33 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
                         })
 
         logger.info(f"Parsed {feed_id}: {len(result['stops'])} stops, {len(result['routes'])} routes, {len(result['stop_times'])} stop_times")
-        fetch_errors.pop(feed_id, None)
+        errors.pop(feed_id, None)
         return result
 
     except Exception as e:
-        logger.error(f"Error downloading/parsing {feed_id}: {e}")
-        fetch_errors[feed_id] = str(e)
+        logger.error(f"Error parsing {feed_id}: {type(e).__name__}")
+        errors[feed_id] = f"{type(e).__name__} parsing the feed from {url_host(url)}"
         return result
 
 
-async def load_gtfs_data():
-    """Load all configured GTFS feeds and static services into memory."""
-    global transit_data
-
-    if not transit_config.configured:
-        logger.warning("transit_not_configured")
-        return
-
+async def load_gtfs_data(cfg: TransitConfig) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Fetch every feed of ``cfg`` (one at a time, so the memory peak is one
+    feed) and merge the static services. Returns the new data and the per-feed
+    errors; it never touches the module's state, so a superseded load can't leak."""
     logger.info("Loading GTFS data from all configured feeds...")
 
     all_stops = {}
     all_routes = {}
     all_stop_times = {}
     all_agencies = {}
+    errors: Dict[str, str] = {}
 
-    # Download and parse each feed
-    tasks = []
-    for feed_id, feed_config in transit_config.feeds.items():
-        tasks.append(download_and_parse_gtfs(feed_id, feed_config))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for feed_id, result in zip(transit_config.feeds.keys(), results):
-        if isinstance(result, Exception):
-            logger.error(f"Failed to load {feed_id}: {result}")
+    for feed_id, feed_config in cfg.feeds.items():
+        try:
+            result = await download_and_parse_gtfs(feed_id, feed_config, errors)
+        except Exception as e:
+            logger.error(f"Failed to load {feed_id}: {type(e).__name__}")
+            errors[feed_id] = f"{type(e).__name__} loading the feed"
             continue
 
         # Merge data
@@ -403,7 +423,7 @@ async def load_gtfs_data():
             all_agencies[agency["agency_id"]] = agency
 
     # Add static-service stops (e.g. a ferry not modeled as GTFS)
-    for service_id, service in transit_config.static_services.items():
+    for service_id, service in cfg.static_services.items():
         for i, stop in enumerate(service.get("stops", [])):
             stop_id = f"{service_id}_{i}"
             all_stops[stop_id] = {
@@ -422,35 +442,108 @@ async def load_gtfs_data():
                 }
             }
 
-    # Update global data
-    transit_data = {
+    data = {
         "stops": all_stops,
         "routes": all_routes,
         "stop_times": all_stop_times,
         "agencies": all_agencies,
         "last_updated": datetime.now().isoformat()
     }
+    return data, errors
 
-    # Cache summary stats
-    if cache:
-        await cache.set(
-            "transportation:stats",
-            {
-                "total_stops": len(all_stops),
-                "total_routes": len(all_routes),
-                "total_stop_times": sum(len(v) for v in all_stop_times.values()),
-                "last_updated": transit_data["last_updated"]
-            },
-            ttl=86400
-        )
 
-    logger.info(f"Loaded {len(all_stops)} stops, {len(all_routes)} routes")
+async def _run_reload(cfg: TransitConfig, generation: int) -> None:
+    """Load ``cfg`` and commit it if no newer config has arrived. A failure
+    keeps the previous data and config, and lets the next poll try again."""
+    global transit_config, transit_data, _target
+    try:
+        if not cfg.configured:
+            logger.warning("transit_not_configured")
+            data, errors = _empty_transit_data(), {}
+        else:
+            data, errors = await load_gtfs_data(cfg)
+        if generation != _generation:
+            return
+        transit_config, transit_data = cfg, data
+        fetch_errors.clear()
+        fetch_errors.update(errors)
+        logger.info(f"Loaded {len(data['stops'])} stops, {len(data['routes'])} routes")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"transit_reload_failed error_type={type(e).__name__}")
+        if generation == _generation:
+            _target = None
+        return
+
+    if cache and cfg.configured:
+        try:
+            await cache.set(
+                "transportation:stats",
+                {
+                    "total_stops": len(data["stops"]),
+                    "total_routes": len(data["routes"]),
+                    "total_stop_times": sum(len(v) for v in data["stop_times"].values()),
+                    "last_updated": data["last_updated"]
+                },
+                ttl=86400
+            )
+        except Exception as e:
+            logger.warning(f"transit_stats_cache_failed error_type={type(e).__name__}")
+
+
+async def _cancel_and_wait(task: Optional["asyncio.Task[None]"]) -> None:
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def apply_transit_config(cfg: TransitConfig, *, force: bool = False) -> bool:
+    """Make ``cfg`` the config to serve. Does nothing when it equals the one
+    already loading or loaded (unless ``force``); otherwise it supersedes any
+    reload in flight and starts a new one. Returns whether a reload started."""
+    global _generation, _reload_task, _target
+    if cfg == _target and not force:
+        return False
+    _generation += 1
+    generation = _generation
+    await _cancel_and_wait(_reload_task)
+    if generation != _generation:
+        return False
+    _target = cfg
+    _reload_task = asyncio.create_task(_run_reload(cfg, generation))
+    return True
+
+
+async def sync_household_config() -> None:
+    """One poll: refresh the household snapshot and apply what it resolves to.
+    Never raises (the poll loop survives a bad cycle)."""
+    try:
+        await household.reader().current()
+        await apply_transit_config(load_transit_config(household.transit()))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"transit_household_sync_failed error_type={type(e).__name__}")
+
+
+async def poll_household_config(sleep=asyncio.sleep) -> None:
+    while True:
+        await sync_household_config()
+        await sleep(HOUSEHOLD_POLL_SECONDS)
+
+
+async def _stop_background() -> None:
+    global _poll_task
+    await _cancel_and_wait(_poll_task)
+    _poll_task = None
+    await _cancel_and_wait(_reload_task)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    global cache
+    global cache, _poll_task
 
     # Startup
     logger.info("Starting Transportation RAG service")
@@ -459,16 +552,17 @@ async def lifespan(app: FastAPI):
     cache = CacheClient(url=REDIS_URL)
     await cache.connect()
 
-    if not transit_config.configured:
-        logger.warning("transit_not_configured")
-    else:
-        # Load GTFS data in background
-        asyncio.create_task(load_gtfs_data())
+    household_reader = household.configure(sections=("transit",))
+    await household_reader.current()
+    await sync_household_config()
+    _poll_task = asyncio.create_task(poll_household_config())
 
     yield
 
     # Shutdown
     logger.info("Shutting down Transportation RAG service")
+    await _stop_background()
+    await household_reader.aclose()
     if cache:
         await cache.disconnect()
 
@@ -484,6 +578,15 @@ app = FastAPI(
 setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 
 
+def _public_feed_config(feed: Dict[str, Any]) -> Dict[str, Any]:
+    """A feed's settings as shown to callers: the host instead of the URL (a
+    feed URL can carry a key), and nothing about where the feed came from."""
+    shown = {k: v for k, v in feed.items() if k not in ("url", "origin", "allow_private")}
+    if "url" in feed:
+        shown["host"] = url_host(feed["url"])
+    return shown
+
+
 async def require_transit_configured():
     """FastAPI dependency: 503 when no transit region is configured.
 
@@ -493,7 +596,8 @@ async def require_transit_configured():
     if not transit_config.configured:
         raise HTTPException(
             status_code=503,
-            detail="Transit region not configured: set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES",
+            detail="Transit region not configured: add feeds or static services under Directions & Local Area "
+                   "in the admin UI (or set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES)",
         )
 
 
@@ -502,7 +606,7 @@ async def health_check():
     """Health check endpoint."""
     message = None
     if not transit_config.configured:
-        message = transit_config.error or "not configured: set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES"
+        message = transit_config.error or NOT_CONFIGURED_MESSAGE
     elif fetch_errors:
         message = "; ".join(f"{fid}: {reason}" for fid, reason in fetch_errors.items())
 
@@ -681,7 +785,7 @@ async def get_route_details(route_id: str):
     # This would require trips.txt parsing - simplified for now
     return {
         "route": route,
-        "feed_config": transit_config.feeds.get(route["feed_id"], {})
+        "feed_config": _public_feed_config(transit_config.feeds.get(route["feed_id"], {}))
     }
 
 
@@ -758,9 +862,9 @@ async def get_agencies():
 
 
 @app.post("/transit/refresh", dependencies=[Depends(require_transit_configured)])
-async def refresh_data(background_tasks: BackgroundTasks):
+async def refresh_data():
     """Trigger refresh of GTFS data."""
-    background_tasks.add_task(load_gtfs_data)
+    await apply_transit_config(_target or transit_config, force=True)
     return {"status": "refresh_started", "message": "GTFS data refresh initiated"}
 
 

@@ -109,6 +109,32 @@ jobs:
         run: |
           python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_reader.py
 
+      # The gateway and the four RAG services read household settings. The
+      # services' main.py files are loaded under private names with no module
+      # stubs. Each file that sets env or sys.modules at module scope runs alone.
+      - name: Run the household RAG and gateway reader tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_rag_readers.py
+
+      - name: Run the region-configurable RAG tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_rag_region_config.py
+
+      - name: Run the base-knowledge caller header tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_base_knowledge_public_caller_headers.py
+
+      # T7 imports an admin-backend Alembic revision and needs alembic, which the
+      # orchestrator's locked requirements don't carry, so it is deselected here
+      # (no workflow ran this file before).
+      - name: Run the transit tool wiring tests (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_transit_tool_wiring.py --deselect tests/unit/test_transit_tool_wiring.py::test_T7_schema_equality_and_revision_chain
+
       - name: Run the context continuation tests (own process)
         shell: bash
         run: |

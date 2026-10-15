@@ -1,11 +1,13 @@
 """Community Events RAG Service - Region-Configurable Events Aggregator
 
-Scrapes and aggregates community events from operator-configured local
-sources (COMMUNITY_EVENTS_SOURCES, a JSON list). Four scraper types are
+Scrapes and aggregates community events from configured local sources. They
+are set under "Directions & Local Area" in the admin UI, with
+COMMUNITY_EVENTS_SOURCES (a JSON list) as the fallback. Four scraper types are
 supported: link_scan, event_cards, tribe_events_api, squarespace_eventlist
 (see .env.example for the schema). link_scan and event_cards are best-effort
 heuristics, validated only against their reference sites -- a source's HTML
-structure can drift without notice.
+structure can drift without notice. A change in the admin UI is picked up
+within a minute.
 
 Events are cached in Redis with 24-hour TTL and refreshed daily.
 
@@ -25,7 +27,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from itertools import zip_longest
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from contextlib import asynccontextmanager
 
 # Add parent directory to path for imports
@@ -38,11 +40,13 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
-from shared.config import get_config
+from shared import household
+from shared.household import CommunitySettings
+from shared.household_settings import url_host
 from shared.local_time import local_now, local_today, local_tz
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
-from shared.url_safety import safe_get, SsrfBlockedError
+from shared.url_safety import SsrfBlockedError, fetch_failure_reason, safe_get
 
 logger = configure_logging("community-events-rag")
 
@@ -55,6 +59,11 @@ SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8026"))
 # any K8s Service named "redis", which breaks int() casts at import time.
 REDIS_URL = os.getenv("COMMUNITY_EVENTS_REDIS_URL", "redis://localhost:6379/1")
 CACHE_TTL = 86400  # 24 hours in seconds
+HOUSEHOLD_POLL_SECONDS = 60.0
+NOT_CONFIGURED_MESSAGE = (
+    "not configured: add event sources under Directions & Local Area in the admin UI "
+    "(or set COMMUNITY_EVENTS_SOURCES)"
+)
 
 # Redis keys for sorted set storage
 REDIS_KEY_BY_DATE = "community_events:by_date"  # Sorted set: score=timestamp, value=event_json
@@ -100,42 +109,39 @@ class EventSource:
     regions: List[str] = field(default_factory=list)
     max_bytes: Optional[int] = None
     allow_private: bool = False
+    # "env" or "admin". Only an env source may keep a private host (allow_private).
+    origin: str = "admin"
 
 
 class CommunityEventsConfig(NamedTuple):
-    """Parsed COMMUNITY_EVENTS_SOURCES config. Never raises."""
+    """Parsed community-events config (admin settings, else COMMUNITY_EVENTS_SOURCES).
+    Never raises; an error never carries a URL."""
     configured: bool
     sources: List[EventSource]
     error: Optional[str]
 
 
-def load_event_sources(cfg) -> CommunityEventsConfig:
-    """Parse COMMUNITY_EVENTS_SOURCES. Never raises."""
-    raw = cfg.community_events_sources
-    if not raw:
+def load_event_sources(settings: CommunitySettings) -> CommunityEventsConfig:
+    """Check the resolved community-event sources. Never raises."""
+    if settings.error:
+        return CommunityEventsConfig(False, [], settings.error)
+    if not settings.sources:
         return CommunityEventsConfig(False, [], None)
 
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: invalid JSON: {e}")
-    if not isinstance(parsed, list):
-        return CommunityEventsConfig(False, [], "COMMUNITY_EVENTS_SOURCES: must be a JSON array")
-
     sources: List[EventSource] = []
-    for i, item in enumerate(parsed):
-        if not isinstance(item, dict):
-            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source at index {i} must be an object")
+    for i, item in enumerate(settings.sources):
+        origin = item.get("origin", "admin")
+        where = "COMMUNITY_EVENTS_SOURCES" if origin == "env" else "Community event sources"
         name = item.get("name")
         if not name:
-            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source at index {i} missing 'name'")
+            return CommunityEventsConfig(False, [], f"{where}: source at index {i} missing 'name'")
         source_type = item.get("type")
         if source_type not in _TYPE_DEFAULTS:
             return CommunityEventsConfig(
-                False, [], f"COMMUNITY_EVENTS_SOURCES: source '{name}' has unknown type '{source_type}'"
+                False, [], f"{where}: source '{name}' has unknown type '{source_type}'"
             )
         if not item.get("url"):
-            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source '{name}' missing 'url'")
+            return CommunityEventsConfig(False, [], f"{where}: source '{name}' missing 'url'")
 
         defaults = _TYPE_DEFAULTS[source_type]
         if source_type == "tribe_events_api":
@@ -160,22 +166,32 @@ def load_event_sources(cfg) -> CommunityEventsConfig:
             regions=item.get("regions") or [],
             max_bytes=item.get("max_bytes"),
             allow_private=bool(item.get("allow_private", False)),
+            origin=origin,
         ))
 
     return CommunityEventsConfig(True, sources, None)
 
 
-event_sources_config: CommunityEventsConfig = load_event_sources(get_config())
+event_sources_config: CommunityEventsConfig = load_event_sources(household.community_sources())
 
 # Per-source fetch failures (e.g. SSRF-blocked), surfaced in /health's message.
+# Reasons never carry a URL (see shared.url_safety.fetch_failure_reason).
 fetch_errors: Dict[str, str] = {}
+
+# Reload state (D16): each change of config bumps the generation, cancels the
+# previous reload and commits only if it is still the newest.
+_generation = 0
+_reload_task: Optional["asyncio.Task[None]"] = None
+_target: Optional[CommunityEventsConfig] = None
+_poll_task: Optional["asyncio.Task[None]"] = None
 
 
 def _private_kwargs(src: EventSource) -> Dict[str, Any]:
     """D13: a private host is permitted ONLY for this source's own hostname,
-    and only when the source opts in. By default no allowed_private_hosts
-    is passed, so every hop -- including the first -- is validated."""
-    if src.allow_private:
+    and only when an env-configured source opts in. An admin source never gets
+    it. By default no allowed_private_hosts is passed, so every hop --
+    including the first -- is validated."""
+    if src.origin == "env" and src.allow_private:
         return {"allowed_private_hosts": [httpx.URL(src.url).host]}
     return {}
 
@@ -291,14 +307,16 @@ def extract_date_from_text(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def scrape_link_scan_source(src: EventSource) -> List[Dict[str, Any]]:
+async def scrape_link_scan_source(src: EventSource, errors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """link_scan: find <a> tags whose href contains src.link_path, then walk
     up to the nearest container for date/location/description. Best-effort
     heuristic (D3), validated only against its reference site."""
+    if errors is None:
+        errors = fetch_errors
     events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_link_scan_source", name=src.name, url=src.url)
+        logger.info("scraping_link_scan_source", name=src.name, host=url_host(src.url))
 
         response = await safe_get(
             src.url,
@@ -376,30 +394,34 @@ async def scrape_link_scan_source(src: EventSource) -> List[Dict[str, Any]]:
                 })
 
             except Exception as e:
-                logger.warning("event_parse_error", source=src.name, error=str(e))
+                logger.warning("event_parse_error", source=src.name, error_type=type(e).__name__)
                 continue
 
         logger.info("link_scan_scrape_complete", name=src.name, events_found=len(events))
-        fetch_errors.pop(src.name, None)
+        errors.pop(src.name, None)
 
     except SsrfBlockedError as e:
-        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=reason)
+        errors[src.name] = reason
     except Exception as e:
-        logger.error("link_scan_scrape_failed", name=src.name, error=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.error("link_scan_scrape_failed", name=src.name, reason=reason)
+        errors[src.name] = reason
 
     return events
 
 
-async def scrape_event_cards_source(src: EventSource) -> List[Dict[str, Any]]:
+async def scrape_event_cards_source(src: EventSource, errors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """event_cards: find <a> tags whose href contains src.link_path, using
     each link's parent card for title/date/location/description. Best-effort
     heuristic (D3), validated only against its reference site."""
+    if errors is None:
+        errors = fetch_errors
     events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_event_cards_source", name=src.name, url=src.url)
+        logger.info("scraping_event_cards_source", name=src.name, host=url_host(src.url))
 
         response = await safe_get(
             src.url,
@@ -493,30 +515,34 @@ async def scrape_event_cards_source(src: EventSource) -> List[Dict[str, Any]]:
                 })
 
             except Exception as e:
-                logger.warning("event_cards_parse_error", source=src.name, error=str(e))
+                logger.warning("event_cards_parse_error", source=src.name, error_type=type(e).__name__)
                 continue
 
         logger.info("event_cards_scrape_complete", name=src.name, events_found=len(events))
-        fetch_errors.pop(src.name, None)
+        errors.pop(src.name, None)
 
     except SsrfBlockedError as e:
-        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=reason)
+        errors[src.name] = reason
     except Exception as e:
-        logger.error("event_cards_scrape_failed", name=src.name, error=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.error("event_cards_scrape_failed", name=src.name, reason=reason)
+        errors[src.name] = reason
 
     return events
 
 
-async def scrape_tribe_events_api_source(src: EventSource) -> List[Dict[str, Any]]:
+async def scrape_tribe_events_api_source(src: EventSource, errors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """tribe_events_api: The Events Calendar WordPress plugin REST API.
     is_free is always computed per-event from the API's own `cost` field --
     not independently configurable (D3)."""
+    if errors is None:
+        errors = fetch_errors
     events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("fetching_tribe_events_api_source", name=src.name, url=src.url)
+        logger.info("fetching_tribe_events_api_source", name=src.name, host=url_host(src.url))
 
         params = {"per_page": 50, "status": "publish"}
         response = await safe_get(
@@ -579,31 +605,35 @@ async def scrape_tribe_events_api_source(src: EventSource) -> List[Dict[str, Any
                     events.append(event)
 
             except Exception as e:
-                logger.warning("tribe_events_parse_error", source=src.name, error=str(e))
+                logger.warning("tribe_events_parse_error", source=src.name, error_type=type(e).__name__)
                 continue
 
         logger.info("tribe_events_api_fetch_complete", name=src.name, events_found=len(events))
-        fetch_errors.pop(src.name, None)
+        errors.pop(src.name, None)
 
     except SsrfBlockedError as e:
-        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=reason)
+        errors[src.name] = reason
     except Exception as e:
-        logger.error("tribe_events_api_fetch_failed", name=src.name, error=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.error("tribe_events_api_fetch_failed", name=src.name, reason=reason)
+        errors[src.name] = reason
 
     return events
 
 
-async def scrape_squarespace_eventlist_source(src: EventSource) -> List[Dict[str, Any]]:
+async def scrape_squarespace_eventlist_source(src: EventSource, errors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """squarespace_eventlist: Squarespace's own eventlist-title/eventlist-meta
     class structure (structural, not source-specific). src.location_match
     names the substrings that make the last meta item usable as a location;
     otherwise src.default_location is used."""
+    if errors is None:
+        errors = fetch_errors
     events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_squarespace_eventlist_source", name=src.name, url=src.url)
+        logger.info("scraping_squarespace_eventlist_source", name=src.name, host=url_host(src.url))
 
         response = await safe_get(
             src.url,
@@ -697,18 +727,20 @@ async def scrape_squarespace_eventlist_source(src: EventSource) -> List[Dict[str
                 })
 
             except Exception as e:
-                logger.warning("squarespace_eventlist_parse_error", source=src.name, error=str(e))
+                logger.warning("squarespace_eventlist_parse_error", source=src.name, error_type=type(e).__name__)
                 continue
 
         logger.info("squarespace_eventlist_scrape_complete", name=src.name, events_found=len(events))
-        fetch_errors.pop(src.name, None)
+        errors.pop(src.name, None)
 
     except SsrfBlockedError as e:
-        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=reason)
+        errors[src.name] = reason
     except Exception as e:
-        logger.error("squarespace_eventlist_scrape_failed", name=src.name, error=str(e))
-        fetch_errors[src.name] = str(e)
+        reason = fetch_failure_reason(e, src.url)
+        logger.error("squarespace_eventlist_scrape_failed", name=src.name, reason=reason)
+        errors[src.name] = reason
 
     return events
 
@@ -903,22 +935,17 @@ async def cache_events(events: List[Dict[str, Any]]) -> bool:
         return False
 
 
-async def refresh_events_cache() -> List[Dict[str, Any]]:
-    """Refresh the events cache from all configured sources."""
-    if not event_sources_config.configured:
-        logger.warning("community_events_not_configured")
-        return []
-
-    logger.info("refreshing_events_cache")
-
-    tasks = [SCRAPERS[src.type](src) for src in event_sources_config.sources]
+async def scrape_sources(cfg: CommunityEventsConfig, errors: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Scrape every source of ``cfg`` and interleave the events. Failures go
+    to ``errors``; nothing else in the module is touched."""
+    tasks = [SCRAPERS[src.type](src, errors) for src in cfg.sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     source_lists: List[List[Dict[str, Any]]] = []
     counts: Dict[str, int] = {}
-    for src, result in zip(event_sources_config.sources, results):
+    for src, result in zip(cfg.sources, results):
         if isinstance(result, Exception):
-            logger.error("source_scrape_exception", source=src.name, error=str(result))
+            logger.error("source_scrape_exception", source=src.name, error_type=type(result).__name__)
             result = []
         counts[src.name] = len(result)
         source_lists.append(result)
@@ -931,11 +958,37 @@ async def refresh_events_cache() -> List[Dict[str, Any]]:
                 all_events.append(event)
 
     logger.info("total_events_scraped", total=len(all_events), **counts)
-
-    # Cache the results
-    await cache_events(all_events)
-
     return all_events
+
+
+async def refresh_events_cache(cfg: CommunityEventsConfig) -> List[Dict[str, Any]]:
+    """Refresh the events cache from all sources of ``cfg``. Writes nothing if
+    the service has moved to a different config while this was scraping."""
+    if not cfg.configured:
+        logger.warning("community_events_not_configured")
+        return []
+
+    logger.info("refreshing_events_cache")
+    all_events = await scrape_sources(cfg, fetch_errors)
+    if cfg != event_sources_config:
+        logger.info("refresh_superseded")
+        return []
+
+    await cache_events(all_events)
+    return all_events
+
+
+async def clear_events_cache() -> None:
+    """Forget every cached event (the service has no sources any more)."""
+    global in_memory_events, in_memory_cache_time
+    in_memory_events = []
+    in_memory_cache_time = None
+    redis = await get_redis_client()
+    if redis:
+        try:
+            await redis.delete(REDIS_KEY_BY_DATE, REDIS_KEY_NO_DATE, REDIS_KEY_METADATA)
+        except Exception as e:
+            logger.warning("cache_clear_error", error_type=type(e).__name__)
 
 
 async def search_events(
@@ -985,7 +1038,7 @@ async def search_events(
 
     # If cache miss, refresh and re-query
     if not events:
-        await refresh_events_cache()
+        await refresh_events_cache(event_sources_config)
         if query:
             events = await get_all_cached_events()
         elif start_date or end_date:
@@ -1079,35 +1132,98 @@ async def periodic_refresh_task():
         try:
             await asyncio.sleep(REFRESH_INTERVAL)
             logger.info("periodic_refresh_starting", interval_hours=REFRESH_INTERVAL // 3600)
-            await refresh_events_cache()
+            await refresh_events_cache(event_sources_config)
             logger.info("periodic_refresh_completed")
         except asyncio.CancelledError:
             logger.info("periodic_refresh_cancelled")
             break
         except Exception as e:
-            logger.error("periodic_refresh_failed", error=str(e))
+            logger.error("periodic_refresh_failed", error_type=type(e).__name__)
             # Continue running even if refresh fails
+
+
+async def _run_reload(cfg: CommunityEventsConfig, generation: int) -> None:
+    """Scrape ``cfg`` and commit it if no newer config has arrived. A failure
+    keeps the previous events and config, and lets the next poll try again.
+    Going unconfigured empties the cached events."""
+    global event_sources_config, _target
+    try:
+        errors: Dict[str, str] = {}
+        events = await scrape_sources(cfg, errors) if cfg.configured else []
+        if generation != _generation:
+            return
+        event_sources_config = cfg
+        fetch_errors.clear()
+        fetch_errors.update(errors)
+        if cfg.configured:
+            await cache_events(events)
+        else:
+            logger.warning("community_events_not_configured")
+            await clear_events_cache()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("community_reload_failed", error_type=type(e).__name__)
+        if generation == _generation:
+            _target = None
+
+
+async def _cancel_and_wait(task: Optional["asyncio.Task[None]"]) -> None:
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def apply_event_sources(cfg: CommunityEventsConfig) -> bool:
+    """Make ``cfg`` the config to serve. Does nothing when it equals the one
+    already loading or loaded; otherwise it supersedes any reload in flight and
+    starts a new one. Returns whether a reload started."""
+    global _generation, _reload_task, _target
+    if cfg == _target:
+        return False
+    _generation += 1
+    generation = _generation
+    await _cancel_and_wait(_reload_task)
+    if generation != _generation:
+        return False
+    _target = cfg
+    _reload_task = asyncio.create_task(_run_reload(cfg, generation))
+    return True
+
+
+async def sync_household_config() -> None:
+    """One poll: refresh the household snapshot and apply what it resolves to.
+    Never raises (the poll loop survives a bad cycle)."""
+    try:
+        await household.reader().current()
+        await apply_event_sources(load_event_sources(household.community_sources()))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("community_household_sync_failed", error_type=type(e).__name__)
+
+
+async def poll_household_config(sleep=asyncio.sleep) -> None:
+    while True:
+        await sync_household_config()
+        await sleep(HOUSEHOLD_POLL_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
-    global _refresh_task
+    global _refresh_task, _poll_task
 
     logger.info("community_events_service.startup", msg="Initializing Community Events RAG service")
 
-    if not event_sources_config.configured:
-        logger.warning("community_events_not_configured")
-    else:
-        # Initial cache population
-        try:
-            await refresh_events_cache()
-        except Exception as e:
-            logger.warning("initial_cache_failed", error=str(e))
+    household_reader = household.configure(sections=("community_events",))
+    await household_reader.current()
+    await sync_household_config()
+    _poll_task = asyncio.create_task(poll_household_config())
 
-        # Start periodic refresh background task
-        _refresh_task = asyncio.create_task(periodic_refresh_task())
-        logger.info("periodic_refresh_scheduled", interval_hours=REFRESH_INTERVAL // 3600)
+    # The daily refresh always runs: the service may be configured later in the admin UI.
+    _refresh_task = asyncio.create_task(periodic_refresh_task())
+    logger.info("periodic_refresh_scheduled", interval_hours=REFRESH_INTERVAL // 3600)
 
     logger.info("community_events_service.startup.complete")
 
@@ -1116,13 +1232,11 @@ async def lifespan(app: FastAPI):
     # Cleanup
     logger.info("community_events_service.shutdown")
 
-    # Cancel periodic refresh task
-    if _refresh_task:
-        _refresh_task.cancel()
-        try:
-            await _refresh_task
-        except asyncio.CancelledError:
-            pass
+    await _cancel_and_wait(_poll_task)
+    _poll_task = None
+    await _cancel_and_wait(_reload_task)
+    await _cancel_and_wait(_refresh_task)
+    await household_reader.aclose()
 
     if redis_client:
         await redis_client.close()
@@ -1145,7 +1259,8 @@ async def require_community_configured():
     if not event_sources_config.configured:
         raise HTTPException(
             status_code=503,
-            detail="Community events not configured: set COMMUNITY_EVENTS_SOURCES",
+            detail="Community events not configured: add sources under Directions & Local Area "
+                   "in the admin UI (or set COMMUNITY_EVENTS_SOURCES)",
         )
 
 
@@ -1156,7 +1271,7 @@ async def health_check():
 
     message = None
     if not event_sources_config.configured:
-        message = event_sources_config.error or "not configured: set COMMUNITY_EVENTS_SOURCES"
+        message = event_sources_config.error or NOT_CONFIGURED_MESSAGE
     elif fetch_errors:
         message = "; ".join(f"{name}: {reason}" for name, reason in fetch_errors.items())
 
@@ -1223,7 +1338,7 @@ async def refresh_events_endpoint(background_tasks: BackgroundTasks):
     """
     try:
         # Run refresh in background
-        background_tasks.add_task(refresh_events_cache)
+        background_tasks.add_task(refresh_events_cache, event_sources_config)
 
         return JSONResponse(
             status_code=202,
@@ -1247,7 +1362,7 @@ async def get_sources():
             {
                 "name": src.name,
                 "type": src.type,
-                "url": src.url,
+                "host": url_host(src.url),
                 "regions": src.regions,
             }
             for src in event_sources_config.sources

@@ -25,6 +25,7 @@ from pydantic import BaseModel
 # Import shared utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
+from shared import household
 from shared.cache import CacheClient, cached
 from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
@@ -81,6 +82,9 @@ async def lifespan(app: FastAPI):
 
     # Initialize admin client
     admin_client = get_admin_client()
+
+    household_reader = household.configure(sections=("location",))
+    await household_reader.current()
 
     # Try to fetch API key from Admin API
     try:
@@ -177,6 +181,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Directions RAG service")
     await unregister_service("directions")
 
+    await household_reader.aclose()
     if http_client:
         await http_client.aclose()
     if cache:
@@ -259,10 +264,9 @@ def get_default_origin() -> str:
     if isinstance(city, str) and city.strip() and isinstance(state, str) and state.strip():
         return f"{city}, {state}"
 
-    # Fallback: use env-configured default location (empty string if unconfigured).
-    _city = get_config().default_city
-    _state = os.getenv("DEFAULT_STATE", "")
-    return ", ".join(p for p in (_city, _state) if p)
+    # Fallback: the home location from Base Knowledge as the admin UI has it now,
+    # else the env-configured default (empty string if unconfigured).
+    return household.location().text
 
 
 def generate_google_maps_url(
