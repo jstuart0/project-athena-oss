@@ -1731,7 +1731,7 @@
                         </button>
                         <button onclick="showTab('directions-settings')" data-route="directions-settings" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="map-pin" class="sidebar-icon"></i>
-                            <span>Directions</span>
+                            <span>Directions &amp; Local Area</span>
                         </button>
                         <button onclick="showTab('music-config')" data-route="music-config" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="music" class="sidebar-icon"></i>
@@ -2026,11 +2026,18 @@
             <!-- Devices Tab -->
             <div id="tab-devices" class="tab-content hidden">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-semibold text-white">Device Registry</h2>
+                    <h2 class="text-2xl font-semibold text-white">Devices</h2>
                     <button onclick="showCreateDeviceModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
                         ➕ Register Device
                     </button>
                 </div>
+                <section aria-labelledby="household-devices-heading" class="mb-8">
+                    <h2 id="household-devices-heading" class="text-xl font-semibold text-white mb-4">Home Assistant devices Athena uses</h2>
+                    <div id="household-card-lights"></div>
+                    <div id="household-card-bed-warmer"></div>
+                    <div id="household-card-jarvis-web"></div>
+                </section>
+                <h2 class="text-xl font-semibold text-white mb-4">Device registry</h2>
                 <div id="devices-container" class="space-y-4"></div>
             </div>
 
@@ -2417,6 +2424,12 @@
                         <p>Loading origin placeholder settings...</p>
                     </div>
                 </div>
+                <section aria-labelledby="local-travel-heading" class="mt-8">
+                    <h2 id="local-travel-heading" class="text-2xl font-semibold text-white mb-4">Local travel and events</h2>
+                    <div id="household-card-amtrak"></div>
+                    <div id="household-card-transit"></div>
+                    <div id="household-card-community-events"></div>
+                </section>
             </div>
 
             <!-- Music Configuration Tab -->
@@ -4365,6 +4378,8 @@
                     </div>
                 </div>
 
+                <div id="household-card-sms"></div>
+
                 <!-- SMS Settings Section -->
                 <div class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
                     <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
@@ -4776,6 +4791,7 @@
                 <div class="bg-blue-900/20 border border-blue-700/50 rounded-lg p-4 mb-6">
                     <p class="text-blue-200 text-sm">Changes take effect within 60 seconds as the gateway refreshes its configuration cache.</p>
                 </div>
+                <div id="household-card-gateway"></div>
                 <div id="gateway-settings-container">
                     <div class="text-center text-gray-400 py-8">Loading gateway settings...</div>
                 </div>
@@ -5112,11 +5128,11 @@
     <script src="/activity-sidebar.js?v=20260913"></script>
     <script src="/mission-control.js?v=20261014-ha"></script>
     <script src="/voice-pipelines.js?v=20261014-ha"></script>
-    <script src="/memory-context.js?v=20261015-fav2"></script>
+    <script src="/memory-context.js?v=20261015-hs"></script>
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20261015-enter"></script>
 
-    <script src="/app.js?v=20261014-ha2"></script>
+    <script src="/app.js?v=20261015-hs"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20261015-fav2"></script>
     <script src="/routing.js?v=20260913"></script>
@@ -5129,19 +5145,19 @@
     <script src="/base-knowledge.js?v=20261010"></script>
     <script src="/guest-mode.js?v=20260929-cal"></script>
     <script src="/mode-audit.js"></script>
-    <script src="/sms.js?v=20260913"></script>
+    <script src="/sms.js?v=20261015-hs"></script>
     <script src="/llm-components.js?v=20260913"></script>
     <script src="/model-config.js?v=20260913"></script>
     <script src="/model-downloads.js?v=20260913"></script>
     <script src="/cloud-providers.js?v=20260913"></script>
     <script src="/service-bypass.js?v=20260913"></script>
     <script src="/service-control.js?v=20261014-ha"></script>
-    <script src="/gateway-settings.js?v=20260913"></script>
+    <script src="/gateway-settings.js?v=20261015-hs"></script>
     <script src="/room-groups.js?v=20260930"></script>
     <script src="/guest-context.js?v=20260930"></script>
     <script src="/calendar-sources.js?v=20260929-cal3"></script>
     <script src="/memory-management.js?v=20260929c"></script>
-    <script src="/directions-settings.js?v=20260927"></script>
+    <script src="/directions-settings.js?v=20261015-hs"></script>
     <script src="/emerging-intents.js?v=20261013"></script>
     <script src="/music-config.js?v=20260913"></script>
     <script src="/room-audio.js?v=20260913"></script>
@@ -5158,6 +5174,7 @@
     <script src="/alerts.js?v=20261013"></script>
     <script src="/conversations.js?v=20261012"></script>
     <script src="/telemetry.js?v=20261001"></script>
+    <script src="/household-settings.js?v=20261015-hs"></script>
     <script src="/escape-html.js?v=20260913"></script>
 </body>
 </html>

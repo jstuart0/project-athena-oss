@@ -270,6 +270,7 @@ function showDirectionsError(message) {
  */
 function initDirectionsSettingsPage() {
     console.log('Initializing directions settings page');
+    if (window.HouseholdSettings) HouseholdSettings.mount('amtrak', 'household-card-amtrak');
     loadDirectionsSettings();
     loadOriginPlaceholderSettings();
 }
