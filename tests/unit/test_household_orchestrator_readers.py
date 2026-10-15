@@ -9,18 +9,26 @@ import re
 import pytest
 from unittest import mock
 
-import shared.config
-from shared import household
-from orchestrator import ha_entity_manager as hem
-from orchestrator import mode_permission as mp
-from orchestrator import room_probe
-from orchestrator import semantic_cache
-from orchestrator.utils import constants
-from shared.base_knowledge_utils import extract_home_address
-from shared.knowledge_tiers import KnowledgeAudience
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
 
-from .test_smart_home_controller_permissions import _controller, _guest_perms, _raw_ha_client
-from . import _room_chat_harness as rch
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+import shared.config  # noqa: E402
+from shared import household  # noqa: E402
+from orchestrator import ha_entity_manager as hem  # noqa: E402
+from orchestrator import mode_permission as mp  # noqa: E402
+from orchestrator import room_probe  # noqa: E402
+from orchestrator import semantic_cache  # noqa: E402
+from orchestrator.utils import constants  # noqa: E402
+from shared.base_knowledge_utils import extract_home_address  # noqa: E402
+from shared.knowledge_tiers import KnowledgeAudience  # noqa: E402
+
+from .test_smart_home_controller_permissions import _controller, _guest_perms, _raw_ha_client  # noqa: E402
+from . import _room_chat_harness as rch  # noqa: E402
 
 OWNER = KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False)
 LED_RING = "light.kitchen_satellite_led_ring"

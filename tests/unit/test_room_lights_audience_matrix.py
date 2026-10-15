@@ -12,12 +12,20 @@ import json
 
 import pytest
 
-from orchestrator import mode_permission as mp
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+from orchestrator import mode_permission as mp  # noqa: E402
 
 from .test_room_light_area_tier import (  # noqa: F401
     TRUSTED_OWNER_WRITES, UNTRUSTED_OWNER_WRITES, Rig, _isolated, guest,
 )
-from .test_room_lights_admin_source import use_sources
+from .test_room_lights_admin_source import use_sources  # noqa: E402
 
 ENV = json.dumps({"study": "light.study_lamp"})
 ADMIN = {"galley": ["light.galley_bulb_1", "light.hall_lamp"], "north": ["light.north_lamp"]}

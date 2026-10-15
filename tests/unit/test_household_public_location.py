@@ -10,10 +10,18 @@ from unittest import mock
 
 import pytest
 
-from shared import household
-from shared.knowledge_tiers import KnowledgeAudience
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
 
-from . import _public_audience_harness as h
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+from shared import household  # noqa: E402
+from shared.knowledge_tiers import KnowledgeAudience  # noqa: E402
+
+from . import _public_audience_harness as h  # noqa: E402
 
 STREET = "123 Main St"
 FULL_TEXT = f"{STREET}, Springfield, IL"

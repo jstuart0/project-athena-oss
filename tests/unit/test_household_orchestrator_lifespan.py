@@ -11,10 +11,18 @@ import time
 import pytest
 from unittest import mock
 
-import shared.config
-from shared import household
-from shared import household_settings
-from orchestrator.nodes import _runtime
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+import shared.config  # noqa: E402
+from shared import household  # noqa: E402
+from shared import household_settings  # noqa: E402
+from orchestrator.nodes import _runtime  # noqa: E402
 
 STARTUP_BUDGET_S = 3.0
 

@@ -13,12 +13,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import mode_permission as mp
-from orchestrator import room_directory as rd
-from orchestrator.nodes import _runtime
-from orchestrator.utterance_kind import classify_utterance
-from shared import household
-from shared.household_settings import RoomLightEntry, RoomLightsSection, SpeakerRoomEntry, SpeakerRoomsSection
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+from orchestrator import mode_permission as mp  # noqa: E402
+from orchestrator import room_directory as rd  # noqa: E402
+from orchestrator.nodes import _runtime  # noqa: E402
+from orchestrator.utterance_kind import classify_utterance  # noqa: E402
+from shared import household  # noqa: E402
+from shared.household_settings import RoomLightEntry, RoomLightsSection, SpeakerRoomEntry, SpeakerRoomsSection  # noqa: E402
 
 from .test_room_light_area_tier import Rig, _isolated, _state, guest, light  # noqa: F401
 

@@ -9,10 +9,18 @@ import time
 
 import pytest
 
-from shared import household
-from shared import household_settings as hs
-from shared.config import _clear_cache_for_tests
-from shared.ha_registry import _DEVICE_KEY, _ENTITY_KEY, room_key as registry_room_key
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+from shared import household  # noqa: E402
+from shared import household_settings as hs  # noqa: E402
+from shared.config import _clear_cache_for_tests  # noqa: E402
+from shared.ha_registry import _DEVICE_KEY, _ENTITY_KEY, room_key as registry_room_key  # noqa: E402
 
 DEV = "a" * 32
 DEV2 = "b" * 32

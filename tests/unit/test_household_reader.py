@@ -13,10 +13,18 @@ import re
 import httpx
 import pytest
 
-from shared import household
-from shared import household_settings as hs
-from shared.admin_config import AdminConfigClient
-from shared.config import _clear_cache_for_tests
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+from shared import household  # noqa: E402
+from shared import household_settings as hs  # noqa: E402
+from shared.admin_config import AdminConfigClient  # noqa: E402
+from shared.config import _clear_cache_for_tests  # noqa: E402
 
 # -- fakes ------------------------------------------------------------------------------------------
 

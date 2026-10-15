@@ -10,7 +10,15 @@ from unittest import mock
 
 import pytest
 
-import shared.config
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+import shared.config  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
