@@ -76,6 +76,9 @@ _NON_ROOM_TOKENS = frozenset({
     "everywhere", "house", "whole", "entire", "both", "each", "one", "up", "down", "mode",
     "scene", "color", "colour", "level", "percent", "bright", "brightness", "status",
     "is", "are", "what", "which", "any", "some", "with", "for", "lit", "group", "area",
+    # Whole-house and location words: a registry area or alias named "Home"
+    # must not turn "is anyone home" or "lights at home" into a room.
+    "home", "here", "there", "inside", "place",
 })
 
 EXCLUSION_PHRASES: Tuple[Tuple[str, ...], ...] = (

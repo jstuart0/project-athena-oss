@@ -2145,6 +2145,12 @@ def _resume_open_task(state: OrchestratorState, prev_context: Any, ref_info: Dic
     return True
 
 
+# "is there anyone in the office", "anybody in the den": a person-in-a-place
+# question. It is an occupancy question only when a room is also named, so
+# "is anyone in the Beatles" is left to the classifier.
+_PEOPLE_IN_ROOM_RE = re.compile(r"\b(?:any|some)(?:one|body)\s+(?:(?:is|are|was|were|else)\s+)?(?:in|inside|at)\b")
+
+
 async def classify_node(state: OrchestratorState) -> OrchestratorState:
     """
     Classify user intent using LLM with Redis caching.
@@ -2895,7 +2901,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         'is anyone in the house', 'based on motion', 'likely here', 'probably home',
         'last motion', 'when was motion', 'where was motion', 'where is there motion'
     ]
-    is_sensor_query = any(p in query_lower for p in sensor_patterns)
+    is_sensor_query = any(p in query_lower for p in sensor_patterns) or (
+        has_room and not room_mention.in_exclusion and bool(_PEOPLE_IN_ROOM_RE.search(query_lower))
+    )
 
     if is_sensor_query:
         logger.info(f"Fast path: sensor/occupancy query detected in query_len={len(state.query)} - classifying as CONTROL")
