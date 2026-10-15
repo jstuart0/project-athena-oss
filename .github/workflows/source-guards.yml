@@ -80,6 +80,14 @@ jobs:
       # Each of these replaces orchestrator.config_loader (or prometheus_client)
       # in sys.modules for the rest of its process, so each runs alone, one
       # pytest command per file.
+      # Sets HA_LIGHT_GROUPS / HA_SATELLITE_ROOM_MAP per test and clears the
+      # config and controller caches, and stubs prometheus_client and langgraph
+      # at import, so it runs alone.
+      - name: Run the room lights golden baseline (own process)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_room_lights_golden.py
+
       - name: Run the validate node tests (own process)
         shell: bash
         run: |

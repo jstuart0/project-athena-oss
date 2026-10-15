@@ -115,6 +115,7 @@ GLOBS = (
     "admin/backend/tests/test_core_probe.py",
     "admin/backend/tests/test_stuck_sensor_alerts.py",
     "admin/backend/tests/test_oss_profiles_*.py",
+    "tests/unit/test_room_lights_*.py",
 )
 
 # The test files this campaign adds, pinned so a CI checkout at depth 1 (no
@@ -224,6 +225,7 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_admin_frontend_household_settings.py",
     "tests/unit/test_household_rag_readers.py",
     "tests/unit/test_admin_frontend_household_lists.py",
+    "tests/unit/test_room_lights_golden.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.
