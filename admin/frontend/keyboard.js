@@ -157,6 +157,12 @@
             meta: event.metaKey
         });
 
+        // Enter belongs to whatever has focus (a button, a link) unless that is a
+        // sidebar item; cancelling it elsewhere would break every button.
+        if (event.key === 'Enter' && !(event.target && event.target.classList && event.target.classList.contains('sidebar-item'))) {
+            return;
+        }
+
         const shortcut = shortcuts.get(shortcutKey);
         if (shortcut) {
             event.preventDefault();

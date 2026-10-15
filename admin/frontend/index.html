@@ -2920,7 +2920,7 @@
                 <div id="favorite-teams-card" class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
                     <div class="flex justify-between items-start gap-4 mb-2">
                         <div>
-                            <h3 id="favorite-teams-heading" class="text-lg font-semibold text-white">Favourite teams</h3>
+                            <h3 id="favorite-teams-heading" tabindex="-1" class="text-lg font-semibold text-white focus:outline-none">Favourite teams</h3>
                             <p class="text-sm text-gray-400 mt-1">The teams Athena means by "we" and "us"</p>
                         </div>
                         <div class="flex items-center gap-3 shrink-0">
@@ -2934,7 +2934,7 @@
                     <div id="favorite-teams-container" aria-labelledby="favorite-teams-heading">
                         <p class="text-sm text-gray-400">Loading…</p>
                     </div>
-                    <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+                    <div id="favorite-teams-add-row" class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
                         <div>
                             <label for="favorite-team-name" class="block text-sm font-medium text-gray-400 mb-2">Team name</label>
                             <input type="text" id="favorite-team-name" maxlength="64" autocomplete="off" disabled aria-describedby="favorite-team-name-error"
@@ -5112,13 +5112,13 @@
     <script src="/activity-sidebar.js?v=20260913"></script>
     <script src="/mission-control.js?v=20261014-ha"></script>
     <script src="/voice-pipelines.js?v=20261014-ha"></script>
-    <script src="/memory-context.js?v=20261015-fav"></script>
+    <script src="/memory-context.js?v=20261015-fav2"></script>
     <script src="/integrations.js?v=20260927"></script>
-    <script src="/keyboard.js?v=20260108"></script>
+    <script src="/keyboard.js?v=20261015-enter"></script>
 
     <script src="/app.js?v=20261014-ha2"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
-    <script src="/conversation.js?v=20261015-fav"></script>
+    <script src="/conversation.js?v=20261015-fav2"></script>
     <script src="/routing.js?v=20260913"></script>
     <script src="/metrics.js?v=20260913"></script>
     <script src="/analytics.js?v=20260913"></script>

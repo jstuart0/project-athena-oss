@@ -126,6 +126,17 @@ def test_the_favourite_teams_card_is_the_first_card_of_the_tab(html):
     assert "Changes reach the assistant within a minute." in tab
 
 
+def test_the_heading_can_take_focus_and_the_add_row_can_be_hidden(html):
+    assert re.search(r'<h3 id="favorite-teams-heading"[^>]*tabindex="-1"', html)
+    assert 'id="favorite-teams-add-row"' in html
+
+
+def test_the_base_knowledge_link_focuses_the_heading():
+    source = MEMORY.read_text(encoding="utf-8")
+    link = re.search(r'<button[^>]*id="knowledge-favorite-teams-link"[^>]*>', source).group(0)
+    assert "showTab('conversation-context'); focusFavoriteTeamsHeading()" in link
+
+
 def test_the_card_has_no_inline_handlers(html):
     start = html.index('id="favorite-teams-card"')
     end = html.index("<!-- Main Settings Card -->")
@@ -229,11 +240,12 @@ class El {
   focus() { global.__focused = this; }
   find(pred, out) { out = out || []; if (pred(this)) out.push(this); this.children.forEach(c => c.find(pred, out)); return out; }
 }
-const ids = ['favorite-teams-container', 'favorite-teams-message', 'favorite-teams-status', 'favorite-teams-save',
+const ids = ['tab-conversation-context', 'favorite-teams-add-row', 'favorite-teams-heading', 'favorite-teams-container', 'favorite-teams-message', 'favorite-teams-status', 'favorite-teams-save',
   'favorite-teams-dirty', 'favorite-team-name', 'favorite-team-league', 'favorite-team-add', 'favorite-team-name-error'];
 global.__els = {};
 ids.forEach(id => { global.__els[id] = new El('div'); });
 global.__els['favorite-team-league'].tagName = 'SELECT';
+global.__els['tab-conversation-context'].className = 'tab-content';
 global.document = { getElementById: id => global.__els[id] || null, createElement: tag => new El(tag) };
 global.__fetches = [];
 global.__script = [];
@@ -274,9 +286,9 @@ const rows = () => list().map(li => ({
   position: li.children[0].textContent,
   name: li.children[1].children[0].textContent,
   league: li.children[1].children[1].textContent,
-  buttons: li.children.slice(2).map(b => ({ text: b.textContent, label: b.getAttribute('aria-label'), disabled: b.disabled, title: b.title })),
+  buttons: li.children[2].children.map(b => ({ text: b.textContent, label: b.getAttribute('aria-label'), disabled: b.disabled, title: b.title })),
 }));
-const btn = (row, kind) => list()[row].children[{ up: 2, down: 3, remove: 4 }[kind]];
+const btn = (row, kind) => list()[row].children[2].children[{ up: 0, down: 1, remove: 2 }[kind]];
 const focusedLabel = () => (__focused ? (__focused.getAttribute ? __focused.getAttribute('aria-label') : null) : null);
 """
 
@@ -293,6 +305,9 @@ def test_name_problems():
           long: favoriteTeamProblem('x'.repeat(65), t, 8),
           max64: favoriteTeamProblem('x'.repeat(64), t, 8),
           dup: favoriteTeamProblem('anytown owls', t, 8),
+          otherLeague: favoriteTeamProblem('Anytown Owls', t, 8, 'nfl'),
+          sameLeague: favoriteTeamProblem('anytown owls', [{name: 'Anytown Owls', league: 'nfl'}], 8, 'nfl'),
+          otherLeagueNull: favoriteTeamProblem('Anytown Owls', [{name: 'Anytown Owls', league: 'nfl'}], 8, ''),
           cap: favoriteTeamProblem('Crows', t, 1),
           accents: favoriteTeamProblem('Bayern München', t, 8),
           apostrophe: favoriteTeamProblem("St. Louis-Blues O'Neil", t, 8),
@@ -303,7 +318,8 @@ def test_name_problems():
     rule = "Use letters, numbers, spaces and . - ' only"
     assert result == {
         "ok": "", "empty": "Enter a team name", "rule": rule, "newline": rule, "long": rule, "max64": "",
-        "dup": "That team is already in the list", "cap": "Up to 1 teams", "accents": "", "apostrophe": "",
+        "dup": "That team is already in the list", "otherLeague": "", "sameLeague": "That team is already in the list",
+        "otherLeagueNull": "", "cap": "Up to 1 teams", "accents": "", "apostrophe": "",
         "normalized": "München",
     }
 
@@ -414,7 +430,7 @@ def test_adding_with_enter_validates_and_reports_the_broken_rule():
         const err = () => __els['favorite-team-name-error'].textContent;
         const enter = (v, league) => { input.value = v; select.value = league || ''; input.fire('keydown', { key: 'Enter' }); };
         enter('<b>x</b>'); const rule = err();
-        enter('anytown owls'); const dup = err();
+        enter('anytown owls', 'nfl'); const dup = err();
         input.fire('input'); const cleared = err();
         enter('Hawks', 'mlb');
         const after = { names: rows().map(r => r.name + '|' + r.league), input: input.value, err: err(), dirty: favoriteTeamsDirty(),
@@ -627,3 +643,149 @@ def test_the_settings_loader_starts_favourites_first_and_neither_failure_hides_t
         """
     )
     assert forbidden == {"view": "forbidden", "settingsRequested": True}
+
+
+def test_a_link_from_another_page_focuses_the_heading():
+    result = scenario("focusFavoriteTeamsHeading(); return __focused === __els['favorite-teams-heading'];")
+    assert result is True
+
+
+def test_a_row_wraps_with_its_controls_on_their_own_line_and_names_do_not_truncate():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push(__ok([{name: 'Anytown Owls', league: 'nfl'}], 1));
+        await loadFavoriteTeams();
+        const li = list()[0];
+        return { row: li.className, controls: li.children[2].className, name: li.children[1].children[0].className,
+                 buttons: li.children[2].children.length };
+        """
+    )
+    assert "flex-wrap" in result["row"] and "w-full" in result["controls"] and "sm:w-auto" in result["controls"]
+    assert "truncate" not in result["name"] and result["buttons"] == 3
+
+
+def test_leaving_confirmed_drops_the_unsaved_list_and_only_asks_on_this_tab():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push(__ok([{name: 'A', league: null}], 1));
+        await loadFavoriteTeams();
+        btn(0, 'remove').click();
+        __confirmAnswer = true;
+        showTab('guests');
+        const afterLeave = { dirty: favoriteTeamsDirty(), names: rows().map(r => r.name), asked: __confirms.length };
+        showTab('conversation-context'); showTab('guests');           // back and away again: nothing to ask
+        const again = __confirms.length;
+        btn(0, 'remove').click();
+        __els['tab-conversation-context'].className = 'tab-content hidden';
+        showTab('dashboard');                                          // another tab is showing: no prompt
+        return { afterLeave, again, whileHidden: __confirms.length };
+        """
+    )
+    assert result["afterLeave"] == {"dirty": False, "names": ["A"], "asked": 1}
+    assert result["again"] == 1 and result["whileHidden"] == 1
+
+
+def test_a_league_is_reset_after_add_and_an_unknown_stored_league_shows_its_code():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push(__ok([{name: 'Old', league: 'quidditch'}], 1));
+        await loadFavoriteTeams();
+        __els['favorite-team-name'].value = 'Hawks'; __els['favorite-team-league'].value = 'mlb';
+        __els['favorite-team-add'].click();
+        return { leagues: rows().map(r => r.league), picker: __els['favorite-team-league'].value };
+        """
+    )
+    assert result == {"leagues": ["quidditch", "MLB"], "picker": ""}
+
+
+def test_the_same_name_can_be_added_in_another_league():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push(__ok([{name: 'Michigan', league: 'college-football'}], 1));
+        await loadFavoriteTeams();
+        __els['favorite-team-name'].value = 'Michigan'; __els['favorite-team-league'].value = 'college-basketball';
+        __els['favorite-team-add'].click();
+        return rows().map(r => r.name + '|' + r.league);
+        """
+    )
+    assert result == ["Michigan|College football", "Michigan|College basketball"]
+
+
+def test_the_forbidden_state_hides_the_add_row_and_a_success_is_a_status_not_an_alert():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push({status: 403, body: {}});
+        await loadFavoriteTeams();
+        const hiddenWhenForbidden = __els['favorite-teams-add-row'].className.startsWith('hidden');
+        __script.length = 0; __script.push(__ok([{name: 'A', league: null}], 1));
+        await loadFavoriteTeams(true);
+        const shownWhenReady = !__els['favorite-teams-add-row'].className.includes('hidden');
+        btn(0, 'remove').click();
+        __script.length = 0; __script.push(__ok([], 2));
+        __els['favorite-teams-save'].click();
+        await new Promise(r => setTimeout(r, 0));
+        const ok = { role: __els['favorite-teams-message'].getAttribute('role'), status: __els['favorite-teams-status'].textContent };
+        __script.length = 0; __script.push({status: 422, body: {}});
+        btn; __els['favorite-team-name'].value = 'B'; __els['favorite-team-add'].click();
+        __els['favorite-teams-save'].click();
+        await new Promise(r => setTimeout(r, 0));
+        return { hiddenWhenForbidden, shownWhenReady, ok, errorRole: __els['favorite-teams-message'].getAttribute('role') };
+        """
+    )
+    assert result["hiddenWhenForbidden"] and result["shownWhenReady"]
+    assert result["ok"]["role"] == "status" and result["ok"]["status"] == "A removed"  # not announced a second time
+    assert result["errorRole"] == "alert"
+
+
+def test_focus_falls_back_to_remove_when_both_arrows_are_disabled():
+    result = scenario(
+        SNAPSHOT
+        + r"""
+        __script.push(__ok([{name: 'A', league: null}, {name: 'B', league: null}], 1));
+        await loadFavoriteTeams();
+        btn(1, 'up').click();                  // B to the top
+        btn(0, 'down').click();                // B back down
+        btn(1, 'remove').click();              // leave one team: both arrows disabled
+        __focused = null;
+        moveFavorite(0, 0, 'up');              // a move that lands where nothing moves
+        return focusedLabel();
+        """
+    )
+    assert result == "Remove A"
+
+
+def test_enter_on_a_button_is_not_cancelled_by_the_global_shortcut_but_sidebar_items_still_activate():
+    keyboard = (FRONTEND / "keyboard.js").read_text(encoding="utf-8")
+    prelude = r"""
+    global.__docListeners = {};
+    global.document = { addEventListener: (t, f) => { global.__docListeners[t] = f; }, removeEventListener() {}, readyState: 'loading',
+      querySelectorAll: () => [], getElementById: () => null, querySelector: () => null, activeElement: null, body: {} };
+    global.window.Athena = undefined;
+    console.log = () => {};
+    """
+    result = run_scripts(
+        [keyboard],
+        r"""(() => {
+          const press = (target) => { let prevented = false, stopped = false;
+            window.__docListeners.keydown({ key: 'Enter', target, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false,
+              preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+            return { prevented, stopped }; };
+          Athena.keyboard.init();
+          let activated = 0;
+          const sidebar = { tagName: 'A', classList: { contains: c => c === 'sidebar-item' }, click() { activated++; } };
+          document.activeElement = sidebar;
+          const side = press(sidebar);
+          const button = press({ tagName: 'BUTTON', classList: { contains: () => false }, click() {} });
+          const plainDiv = press({ tagName: 'DIV', classList: { contains: () => false } });
+          return { side, button, plainDiv, activated };
+        })()""",
+        prelude=prelude,
+    )
+    assert result["side"] == {"prevented": True, "stopped": True} and result["activated"] == 1
+    assert result["button"] == {"prevented": False, "stopped": False}
+    assert result["plainDiv"] == {"prevented": False, "stopped": False}

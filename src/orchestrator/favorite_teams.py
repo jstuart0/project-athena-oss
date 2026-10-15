@@ -42,9 +42,10 @@ PICK_DEADLINE_S = 3.5
 # is started after the deadline.
 FIRST_CANDIDATE_TIMEOUT_S = 30.0
 
-# Favourites are household data (the "household" base-knowledge tier): public,
-# unresolved, degraded and guest audiences get no default team.
-HOUSEHOLD_TIER = "household"
+# Favourites are household data, but not sensitive: an owner-mode audience gets
+# them even while the mode service is degraded. Public, unresolved (no mode) and
+# guest audiences get no default team.
+HOUSEHOLD_MODE = "owner"
 
 Tense = Literal["past", "future", "present"]
 
@@ -225,11 +226,19 @@ async def favorites() -> Tuple[FavoriteTeam, ...]:
 
 async def decide(text: str, audience: KnowledgeAudience) -> Decision:
     """Which favourites ``text`` can mean for this caller. No RAG calls. A
-    caller who can't see household data (public, unresolved, degraded, guest)
-    gets no candidates and no admin request is made."""
-    if HOUSEHOLD_TIER not in audience.visible_tiers():
+    caller outside the household (public, unresolved, guest) gets no candidates
+    and no admin request is made."""
+    if audience.public or audience.mode != HOUSEHOLD_MODE:
         return Decision()
     return Decision(candidates(await favorites(), text))
+
+
+def default_applied(state: Any) -> bool:
+    """True when a favourite was applied as the default team for this turn
+    (a state object or the graph's final dict). Such an answer is about this
+    household's list, so the semantic cache never stores it."""
+    decision = state.get("sports_default") if isinstance(state, dict) else getattr(state, "sports_default", None)
+    return bool(decision is not None and getattr(decision, "candidates", ()))
 
 
 def search_params(team: FavoriteTeam) -> Dict[str, str]:

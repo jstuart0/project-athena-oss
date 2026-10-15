@@ -7284,6 +7284,8 @@ async def process_query(
             and not authz.degraded
             and not final_state.get("identity_answer", False)
             and not identity_query
+            # A "we" answer is about this household's favourites: never stored.
+            and not favorite_teams.default_applied(final_state)
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)

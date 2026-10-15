@@ -135,7 +135,9 @@ class FavoriteTeam(BaseModel):
 
 
 def _duplicate_free(teams: List[FavoriteTeam]) -> bool:
-    seen = [t.name.casefold() for t in teams]
+    """A team is a (name, league) pair: "Michigan" in college football and in
+    college basketball are two teams; the same name and league twice is not."""
+    seen = [(t.name.casefold(), t.league) for t in teams]
     return len(seen) == len(set(seen))
 
 

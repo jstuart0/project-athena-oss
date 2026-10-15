@@ -337,7 +337,7 @@
                             </div>
                         </div>
                         <p class="text-xs text-gray-500">Your teams for sports questions are set on the Conversation Context page.
-                            <button type="button" id="knowledge-favorite-teams-link" onclick="showTab('conversation-context')" class="text-blue-400 hover:text-blue-300 underline">Favourite teams &rarr;</button>
+                            <button type="button" id="knowledge-favorite-teams-link" onclick="showTab('conversation-context'); focusFavoriteTeamsHeading()" class="text-blue-400 hover:text-blue-300 underline">Favourite teams &rarr;</button>
                         </p>
                         <div class="grid grid-cols-2 gap-4">
                             <div>

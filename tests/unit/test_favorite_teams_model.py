@@ -79,9 +79,15 @@ def test_update_caps_duplicates_and_revision():
         FavoriteTeamsUpdate(teams=[], revision=-1)
 
 
-def test_same_name_in_two_leagues_is_still_a_duplicate():
+def test_the_same_name_in_two_leagues_is_two_teams_but_the_same_pair_is_a_duplicate():
+    both = FavoriteTeamsUpdate(
+        teams=[{"name": "Michigan", "league": "college-football"}, {"name": "michigan", "league": "college-basketball"},
+               {"name": "Michigan"}],
+        revision=0,
+    )
+    assert len(both.teams) == 3
     with pytest.raises(ValidationError):
-        FavoriteTeamsUpdate(teams=[{"name": "Giants", "league": "nfl"}, {"name": "Giants", "league": "mlb"}], revision=0)
+        FavoriteTeamsUpdate(teams=[{"name": "Giants", "league": "nfl"}, {"name": "GIANTS", "league": "nfl"}], revision=0)
 
 
 def test_parse_stored_missing_and_unreadable(caplog):
@@ -96,13 +102,13 @@ def test_parse_stored_drops_only_the_bad_item(caplog):
     raw = (
         '{"v":1,"revision":4,"teams":[{"name":"Anytown Owls","league":"nfl"},'
         '{"name":"<b>x</b>","league":null},{"name":"Hawks","league":"curling"},'
-        '{"name":"Hawks","league":"mlb"},{"name":"anytown owls"}]}'
+        '{"name":"Hawks","league":"mlb"},{"name":"anytown owls","league":"nfl"}]}'
     )
     with caplog.at_level(logging.ERROR):
         teams, revision = parse_stored(raw)
     assert revision == 4
     assert [(t.name, t.league) for t in teams] == [("Anytown Owls", "nfl"), ("Hawks", "mlb")]
-    assert "index=1" in caplog.text and "index=2" in caplog.text and "index=4" in caplog.text
+    assert "index=1" in caplog.text and "index=2" in caplog.text and "index=4" in caplog.text and "favorite_team_duplicate" in caplog.text
     assert "<b>" not in caplog.text and "curling" not in caplog.text
 
 

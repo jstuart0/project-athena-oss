@@ -554,6 +554,10 @@ class AdminConfigClient:
         """
         if self._favorite_teams_fresh():
             return self._favorite_teams
+        if self._favorite_teams_lock.locked() and self._favorite_teams_checked_at is not None:
+            # A refresh is already in flight and there is a value to use: no
+            # turn waits on admin-backend for it.
+            return self._favorite_teams
         async with self._favorite_teams_lock:
             if self._favorite_teams_fresh():
                 return self._favorite_teams
@@ -565,9 +569,13 @@ class AdminConfigClient:
                 )
                 if response.status_code == 200:
                     payload = response.json()
-                    teams = parse_teams(payload.get("teams") if isinstance(payload, dict) else None, source="admin")
-                    self._favorite_teams = teams
-                    logger.info("favorite_teams_loaded", count=len(teams))
+                    if isinstance(payload, dict) and isinstance(payload.get("teams"), list):
+                        teams = parse_teams(payload["teams"], source="admin")
+                        self._favorite_teams = teams
+                        logger.info("favorite_teams_loaded", count=len(teams))
+                    else:
+                        # Not the route's shape: keep the last good list.
+                        logger.warning("favorite_teams_unexpected_body")
                 else:
                     note_admin_refusal(response.status_code, "/api/settings/favorite-teams")
                     logger.warning("favorite_teams_fetch_failed", status_code=response.status_code)

@@ -36,11 +36,11 @@ ALBION = FavoriteTeam(name="Albion", league="premier-league")
 PAT = FavoriteTeam(name="Pat's Team", league=None)
 
 HOUSEHOLD = KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False)
+DEGRADED_HOUSEHOLD = KnowledgeAudience(mode="owner", degraded=True, public=False, owner_caller=False, owner_proven=False)
 OWNER_PROVEN = KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=True, owner_proven=True)
 NO_DEFAULT_AUDIENCES = {
     "unresolved": KnowledgeAudience.UNRESOLVED,
     "public": KnowledgeAudience(mode="guest", degraded=False, public=True, owner_caller=False, owner_proven=False),
-    "degraded": KnowledgeAudience(mode="owner", degraded=True, public=False, owner_caller=False, owner_proven=False),
     "guest": KnowledgeAudience(mode="guest", degraded=False, public=False, owner_caller=False, owner_proven=False),
     "unverified_guest": KnowledgeAudience(
         mode="guest", degraded=False, public=False, owner_caller=False, owner_proven=False, guest_verified=False
@@ -223,11 +223,26 @@ def test_audiences_that_cannot_see_household_data_get_no_default_and_no_admin_ca
     favs.assert_not_awaited()
 
 
-@pytest.mark.parametrize("audience", [HOUSEHOLD, OWNER_PROVEN], ids=["household", "owner_proven"])
+@pytest.mark.parametrize(
+    "audience", [HOUSEHOLD, OWNER_PROVEN, DEGRADED_HOUSEHOLD], ids=["household", "owner_proven", "degraded_mode_service"]
+)
 def test_household_and_owner_audiences_get_the_favourites_in_order(audience):
     with favorites_are(OWLS, HAWKS):
         decision = run(ft.decide("how did we do last night", audience))
     assert names(decision.candidates) == ["Anytown Owls", "Hawks"] and decision.first == OWLS
+
+
+def test_a_degraded_mode_service_does_not_remove_favourites_from_the_household_but_public_never_gets_them():
+    degraded_public = KnowledgeAudience(mode="owner", degraded=True, public=True, owner_caller=False, owner_proven=False)
+    with favorites_are(OWLS):
+        assert run(ft.decide("how did we do", DEGRADED_HOUSEHOLD)).first == OWLS
+        assert run(ft.decide("how did we do", degraded_public)).declined
+
+
+def test_the_same_name_in_two_leagues_narrows_to_the_one_asked_about():
+    both = (FavoriteTeam(name="Michigan", league="college-football"), FavoriteTeam(name="Michigan", league="college-basketball"))
+    assert [t.league for t in ft.candidates(both, "how did we do in college football")] == ["college-football"]
+    assert [t.league for t in ft.candidates(both, "how did we do in basketball")] == ["college-basketball"]
 
 
 def test_decide_narrows_by_the_sport_word():
@@ -762,6 +777,7 @@ def test_sports_default_survives_the_compiled_graph_and_the_streaming_runner(mon
         graph = main.create_orchestrator_graph()
         final = run(graph.ainvoke(fresh()))
         assert final["answer"] == "x"
+        assert ft.default_applied(final)
         assert seen["graph"] is not None and seen["graph"].candidates == (HAWKS,)
 
         async def streaming_tool(state):
@@ -772,6 +788,23 @@ def test_sports_default_survives_the_compiled_graph_and_the_streaming_runner(mon
         monkeypatch.setattr(main, "_tool_call_and_validate", streaming_tool)
         run(main.run_orchestrator_for_streaming(fresh()))
     assert seen["stream"] is not None and seen["stream"].candidates == (HAWKS,)
+
+
+def test_an_answer_built_from_favourites_is_never_cached_for_anyone():
+    applied = OrchestratorState(query="x")
+    applied.sports_default = decision_of(OWLS)
+    assert ft.default_applied(applied) and ft.default_applied({"sports_default": decision_of(OWLS)})
+    # No favourite applied: declined (a guest, public, unresolved), named team, never decided.
+    assert not ft.default_applied({"sports_default": ft.Decision()})
+    assert not ft.default_applied({}) and not ft.default_applied(OrchestratorState(query="x"))
+    # The cache write in process_query asks exactly this.
+    source = inspect.getsource(h.main.process_query)
+    assert "not favorite_teams.default_applied(final_state)" in source
+    # A guest or public turn never applies one, so nothing about favourites is cached for them either.
+    with favorites_are(OWLS):
+        for audience in NO_DEFAULT_AUDIENCES.values():
+            decision = run(ft.decide("how did we do", audience))
+            assert not ft.default_applied({"sports_default": decision})
 
 
 def test_sports_default_is_not_part_of_the_serialised_state():

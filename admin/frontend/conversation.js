@@ -338,13 +338,15 @@ function favoriteNameRuleOk(name) {
     return true;
 }
 
-// '' when the name can be added, else the sentence naming the broken rule.
-function favoriteTeamProblem(rawName, teams, max) {
+// '' when the name can be added, else the sentence naming the broken rule. A
+// team is a (name, league) pair: the same name in another league is another team.
+function favoriteTeamProblem(rawName, teams, max, league) {
     const name = normalizeFavoriteName(rawName);
     if (!name) return 'Enter a team name';
     if (!favoriteNameRuleOk(name)) return FAVORITE_TEAM_NAME_RULE;
     const lower = name.toLowerCase();
-    if (teams.some(t => t.name.toLowerCase() === lower)) return 'That team is already in the list';
+    const wanted = league || null;
+    if (teams.some(t => t.name.toLowerCase() === lower && (t.league || null) === wanted)) return 'That team is already in the list';
     if (teams.length >= max) return `Up to ${max} teams`;
     return '';
 }
@@ -363,8 +365,9 @@ function favoriteTeamsDirty() {
 }
 
 function favoriteLeagueLabel(code) {
+    if (!code) return 'Any league';
     const league = favoriteTeamsState.leagues.find(l => l.code === code);
-    return league ? league.label : 'Any league';
+    return league ? league.label : String(code);
 }
 
 function favoriteTeamsEl(id) {
@@ -375,6 +378,8 @@ function setFavoriteTeamsMessage(text, tone) {
     const el = favoriteTeamsEl('favorite-teams-message');
     if (!el) return;
     el.textContent = text || '';
+    // Errors interrupt (alert); a success is announced politely (status), once.
+    el.setAttribute('role', tone === 'success' ? 'status' : 'alert');
     el.className = `${text ? '' : 'hidden '}text-sm mb-3 ${tone === 'error' ? 'text-red-400' : 'text-green-400'}`;
 }
 
@@ -396,6 +401,8 @@ function setFavoriteNameError(text) {
 function updateFavoriteTeamsControls() {
     const ready = favoriteTeamsState.view === 'ready';
     const dirty = favoriteTeamsDirty();
+    const addRow = favoriteTeamsEl('favorite-teams-add-row');
+    if (addRow) addRow.className = `${favoriteTeamsState.view === 'forbidden' ? 'hidden ' : ''}mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-start`;
     const save = favoriteTeamsEl('favorite-teams-save');
     if (save) {
         save.disabled = !dirty || favoriteTeamsState.saving;
@@ -485,16 +492,16 @@ function renderFavoriteTeams(focus) {
     const targets = [];
     teams.forEach((team, index) => {
         const row = document.createElement('li');
-        row.className = 'flex items-center gap-3 bg-dark-bg border border-dark-border rounded-lg p-2';
+        row.className = 'flex flex-wrap items-center gap-2 bg-dark-bg border border-dark-border rounded-lg p-2';
 
         const position = document.createElement('span');
         position.className = 'w-6 text-center text-sm text-gray-500';
         position.textContent = String(index + 1);
 
         const text = document.createElement('div');
-        text.className = 'flex-1 min-w-0';
+        text.className = 'flex-1 min-w-[10rem]';
         const name = document.createElement('div');
-        name.className = 'font-medium text-white truncate';
+        name.className = 'font-medium text-white break-words';
         name.textContent = team.name;
         const league = document.createElement('div');
         league.className = 'text-xs text-gray-400';
@@ -507,11 +514,16 @@ function renderFavoriteTeams(focus) {
         const remove = favoriteButton('Remove', `Remove ${team.name}`, () => removeFavorite(index), false);
         targets.push({ up, down, remove });
 
+        // Below sm the controls wrap onto their own line, under the name.
+        const controls = document.createElement('div');
+        controls.className = 'flex items-center gap-2 w-full sm:w-auto pl-8 sm:pl-0';
+        controls.appendChild(up);
+        controls.appendChild(down);
+        controls.appendChild(remove);
+
         row.appendChild(position);
         row.appendChild(text);
-        row.appendChild(up);
-        row.appendChild(down);
-        row.appendChild(remove);
+        row.appendChild(controls);
         list.appendChild(row);
     });
     if (teams.length > 0) container.appendChild(list);
@@ -524,8 +536,9 @@ function renderFavoriteTeams(focus) {
             target = favoriteTeamsEl('favorite-team-name');
         } else if (targets[focus.index]) {
             const row = targets[focus.index];
-            // A disabled arrow can't take focus: hand it to the other arrow.
-            target = row[focus.kind].disabled ? (focus.kind === 'up' ? row.down : row.up) : row[focus.kind];
+            // A disabled control can't take focus: the other arrow, else Remove.
+            const other = focus.kind === 'up' ? row.down : row.up;
+            target = [row[focus.kind], other, row.remove].find(b => b && !b.disabled);
         }
         if (target && !target.disabled) target.focus();
     }
@@ -553,7 +566,9 @@ function addFavoriteTeam() {
     const input = favoriteTeamsEl('favorite-team-name');
     const select = favoriteTeamsEl('favorite-team-league');
     if (!input || favoriteTeamsState.view !== 'ready') return;
-    const problem = favoriteTeamProblem(input.value, favoriteTeamsState.teams, favoriteTeamsState.max);
+    const problem = favoriteTeamProblem(
+        input.value, favoriteTeamsState.teams, favoriteTeamsState.max, select && select.value ? select.value : null
+    );
     if (problem) {
         setFavoriteNameError(problem);
         input.focus();
@@ -564,6 +579,7 @@ function addFavoriteTeam() {
     const name = normalizeFavoriteName(input.value);
     favoriteTeamsState.teams.push({ name, league: select && select.value ? select.value : null });
     input.value = '';
+    if (select) select.value = '';
     renderFavoriteTeams();
     input.focus();
     announceFavoriteTeams(`${name} added at position ${favoriteTeamsState.teams.length}`);
@@ -625,7 +641,6 @@ async function saveFavoriteTeams() {
             favoriteTeamsState.saving = false;
             renderFavoriteTeams();
             setFavoriteTeamsMessage('Saved. Changes reach the assistant within a minute.', 'success');
-            announceFavoriteTeams('Favourite teams saved');
             return;
         }
         favoriteTeamsState.saving = false;
@@ -673,13 +688,28 @@ window.addEventListener('beforeunload', event => {
     }
 });
 
-// Leaving the tab with unsaved favourites asks first (showTab is app.js's).
+function conversationTabShowing() {
+    const tab = favoriteTeamsEl('tab-conversation-context');
+    return !!tab && !String(tab.className).split(/\s+/).includes('hidden');
+}
+
+// For links from other pages: land on the card's heading.
+function focusFavoriteTeamsHeading() {
+    const heading = favoriteTeamsEl('favorite-teams-heading');
+    if (heading) heading.focus();
+}
+
+// Leaving the tab with unsaved favourites asks first (showTab is app.js's). It
+// only asks while this tab is showing, and once the user agrees the unsaved
+// list is dropped, so the same edits don't ask again on the way back.
 (function guardFavoriteTeamsOnTabSwitch() {
     if (typeof window.showTab !== 'function') return;
     const original = window.showTab;
     window.showTab = function (tabName) {
-        if (tabName !== 'conversation-context' && favoriteTeamsDirty() && !window.confirm(FAVORITE_TEAM_LEAVE_MESSAGE)) {
-            return undefined;
+        if (tabName !== 'conversation-context' && conversationTabShowing() && favoriteTeamsDirty()) {
+            if (!window.confirm(FAVORITE_TEAM_LEAVE_MESSAGE)) return undefined;
+            favoriteTeamsState.teams = JSON.parse(favoriteTeamsState.saved);
+            renderFavoriteTeams();
         }
         return original.apply(this, arguments);
     };

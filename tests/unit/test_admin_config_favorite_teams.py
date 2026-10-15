@@ -176,9 +176,40 @@ def test_invalid_items_from_admin_are_dropped_not_fatal(clock):
     assert names(get(make_client(wire))) == ["Anytown Owls"]
 
 
-def test_a_non_object_200_body_is_empty(clock):
-    wire = Wire(httpx.Response(200, json=[1, 2]))
-    assert get(make_client(wire)) == ()
+def test_a_non_object_200_body_is_empty_when_cold_and_never_wipes_the_last_good_list(clock):
+    assert get(make_client(Wire(httpx.Response(200, json=[1, 2])))) == ()
+    assert get(make_client(Wire(httpx.Response(200, json={"teams": "nope"})))) == ()
+    wire = Wire(ok(OWLS), httpx.Response(200, json=[1, 2]))
+    client = make_client(wire)
+
+    async def go():
+        await client.get_favorite_teams()
+        clock["now"] += 61
+        return await client.get_favorite_teams()
+
+    assert names(asyncio.run(go())) == ["Anytown Owls"]
+    assert len(wire.requests) == 2
+
+
+def test_turns_do_not_wait_on_a_refresh_that_is_in_flight(clock):
+    wire = Wire(ok(OWLS), ok(OWLS, HAWKS))
+    client = make_client(wire)
+
+    async def go():
+        await client.get_favorite_teams()
+        clock["now"] += 61
+        wire.delay = 0.3
+        refresh = asyncio.ensure_future(client.get_favorite_teams())
+        await asyncio.sleep(0.05)  # the refresh holds the lock, waiting on admin
+        started = asyncio.get_running_loop().time()
+        during = [await client.get_favorite_teams() for _ in range(5)]
+        waited = asyncio.get_running_loop().time() - started
+        return during, waited, await refresh
+
+    during, waited, refreshed = asyncio.run(go())
+    assert waited < 0.1 and all(names(d) == ["Anytown Owls"] for d in during)
+    assert names(refreshed) == ["Anytown Owls", "Hawks"]
+    assert len(wire.requests) == 2
 
 
 def test_the_request_has_its_own_short_timeout(clock):
