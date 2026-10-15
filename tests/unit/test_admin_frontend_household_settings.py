@@ -42,7 +42,7 @@ def test_the_script_is_copied_tagged_before_escape_html_and_versioned(html):
 
 @pytest.mark.parametrize("name", ["app.js", "gateway-settings.js", "sms.js", "directions-settings.js", "memory-context.js"])
 def test_every_edited_page_script_carries_the_new_buster(html, name):
-    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs"', html)
+    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs2?"', html)
 
 
 def test_the_script_never_assigns_markup_or_writes_handlers(source):

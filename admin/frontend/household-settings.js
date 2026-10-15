@@ -8,8 +8,10 @@
  * Refresh can call it again (a clean card re-fetches, a card with unsaved edits
  * keeps them).
  *
- * Extension points for list editors: HouseholdSettings.registerKind(kind, build)
- * and HouseholdSettings.defineCard(section, definition). A control is
+ * Extension points for list editors (household-settings-lists.js, which loads
+ * after this file): HouseholdSettings.registerKind(kind, build),
+ * HouseholdSettings.defineCard(section, definition) and HouseholdSettings.ui.
+ * A card definition may set savedCopy to replace the default success line. A control is
  *   { el, fields: [wire names], get() -> {name: value|null}, set(value),
  *     validate() -> bool, showServerError(loc, type), hasError(), focus(),
  *     setDisabled(bool), refresh() }.
@@ -397,7 +399,7 @@
             else focusFirstButton();
         }
         function focusFirstButton() {
-            const buttons = root.children.filter(c => c.tagName === 'BUTTON');
+            const buttons = Array.from(root.children).filter(c => c.tagName === 'BUTTON');
             if (buttons.length) buttons[0].focus();
         }
 
@@ -869,7 +871,7 @@
                     applyEntry(await response.json());
                     card.bodyKey = '';
                     render();
-                    setMessage(SAVED_COPY, 'success');
+                    setMessage(def.savedCopy || SAVED_COPY, 'success');
                     return;
                 }
                 card.saving = false;
@@ -957,5 +959,8 @@
         if (card) card.heading.focus();
     }
 
-    global.HouseholdSettings = { mount, focusHeading, registerKind, defineCard, messageFor };
+    // The small DOM helpers and control classes, shared with household-settings-lists.js.
+    const ui = { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN };
+
+    global.HouseholdSettings = { mount, focusHeading, registerKind, defineCard, messageFor, ui };
 })(window);
