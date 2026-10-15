@@ -1190,7 +1190,7 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
 
         intent, search_results = await parallel_search_engine.search(
             query=search_query,
-            location=default_location(),
+            location=default_location(state.knowledge_audience),
             limit_per_provider=10,
             force_search=True
         )
@@ -1791,7 +1791,7 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
     try:
         # Location-sensitive RAG services need location in query (search providers ignore location param)
         location_sensitive_services = ["weather", "dining", "events", "flights", "airports"]
-        home_location = default_location()
+        home_location = default_location(state.knowledge_audience)
         user_location = state.entities.get("location", home_location) if state.entities else home_location
 
         if rag_service.lower() in location_sensitive_services:
@@ -1804,7 +1804,7 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
         # STEP 1: Execute parallel search with increased result limit
         intent, search_results = await parallel_search_engine.search(
             query=search_query,
-            location=default_location(),
+            location=default_location(state.knowledge_audience),
             limit_per_provider=10,  # Increased from 5 for better coverage
             force_search=True  # CRITICAL: Force web search even for RAG intents
         )

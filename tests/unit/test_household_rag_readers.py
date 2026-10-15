@@ -200,10 +200,11 @@ def test_amtrak_lifespan_configures_its_section_and_closes_the_reader(monkeypatc
 # Transportation: reloads (D16)
 # ---------------------------------------------------------------------------
 
-def counting_loader(module, monkeypatch, *, gates=None, raises=None):
+def counting_loader(module, monkeypatch, *, gates=None, raises=None, failing=None):
     """Replace load_gtfs_data. Data is one stop per feed id, so the committed
     config is visible in transit_data. ``gates`` maps a feed-id tuple to an
-    Event the load waits on (never set = hangs until cancelled)."""
+    Event the load waits on (never set = hangs until cancelled). ``failing``
+    returns the feed ids whose download fails (reported in the errors, no stops)."""
     calls = []
 
     async def load(cfg):
@@ -213,12 +214,21 @@ def counting_loader(module, monkeypatch, *, gates=None, raises=None):
             raise RuntimeError("boom")
         if gates and key in gates:
             await gates[key].wait()
-        stops = {f"{fid}_1": {"stop_id": f"{fid}_1"} for fid in cfg.feeds}
+        down = set(failing() if failing is not None else ())
+        stops = {f"{fid}_1": {"stop_id": f"{fid}_1"} for fid in cfg.feeds if fid not in down}
         return ({"stops": stops, "routes": {}, "stop_times": {}, "agencies": {},
-                 "last_updated": "now"}, {})
+                 "last_updated": "now"}, {fid: "ConnectError" for fid in cfg.feeds if fid in down})
 
     monkeypatch.setattr(module, "load_gtfs_data", load)
     return calls
+
+
+def clocked(module):
+    """Give the module's reload backoff a clock the test moves. Returns the
+    one-element list holding "now" (seconds)."""
+    now = [0.0]
+    module._backoff = household.ReloadBackoff(clock=lambda: now[0])
+    return now
 
 
 async def settle(module):
@@ -283,8 +293,9 @@ def test_transit_poll_loop_applies_a_change_between_ticks(monkeypatch):
     assert calls == [("a",), ("b",)]
 
 
-def test_a_transit_reload_that_raises_keeps_the_old_data_and_the_loop_survives(monkeypatch):
+def test_a_transit_reload_that_raises_keeps_the_old_data_and_retries_after_a_backoff(monkeypatch):
     module = transportation()
+    now = clocked(module)
     fail = {"on": False}
     calls = counting_loader(module, monkeypatch, raises=lambda: fail["on"])
 
@@ -305,10 +316,168 @@ def test_a_transit_reload_that_raises_keeps_the_old_data_and_the_loop_survives(m
         fail["on"] = False
         await module.sync_household_config()
         await settle(module)
-        assert set(module.transit_data["stops"]) == {"b_1"}, "the next poll tries again"
+        assert len(calls) == 2, "the next poll is held back: a failed config is not retried every minute"
+
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert set(module.transit_data["stops"]) == {"b_1"}, "after the delay the next poll tries again"
 
     asyncio.run(run())
     assert calls == [("a",), ("b",), ("b",)]
+
+
+def test_a_transit_reload_where_every_feed_failed_keeps_the_previous_data(monkeypatch):
+    module = transportation()
+    now = clocked(module)
+    down = {"feeds": set()}
+    calls = counting_loader(module, monkeypatch, failing=lambda: down["feeds"])
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a")))
+        await module.sync_household_config()
+        await settle(module)
+        good_config = module.transit_config
+        assert set(module.transit_data["stops"]) == {"a_1"}
+
+        down["feeds"] = {"a"}
+        await module.refresh_data()  # the /transit/refresh button: force, same config
+        await settle(module)
+        assert module.transit_config is good_config
+        assert set(module.transit_data["stops"]) == {"a_1"}, "a transient outage doesn't wipe the stops"
+        assert module.fetch_errors == {"a": "ConnectError"}, "health still says why"
+
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 2, "held back for the backoff delay"
+
+        down["feeds"] = set()
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 3
+        assert module.fetch_errors == {}
+
+    asyncio.run(run())
+
+
+def test_the_transit_backoff_doubles_resets_on_success_and_never_holds_back_a_new_config(monkeypatch):
+    module = transportation()
+    now = clocked(module)
+    down = {"feeds": {"a"}}
+    calls = counting_loader(module, monkeypatch, failing=lambda: down["feeds"])
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a")))
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 1
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 2
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 2, "the second failure doubles the delay to 120 s"
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 3
+
+        household.install_for_test(sources=admin_transit(feed("c")))
+        down["feeds"] = set()
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 4, "an admin edit is applied at once"
+        assert set(module.transit_data["stops"]) == {"c_1"}
+
+    asyncio.run(run())
+
+
+def test_the_refresh_button_tries_now_even_while_a_failed_config_is_held_back(monkeypatch):
+    module = transportation()
+    clocked(module)
+    down = {"feeds": {"a"}}
+    calls = counting_loader(module, monkeypatch, failing=lambda: down["feeds"])
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a")))
+        await module.sync_household_config()
+        await settle(module)
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 1, "floor: held back"
+        down["feeds"] = set()
+        await module.refresh_data()
+        await settle(module)
+        assert len(calls) == 2
+        assert set(module.transit_data["stops"]) == {"a_1"}
+
+    asyncio.run(run())
+
+
+def test_a_good_load_resets_the_transit_backoff(monkeypatch):
+    module = transportation()
+    now = clocked(module)
+    down = {"feeds": {"a"}}
+    calls = counting_loader(module, monkeypatch, failing=lambda: down["feeds"])
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a")))
+        await module.sync_household_config()
+        await settle(module)                      # failure 1: held back 60 s
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)                      # failure 2: held back 120 s
+        now[0] += 121
+        down["feeds"] = set()
+        await module.sync_household_config()
+        await settle(module)                      # success: resets
+        assert len(calls) == 3 and set(module.transit_data["stops"]) == {"a_1"}
+        down["feeds"] = {"a"}
+        await module.refresh_data()
+        await settle(module)                      # failure again: back to 60 s, not 240 s
+        assert len(calls) == 4
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert len(calls) == 5, "the delay started over after the good load"
+
+    asyncio.run(run())
+
+
+def test_a_first_transit_load_where_every_feed_failed_still_commits_the_config(monkeypatch):
+    module = transportation()
+    clocked(module)
+    counting_loader(module, monkeypatch, failing=lambda: {"a"})
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a")))
+        await module.sync_household_config()
+        await settle(module)
+        assert module.transit_config.configured, "no earlier data to keep: the admin sees the config and the error"
+        assert module.fetch_errors == {"a": "ConnectError"}
+
+    asyncio.run(run())
+
+
+def test_a_partly_failed_transit_load_commits_and_is_not_retried(monkeypatch):
+    module = transportation()
+    now = clocked(module)
+    calls = counting_loader(module, monkeypatch, failing=lambda: {"b"})
+
+    async def run():
+        household.install_for_test(sources=admin_transit(feed("a"), feed("b")))
+        await module.sync_household_config()
+        await settle(module)
+        assert set(module.transit_data["stops"]) == {"a_1"}
+        now[0] += 7200
+        await module.sync_household_config()
+        await settle(module)
+
+    asyncio.run(run())
+    assert len(calls) == 1, "re-downloading the healthy feeds for one broken one would be worse"
 
 
 def test_transit_poll_step_survives_an_unexpected_error(monkeypatch):
@@ -488,7 +657,9 @@ def test_transit_refresh_forces_a_reload_of_the_current_config(monkeypatch):
 # Community events
 # ---------------------------------------------------------------------------
 
-def fake_community(module, monkeypatch, *, raises=None, gates=None):
+def fake_community(module, monkeypatch, *, raises=None, gates=None, failing=None):
+    """Replace the scrape. One event per source name; ``failing`` returns the
+    source names that fail (reported in the errors, no events)."""
     scraped, cached, cleared = [], [], []
 
     async def scrape(cfg, errors):
@@ -498,7 +669,9 @@ def fake_community(module, monkeypatch, *, raises=None, gates=None):
             raise RuntimeError("boom")
         if gates and key in gates:
             await gates[key].wait()
-        return [{"id": name, "title": name} for name in key]
+        down = set(failing() if failing is not None else ())
+        errors.update({name: "ConnectError" for name in key if name in down})
+        return [{"id": name, "title": name} for name in key if name not in down]
 
     async def cache_events(events):
         cached.append([e["id"] for e in events])
@@ -550,10 +723,11 @@ def test_community_change_reloads_once_identical_poll_does_not_and_reset_reloads
     asyncio.run(run())
 
 
-def test_a_community_reload_that_raises_keeps_the_old_config_and_events(monkeypatch):
+def test_a_community_reload_that_raises_keeps_the_old_config_and_events_and_retries_after_a_backoff(monkeypatch):
     module = community()
+    now = clocked(module)
     fail = {"on": False}
-    fake_community(module, monkeypatch, raises=lambda: fail["on"])
+    scraped, _, _ = fake_community(module, monkeypatch, raises=lambda: fail["on"])
 
     async def run():
         household.install_for_test(sources=admin_events(source("s")))
@@ -571,9 +745,219 @@ def test_a_community_reload_that_raises_keeps_the_old_config_and_events(monkeypa
         fail["on"] = False
         await module.sync_household_config()
         await settle(module)
+        assert len(scraped) == 2, "held back for the backoff delay"
+
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
         assert [e["id"] for e in module.in_memory_events] == ["Source t"]
 
     asyncio.run(run())
+
+
+def test_a_community_reload_where_every_source_failed_keeps_the_previous_events(monkeypatch):
+    module = community()
+    now = clocked(module)
+    down = {"names": set()}
+    scraped, cached, _ = fake_community(module, monkeypatch, failing=lambda: down["names"])
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        await module.sync_household_config()
+        await settle(module)
+        good = module.event_sources_config
+        assert [e["id"] for e in module.in_memory_events] == ["Source s"]
+
+        down["names"] = {"Source s", "Source t"}
+        household.install_for_test(sources=admin_events(source("s"), source("t")))
+        await module.sync_household_config()
+        await settle(module)
+        assert module.event_sources_config is good, "the old config and its events stay"
+        assert [e["id"] for e in module.in_memory_events] == ["Source s"], "the cache isn't wiped by an outage"
+        assert module.fetch_errors == {"Source s": "ConnectError", "Source t": "ConnectError"}
+
+        await module.sync_household_config()
+        await settle(module)
+        assert len(scraped) == 2, "held back"
+
+        down["names"] = set()
+        now[0] += 61
+        await module.sync_household_config()
+        await settle(module)
+        assert sorted(e["id"] for e in module.in_memory_events) == ["Source s", "Source t"]
+        assert module.fetch_errors == {}
+
+    asyncio.run(run())
+
+
+def test_a_partly_failed_community_scrape_commits_and_is_not_retried(monkeypatch):
+    module = community()
+    now = clocked(module)
+    scraped, _, _ = fake_community(module, monkeypatch, failing=lambda: {"Source t"})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s"), source("t")))
+        await module.sync_household_config()
+        await settle(module)
+        assert [e["id"] for e in module.in_memory_events] == ["Source s"]
+        now[0] += 7200
+        await module.sync_household_config()
+        await settle(module)
+
+    asyncio.run(run())
+    assert len(scraped) == 1
+
+
+def test_a_refresh_where_every_source_failed_does_not_wipe_the_cache(monkeypatch):
+    module = community()
+    scraped, cached, _ = fake_community(module, monkeypatch)
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        await module.sync_household_config()
+        await settle(module)
+        assert cached == [["Source s"]]
+        fake_community(module, monkeypatch, failing=lambda: {"Source s"})
+        recorder = _Recorder()
+        monkeypatch.setattr(module, "cache_events", recorder)
+        assert await module.refresh_events_cache(module.event_sources_config) == []
+        assert recorder.calls == 0
+
+    asyncio.run(run())
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, events):
+        self.calls += 1
+        return True
+
+
+def test_a_scraper_that_raises_counts_as_a_failed_source():
+    module = community()
+
+    async def boom(src, errors):
+        raise RuntimeError("x")
+
+    errors = {}
+    household.install_for_test(sources=admin_events(source("s")))
+    cfg = module.load_event_sources(household.community_sources())
+    module.SCRAPERS["link_scan"] = boom
+    asyncio.run(module.scrape_sources(cfg, errors))
+    assert errors == {"Source s": "RuntimeError while reading the source"}
+
+
+# -- single flight (M1) -----------------------------------------------------------------------
+
+def _no_redis(module, monkeypatch):
+    async def none():
+        return None
+
+    monkeypatch.setattr(module, "get_redis_client", none)
+    module.in_memory_events = []
+
+
+def test_concurrent_searches_during_the_first_reload_share_one_scrape(monkeypatch):
+    module = community()
+    _no_redis(module, monkeypatch)
+    gate = asyncio.Event()
+    scraped, _, _ = fake_community(module, monkeypatch, gates={("Source s",): gate})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        await module.sync_household_config()  # the first scrape starts and waits on the gate
+        searches = [asyncio.create_task(module.search_events()) for _ in range(5)]
+        await asyncio.sleep(0.05)
+        assert len(scraped) == 1, "floor: the reload's scrape is the only one in flight"
+        gate.set()
+        results = await asyncio.gather(*searches)
+        assert all([e["title"] for e in r["events"]] == ["Source s"] for r in results)
+
+    asyncio.run(run())
+    assert scraped == [("Source s",)], "N searches on an empty cache scraped once"
+
+
+def test_concurrent_searches_with_no_reload_in_flight_share_one_scrape(monkeypatch):
+    module = community()
+    _no_redis(module, monkeypatch)
+    gate = asyncio.Event()
+    scraped, _, _ = fake_community(module, monkeypatch, gates={("Source s",): gate})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        module.event_sources_config = module.load_event_sources(household.community_sources())
+        searches = [asyncio.create_task(module.search_events()) for _ in range(5)]
+        await asyncio.sleep(0.05)
+        gate.set()
+        await asyncio.gather(*searches)
+
+    asyncio.run(run())
+    assert scraped == [("Source s",)]
+
+
+def test_a_search_stops_waiting_after_the_bound_and_leaves_the_scrape_running(monkeypatch):
+    module = community()
+    _no_redis(module, monkeypatch)
+    monkeypatch.setattr(module, "FIRST_SCRAPE_WAIT_SECONDS", 0.05)
+    gate = asyncio.Event()
+    scraped, _, _ = fake_community(module, monkeypatch, gates={("Source s",): gate})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        module.event_sources_config = module.load_event_sources(household.community_sources())
+        first = await module.search_events()
+        assert first["events"] == [] and first["cache_status"] == "miss"
+        assert module._search_refresh is not None and not module._search_refresh.done()
+        gate.set()
+        await module._search_refresh
+        second = await module.search_events()
+        assert [e["title"] for e in second["events"]] == ["Source s"]
+
+    asyncio.run(run())
+    assert scraped == [("Source s",)]
+
+
+def test_a_search_survives_the_reload_it_was_waiting_on_being_superseded(monkeypatch):
+    module = community()
+    _no_redis(module, monkeypatch)
+    gate = asyncio.Event()
+    scraped, _, _ = fake_community(module, monkeypatch, gates={("Source s",): gate})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        await module.sync_household_config()          # reload 1 starts and waits on the gate
+        search = asyncio.create_task(module.search_events())
+        await asyncio.sleep(0.02)
+        household.install_for_test(sources=admin_events(source("t")))
+        await module.sync_household_config()          # an admin edit cancels reload 1
+        result = await asyncio.wait_for(search, timeout=5)
+        assert "events" in result, "the search answered instead of being cancelled with the reload"
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_search_does_not_cancel_the_shared_scrape(monkeypatch):
+    module = community()
+    _no_redis(module, monkeypatch)
+    gate = asyncio.Event()
+    scraped, _, _ = fake_community(module, monkeypatch, gates={("Source s",): gate})
+
+    async def run():
+        household.install_for_test(sources=admin_events(source("s")))
+        module.event_sources_config = module.load_event_sources(household.community_sources())
+        doomed = asyncio.create_task(module.search_events())
+        await asyncio.sleep(0.02)
+        doomed.cancel()
+        await asyncio.gather(doomed, return_exceptions=True)
+        assert not module._search_refresh.done()
+        gate.set()
+        await module._search_refresh
+        assert [e["title"] for e in (await module.search_events())["events"]] == ["Source s"]
+
+    asyncio.run(run())
+    assert scraped == [("Source s",)]
 
 
 def test_a_change_during_an_inflight_community_scrape_commits_only_the_newer_config(monkeypatch):
@@ -871,11 +1255,16 @@ def test_unconfigured_messages_name_the_admin_page_and_keep_the_env_names(monkey
 # Directions
 # ---------------------------------------------------------------------------
 
-def test_directions_falls_back_to_the_household_location_text_then_env(monkeypatch):
+def test_directions_falls_back_to_the_city_level_location_then_env(monkeypatch):
+    """The fallback is "City, ST" only: a stored street address reaches the origin
+    through the Base Knowledge row the service was allowed to load, never here."""
     module = directions()
     module.BASE_KNOWLEDGE.clear()
+    monkeypatch.setenv("DEFAULT_CITY", "Springfield")
+    monkeypatch.setenv("DEFAULT_STATE", "IL")
+    _clear_cache_for_tests()
     household.install_for_test(sources={"location": {"text": "123 Main St, Springfield, IL"}})
-    assert module.get_default_origin() == "123 Main St, Springfield, IL"
+    assert module.get_default_origin() == "Springfield, IL"
 
     monkeypatch.setenv("DEFAULT_CITY", "Boulder")
     monkeypatch.setenv("DEFAULT_STATE", "CO")

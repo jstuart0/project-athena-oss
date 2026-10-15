@@ -236,6 +236,9 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_gateway_speaker_rooms_source.py",
     "tests/unit/test_admin_frontend_room_settings.py",
     "admin/backend/tests/test_room_settings_routes.py",
+    "tests/unit/test_household_settings_drift.py",
+    "tests/unit/test_household_bypass_zone_prompt.py",
+    "tests/unit/test_household_public_location.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

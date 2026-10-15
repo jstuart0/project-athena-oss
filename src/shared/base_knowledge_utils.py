@@ -198,12 +198,13 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         knowledge_entries: List of knowledge entries from Admin API
 
     Returns:
-        The home address string, or the household location (Base Knowledge, else DEFAULT_CITY/DEFAULT_STATE; empty if unconfigured).
+        The home address string, or the household location (Base Knowledge, else DEFAULT_CITY/DEFAULT_STATE; empty if unconfigured), as "City, ST" only: a street address
+        comes only from an entry the caller was allowed to see.
     """
     from shared import household  # lazy: household pulls in config and the admin client
 
     if not knowledge_entries:
-        return household.location().text
+        return household.location().city_level
 
     # Look for property address entry
     for entry in knowledge_entries:
@@ -229,7 +230,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
             return value
 
     logger.warning("no_home_address_found_using_fallback")
-    return household.location().text
+    return household.location().city_level
 
 
 def extract_property_address(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:

@@ -77,6 +77,9 @@ spec:
             secretKeyRef:
               name: jarvis-web-service-key
               key: SERVICE_API_KEY
+        # DEFAULT_ROOM, CLIMATE_ENTITY, MIN_TEMP, MAX_TEMP and the appliance
+        # entities below are fallbacks: the admin panel's Devices page ("Jarvis
+        # web app" card, owner only) wins when it holds a value.
         - name: DEFAULT_ROOM
           value: "guest"
         # Home Assistant for climate control (optional)

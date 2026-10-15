@@ -129,6 +129,49 @@ def collect_config_field_names() -> set[str]:
     return names
 
 
+def collect_household_env_names() -> set[str]:
+    """Env-var names read by the household settings registry.
+
+    ``src/shared/household_settings.py`` is pure (jarvis-web copies it), so it
+    is handed an ``env`` mapping instead of calling ``os.getenv``: the
+    jarvis-web names sit in the ``_JARVIS_ENV`` table (first element of each
+    value) and in ``env.get("NAME")`` calls on a parameter called ``env``.
+    The AST scan above can't see either.
+    """
+    path = REPO_ROOT / "src" / "shared" / "household_settings.py"
+    if not path.exists():
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if targets and any(isinstance(t, ast.Name) and t.id == "_JARVIS_ENV" for t in targets) and node.value is not None:
+            for dict_node in ast.walk(node.value):
+                if not isinstance(dict_node, ast.Dict):
+                    continue
+                for value in dict_node.values:
+                    if isinstance(value, ast.Tuple) and value.elts:
+                        literal = _string_literal(value.elts[0])
+                        if literal is not None:
+                            names.add(literal)
+        elif (
+            isinstance(node, ast.Call)
+            and node.args
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "env"
+        ):
+            literal = _string_literal(node.args[0])
+            if literal is not None:
+                names.add(literal)
+    return names
+
+
 def collect_getenv_names(root: Path) -> set[str]:
     names: set[str] = set()
     for py in root.rglob("*.py"):
@@ -254,6 +297,7 @@ def main() -> int:
     # detection is unchanged.
     config_field_names = collect_config_field_names()
     code_names |= config_field_names
+    code_names |= collect_household_env_names()
 
     code_names -= RUNTIME_INJECTED_NAMES
     deploy_refs = collect_non_python_refs()

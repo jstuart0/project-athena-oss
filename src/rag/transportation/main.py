@@ -158,6 +158,8 @@ fetch_errors: Dict[str, str] = {}
 _generation = 0
 _reload_task: Optional["asyncio.Task[None]"] = None
 _target: Optional[TransitConfig] = None
+# Holds a failed config back from the 60 s poll for a doubling delay.
+_backoff = household.ReloadBackoff()
 _poll_task: Optional["asyncio.Task[None]"] = None
 
 # Cache client
@@ -454,7 +456,8 @@ async def load_gtfs_data(cfg: TransitConfig) -> Tuple[Dict[str, Any], Dict[str, 
 
 async def _run_reload(cfg: TransitConfig, generation: int) -> None:
     """Load ``cfg`` and commit it if no newer config has arrived. A failure
-    keeps the previous data and config, and lets the next poll try again."""
+    (the loader raising, or every GTFS feed failing) keeps the previous data and
+    config, and the same config is tried again after a doubling delay."""
     global transit_config, transit_data, _target
     try:
         if not cfg.configured:
@@ -464,16 +467,28 @@ async def _run_reload(cfg: TransitConfig, generation: int) -> None:
             data, errors = await load_gtfs_data(cfg)
         if generation != _generation:
             return
-        transit_config, transit_data = cfg, data
+        every_feed_failed = bool(cfg.feeds) and all(feed_id in errors for feed_id in cfg.feeds)
+        keep_previous = every_feed_failed and bool(transit_data.get("stops"))
+        if every_feed_failed:
+            delay = _backoff.failed(cfg)
+            _target = None
+            logger.warning(f"transit_reload_all_feeds_failed retry_in_seconds={delay:.0f} kept_previous={keep_previous}")
+        else:
+            _backoff.succeeded()
         fetch_errors.clear()
         fetch_errors.update(errors)
+        if keep_previous:
+            return
+        transit_config, transit_data = cfg, data
         logger.info(f"Loaded {len(data['stops'])} stops, {len(data['routes'])} routes")
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.error(f"transit_reload_failed error_type={type(e).__name__}")
         if generation == _generation:
+            delay = _backoff.failed(cfg)
             _target = None
+            logger.warning(f"transit_reload_retry_in_seconds={delay:.0f}")
         return
 
     if cache and cfg.configured:
@@ -504,6 +519,8 @@ async def apply_transit_config(cfg: TransitConfig, *, force: bool = False) -> bo
     reload in flight and starts a new one. Returns whether a reload started."""
     global _generation, _reload_task, _target
     if cfg == _target and not force:
+        return False
+    if not force and _backoff.held_back(cfg):
         return False
     _generation += 1
     generation = _generation
@@ -553,7 +570,7 @@ async def lifespan(app: FastAPI):
     await cache.connect()
 
     household_reader = household.configure(sections=("transit",))
-    await household_reader.current()
+    await household.warm()
     await sync_household_config()
     _poll_task = asyncio.create_task(poll_household_config())
 

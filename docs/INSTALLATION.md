@@ -207,7 +207,8 @@ OIDC_REDIRECT_URI=https://athena.example.com/auth/callback
 # Kubernetes in-cluster: ALLOWED_CALLBACK_HOSTS=athena-admin-backend.athena-prod.svc.cluster.local
 ALLOWED_CALLBACK_HOSTS=
 
-# Location defaults (OPTIONAL — leave blank for no default)
+# Location defaults (OPTIONAL — leave blank for no default). Fallbacks: the
+# home location set in the admin panel (Base Knowledge) wins.
 DEFAULT_CITY=
 DEFAULT_STATE=
 DEFAULT_TIMEZONE=UTC

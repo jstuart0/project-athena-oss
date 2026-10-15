@@ -378,7 +378,7 @@
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
                         </div>
-                        <div id="knowledge-location-help" role="status" class="hidden text-xs"></div>
+                        <div id="knowledge-location-help" class="hidden text-xs"></div>
                         <p class="text-xs text-gray-500">Your teams for sports questions are set on the Conversation Context page.
                             <button type="button" id="knowledge-favorite-teams-link" onclick="showTab('conversation-context'); focusFavoriteTeamsHeading()" class="text-blue-400 hover:text-blue-300 underline">Favourite teams &rarr;</button>
                         </p>

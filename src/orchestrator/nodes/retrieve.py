@@ -239,7 +239,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                         'right now', 'at the moment', 'this morning', 'this afternoon',
                         'this evening', 'later today',
                     }
-                    home_location = default_location()
+                    home_location = default_location(state.knowledge_audience)
                     raw_location = state.entities.get("location", home_location)
                     raw_lower = raw_location.lower().strip().strip(" ?!.,") if raw_location else ""
                     # Use default location if extracted location is actually a temporal word/phrase
@@ -514,7 +514,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
             # Check if query has location-sensitive keywords that need location context
             location_keywords = ["local", "near me", "nearby", "in my area", "around here", "close by", "in town"]
             query_lower = state.query.lower()
-            home_location = default_location()
+            home_location = default_location(state.knowledge_audience)
             user_location = state.entities.get("location", home_location) if state.entities else home_location
 
             if any(kw in query_lower for kw in location_keywords):

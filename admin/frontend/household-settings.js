@@ -29,11 +29,15 @@
     const WRITE_ONLY_NOTE = 'You can view these settings. Changing them needs write access.';
     const RESTRICTED_NOTE = 'Only the house owner can see and change these settings.';
     const LEGEND = "Fields marked \"Server setting\" aren't set here. Athena uses the server's value or its built-in default.";
+    const LEGEND_KINDS = ['text', 'entity', 'temperature_pair'];
+    const NARROW_INPUT = 'max-w-[8rem]';
+    const MEDIUM_INPUT = 'max-w-xl';
     const INVALID_NOTE = 'Some fields need attention. Fix the highlighted fields and save again.';
 
     const INPUT_CLASS = 'w-full min-h-[44px] px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors disabled:opacity-50';
     const BUTTON_CLASS = 'min-h-[44px] px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
     const LINK_BUTTON_CLASS = 'min-h-[44px] px-2 py-2 text-sm text-blue-400 hover:text-blue-300 underline disabled:opacity-50 disabled:cursor-not-allowed';
+    const SECONDARY_BUTTON_CLASS = 'min-h-[44px] px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
     const HIDDEN = 'hidden ';
 
     // --- tiny DOM helper (text only: strings become text nodes) ---------------------------------
@@ -145,7 +149,8 @@
             type: 'text', id, autocomplete: 'off', spellcheck: 'false',
             maxlength: field.maxlength || 255, inputmode: field.inputmode,
             placeholder: field.placeholder || 'Server setting',
-            'aria-describedby': `${helpId} ${errorId}`, 'aria-invalid': 'false', class: INPUT_CLASS,
+            'aria-describedby': `${helpId} ${errorId}`, 'aria-invalid': 'false',
+            class: field.narrow ? `${INPUT_CLASS} ${NARROW_INPUT}` : (field.medium ? `${INPUT_CLASS} ${MEDIUM_INPUT}` : INPUT_CLASS),
         });
         const error = errorLine(errorId);
         const clearButton = el('button', {
@@ -210,6 +215,7 @@
 
     function entityControl(field, ctx) {
         const merged = Object.assign({
+            medium: true,
             maxlength: 255,
             help: `A Home Assistant entity id, e.g. ${field.example}.`,
             check: entityCheck(field),
@@ -275,7 +281,8 @@
         const labelled = (input, text) => el('div', { class: 'flex-1' },
             el('label', { for: input.getAttribute('id'), class: 'block text-sm font-medium text-gray-400 mb-2' }, text), input);
         return {
-            el: el('div', { class: 'mb-4' },
+            el: el('fieldset', { class: 'mb-4' },
+                el('legend', { class: 'block text-sm font-medium text-gray-400 mb-2' }, field.label),
                 el('div', { class: 'flex items-end gap-3' },
                     labelled(low, 'Lowest temperature (°F)'), labelled(high, 'Highest temperature (°F)'), clearButton),
                 el('p', { id: helpId, class: 'text-xs text-gray-500 mt-1' }, field.help || ''),
@@ -321,9 +328,9 @@
             input.value = value || '';
             const error = errorLine(`${id}-error-${itemSerial}`);
             input.setAttribute('aria-describedby', error.getAttribute('id'));
-            const remove = el('button', { type: 'button', class: `${BUTTON_CLASS} bg-gray-700 hover:bg-gray-600` }, 'Remove');
+            const remove = el('button', { type: 'button', class: SECONDARY_BUTTON_CLASS }, 'Remove');
             const item = { input, error, remove, row: null };
-            input.addEventListener('input', () => { setItemError(item, ''); ctx.changed(); });
+            input.addEventListener('input', () => { setItemError(item, ''); relabel(); ctx.changed(); });
             input.addEventListener('blur', () => { input.value = String(input.value).trim(); validateItem(item); });
             remove.addEventListener('click', () => removeItem(item));
             item.row = el('li', { class: 'mb-2' }, el('div', { class: 'flex items-center gap-2' }, input, remove), error);
@@ -460,7 +467,7 @@
         blurb: "The model the gateway falls back to when its chosen model is unavailable.",
         intro: ["Reset to Defaults on this page doesn't change this setting."],
         fields: [{
-            name: 'fallback_model', kind: 'text', label: 'Fallback model', maxlength: 255,
+            name: 'fallback_model', kind: 'text', label: 'Fallback model', maxlength: 255, medium: true,
             placeholder: 'Server setting, else the default model', check: v => (MODEL_RE.test(v) ? '' : 'bad_model_name'),
             help: "Used when the gateway's chosen model is unavailable.",
         }],
@@ -469,9 +476,10 @@
     defineCard('sms', {
         title: 'Default country code',
         blurb: 'Used to read guest phone numbers that have no country prefix.',
+        dirtyWarning: "Changing this changes which bookings a text is matched to. After saving, check that a current guest's texts are still recognised.",
         fields: [{
             name: 'default_country_code', kind: 'text', label: 'Country code', maxlength: 4, inputmode: 'numeric',
-            placeholder: 'Server setting',
+            placeholder: 'Server setting', narrow: true,
             normalize: v => (v.startsWith('+') ? v.slice(1) : v),
             check: v => (/^[0-9]{1,3}$/.test(v) && parseInt(v, 10) !== 0 ? '' : 'bad_country_code'),
             help: "Used when a guest's phone number has no + prefix. US/Canada: 1.",
@@ -482,7 +490,7 @@
         title: 'Amtrak station',
         blurb: 'The station Athena uses for train questions when none is named.',
         fields: [{
-            name: 'default_station', kind: 'text', label: 'Station code', maxlength: 3, placeholder: 'Server setting',
+            name: 'default_station', kind: 'text', label: 'Station code', maxlength: 3, placeholder: 'Server setting', narrow: true,
             normalize: v => v.toUpperCase(),
             check: v => (/^[A-Z]{3}$/.test(v) ? '' : 'bad_station'),
             help: 'Three-letter station code, e.g. NYP.',
@@ -493,8 +501,7 @@
         title: 'Room lights',
         blurb: 'Lights that "the kitchen lights" and similar commands leave alone.',
         intro: [
-            'Athena always skips voice-satellite LED rings and status LEDs (names containing led_ring or status_led). Entries you add here are skipped as well.',
-            "A list saved here replaces any list set on the server. The built-in rule above always applies.",
+            "Whenever a list is saved here, Athena also skips voice-satellite LED rings and status LEDs (names containing led_ring or status_led). A list saved here replaces the server's list.",
         ],
         fields: [{
             name: 'room_light_exclude', kind: 'text_list', label: 'Lights to skip', itemLabel: 'Pattern', maxItems: 50, maxlength: 128,
@@ -548,7 +555,7 @@
         blurb: 'The room, thermostat and kitchen appliances the Jarvis web app controls.',
         fields: [
             {
-                name: 'default_room', kind: 'text', label: 'Default room', maxlength: 64, placeholder: 'Server setting, else guest',
+                name: 'default_room', kind: 'text', label: 'Default room', maxlength: 64, medium: true, placeholder: 'Server setting, else guest',
                 check: v => (ROOM_RE.test(v) ? '' : 'bad_room'),
                 help: 'The room the Jarvis web app controls by default.',
             },
@@ -582,6 +589,15 @@
         return `You have unsaved changes to ${joinNames(list.map(c => c.title))}. Leave without saving?`;
     }
 
+    // A browser Back/Forward has already put the destination in the URL; staying
+    // means the URL must name the tab that is still showing.
+    function restoreHash(card) {
+        const id = card.tabId();
+        if (id.startsWith('tab-') && global.history && typeof global.history.replaceState === 'function') {
+            global.history.replaceState(null, '', `#${id.slice(4)}`);
+        }
+    }
+
     let tabGuardInstalled = false;
     function installTabGuard() {
         if (tabGuardInstalled || typeof global.showTab !== 'function') return;
@@ -590,7 +606,10 @@
         global.showTab = function (tabName) {
             const leaving = dirtyCards().filter(card => card.tabShowing() && card.tabId() !== `tab-${tabName}`);
             if (leaving.length) {
-                if (!global.confirm(leaveMessage(leaving))) return undefined;
+                if (!global.confirm(leaveMessage(leaving))) {
+                    restoreHash(leaving[0]);
+                    return undefined;
+                }
                 leaving.forEach(card => card.discard());
             }
             return original.apply(this, arguments);
@@ -629,30 +648,33 @@
 
         const heading = el('h3', { id: `${base}-heading`, tabindex: '-1', class: 'text-lg font-semibold text-white focus:outline-none' }, def.title);
         const dirtyMarker = el('span', { class: `${HIDDEN}text-xs text-yellow-400` }, 'Unsaved changes');
-        const saveButton = el('button', {
-            type: 'button', disabled: true,
-            class: 'min-h-[44px] px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
-        }, 'Save');
-        const legend = el('p', { class: 'text-xs text-gray-500 mb-4' }, LEGEND);
+        const discardButton = el('button', { type: 'button', class: `${HIDDEN}${LINK_BUTTON_CLASS}` }, 'Discard changes');
+        const SAVE_CLASS = 'min-h-[44px] px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
+        const saveButton = el('button', { type: 'button', disabled: true, class: `${HIDDEN}${SAVE_CLASS}` }, 'Save');
+        const legendText = def.legend !== undefined
+            ? def.legend
+            : (def.fields.some(field => LEGEND_KINDS.includes(field.kind)) ? LEGEND : '');
+        const legend = el('p', { class: 'text-xs text-gray-500 mb-4' }, legendText);
         const note = el('p', { class: `${HIDDEN}text-sm text-gray-400 mb-3` });
         const conflictText = el('p', { role: 'alert', class: 'text-sm text-yellow-400 mb-2' });
         const reapply = el('button', { type: 'button', class: BUTTON_CLASS }, 'Re-apply my changes');
         const conflictBox = el('div', { class: `${HIDDEN}mb-3` }, conflictText, reapply);
         const message = el('p', { role: 'alert', class: `${HIDDEN}text-sm mb-3` });
         const status = el('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
-        const warning = el('p', { class: `${HIDDEN}text-sm text-yellow-400 mb-3`, role: 'status' });
+        const warning = el('p', { class: `${HIDDEN}text-sm text-yellow-400 mb-3` });
         const body = el('div', { 'aria-labelledby': `${base}-heading` });
 
         const root = el('div', { class: 'bg-dark-card border border-dark-border rounded-lg p-6 mb-6', 'data-household-card': section },
             el('div', { class: 'flex justify-between items-start gap-4 mb-2' },
                 el('div', null, heading, el('p', { class: 'text-sm text-gray-400 mt-1' }, def.blurb)),
-                el('div', { class: 'flex items-center gap-3 shrink-0' }, dirtyMarker, saveButton)),
+                el('div', { class: 'flex items-center gap-3 shrink-0' }, dirtyMarker, discardButton, saveButton)),
             ...(def.intro || []).map(line => el('p', { class: 'text-xs text-gray-500 mb-2' }, line)),
             legend, note, conflictBox, message, status, warning, body);
 
         function announce(text) { status.textContent = text || ''; }
 
         function setMessage(text, tone) {
+            card.messageTone = text ? tone : '';
             message.textContent = text || '';
             message.setAttribute('role', tone === 'success' ? 'status' : 'alert');
             message.className = `${text ? '' : HIDDEN}text-sm mb-3 ${tone === 'error' ? 'text-red-400' : 'text-green-400'}`;
@@ -690,22 +712,27 @@
             const dirty = isDirty();
             saveButton.disabled = !dirty || card.saving;
             saveButton.textContent = card.saving ? 'Saving…' : 'Save';
-            const showSave = editable();
-            saveButton.setAttribute('aria-hidden', showSave ? 'false' : 'true');
-            if (!showSave) saveButton.disabled = true;
+            saveButton.className = `${editable() ? '' : HIDDEN}${SAVE_CLASS}`;
             dirtyMarker.className = `${dirty ? '' : HIDDEN}text-xs text-yellow-400`;
-            if (def.warn && editable()) {
-                const text = def.warn(collect());
-                warning.textContent = text;
-                warning.className = `${text ? '' : HIDDEN}text-sm text-yellow-400 mb-3`;
-            } else {
-                warning.textContent = '';
-                warning.className = `${HIDDEN}text-sm text-yellow-400 mb-3`;
-            }
+            discardButton.className = `${dirty && !card.saving ? '' : HIDDEN}${LINK_BUTTON_CLASS}`;
+            const warnings = [];
+            if (editable() && def.warn) warnings.push(def.warn(collect()));
+            if (dirty && def.dirtyWarning) warnings.push(def.dirtyWarning);
+            const warnText = warnings.filter(Boolean).join(' ');
+            warning.textContent = warnText;
+            warning.className = `${warnText ? '' : HIDDEN}text-sm text-yellow-400 mb-3`;
+            conflictBox.className = `${card.conflict && editable() ? '' : HIDDEN}mb-3`;
             card.controls.forEach(control => { control.setDisabled(!editable() || card.saving); });
         }
 
-        function changed() { updateChrome(); }
+        // An edit: the "Saved" line is no longer true, and a warning that appears
+        // because of the edit is announced (a warning present at load is not).
+        function changed() {
+            if (card.messageTone === 'success') setMessage('');
+            const before = warning.textContent;
+            updateChrome();
+            if (warning.textContent && warning.textContent !== before) announce(warning.textContent);
+        }
 
         // --- body ---
         function fieldStored(field) {
@@ -752,14 +779,14 @@
             if (key === card.bodyKey) return;
             card.bodyKey = key;
             clear(body);
-            legend.className = `${card.view === 'ready' && !card.restricted ? '' : HIDDEN}text-xs text-gray-500 mb-4`;
+            legend.className = `${legendText && card.view === 'ready' && !card.restricted ? '' : HIDDEN}text-xs text-gray-500 mb-4`;
             const noteText = card.restricted ? RESTRICTED_NOTE : card.readOnlyNote;
             note.textContent = noteText;
             note.className = `${noteText ? '' : HIDDEN}text-sm text-gray-400 mb-3`;
             if (card.view === 'loading') {
                 body.appendChild(el('p', { class: 'text-sm text-gray-400' }, 'Loading…'));
             } else if (card.view === 'forbidden') {
-                body.appendChild(el('p', { class: 'text-sm text-gray-400' }, "You don't have permission to view this setting"));
+                body.appendChild(el('p', { class: 'text-sm text-gray-400' }, "You don't have permission to view this setting."));
             } else if (card.view === 'error') {
                 const retry = el('button', { type: 'button', class: BUTTON_CLASS }, 'Retry');
                 retry.addEventListener('click', () => load(true));
@@ -825,11 +852,11 @@
 
         function showConflict() {
             conflictText.textContent = `Someone else saved ${def.title} while you were editing. Your changes weren't saved. The latest version is shown below.`;
-            conflictBox.className = 'mb-3';
+            updateChrome();
         }
         function hideConflict() {
             card.conflict = null;
-            conflictBox.className = `${HIDDEN}mb-3`;
+            updateChrome();
         }
 
         function applyServerErrors(detail) {
@@ -872,6 +899,7 @@
                     card.bodyKey = '';
                     render();
                     setMessage(def.savedCopy || SAVED_COPY, 'success');
+                    heading.focus();
                     return;
                 }
                 card.saving = false;
@@ -880,6 +908,7 @@
                     await load(true);
                     card.conflict = draft;
                     showConflict();
+                    if (editable()) reapply.focus();
                     return;
                 }
                 if (response.status === 422) {
@@ -912,7 +941,14 @@
         function discard() {
             if (card.baseline && card.controls.length) applyValue(JSON.parse(card.baseline));
             hideConflict();
+            setMessage('');
             updateChrome();
+        }
+
+        function discardByUser() {
+            discard();
+            heading.focus();
+            announce('Changes discarded.');
         }
 
         function tabElement() {
@@ -925,6 +961,7 @@
         }
 
         saveButton.addEventListener('click', save);
+        discardButton.addEventListener('click', discardByUser);
         reapply.addEventListener('click', reapplyDraft);
 
         Object.assign(card, {
@@ -960,7 +997,7 @@
     }
 
     // The small DOM helpers and control classes, shared with household-settings-lists.js.
-    const ui = { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN };
+    const ui = { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, SECONDARY_BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN };
 
     global.HouseholdSettings = { mount, focusHeading, registerKind, defineCard, messageFor, ui };
 })(window);

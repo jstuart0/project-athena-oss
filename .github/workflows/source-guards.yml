@@ -48,7 +48,7 @@ jobs:
       - name: Run the guards
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_model_literal_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_base_knowledge_tier_parity.py tests/unit/test_knowledge_reader_population.py tests/unit/test_session_key_drift.py tests/unit/test_owner_session_ids.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py tests/unit/test_conversations_js_escaping.py tests/unit/test_admin_frontend_api_errors.py tests/unit/test_admin_frontend_capture_settings.py tests/unit/test_admin_frontend_capture_toasts.py tests/unit/test_emerging_intents_js_withheld.py tests/unit/test_ha_consolidation_drift.py tests/unit/test_llm_direct_ollama_drift.py tests/unit/test_model_json_strip.py tests/unit/test_access_target_drift.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_model_literal_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_base_knowledge_tier_parity.py tests/unit/test_knowledge_reader_population.py tests/unit/test_session_key_drift.py tests/unit/test_owner_session_ids.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py tests/unit/test_conversations_js_escaping.py tests/unit/test_admin_frontend_api_errors.py tests/unit/test_admin_frontend_capture_settings.py tests/unit/test_admin_frontend_capture_toasts.py tests/unit/test_emerging_intents_js_withheld.py tests/unit/test_ha_consolidation_drift.py tests/unit/test_llm_direct_ollama_drift.py tests/unit/test_model_json_strip.py tests/unit/test_access_target_drift.py tests/unit/test_household_settings_drift.py
 
       # AST only: the two room settings resolvers are the only readers of the
       # light-group and satellite-map environment attributes.
@@ -147,7 +147,7 @@ jobs:
       - name: Run the household orchestrator reader tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_orchestrator_readers.py tests/unit/test_household_orchestrator_lifespan.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_orchestrator_readers.py tests/unit/test_household_orchestrator_lifespan.py tests/unit/test_household_bypass_zone_prompt.py tests/unit/test_household_public_location.py
 
       # Stubs prometheus_client and langgraph in sys.modules at import.
       - name: Run the bed warmer tests (own process)

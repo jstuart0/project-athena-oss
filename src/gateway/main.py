@@ -471,7 +471,7 @@ async def lifespan(app: FastAPI):
     logger.info("Admin config client initialized")
 
     household_reader = household.configure(sections=HOUSEHOLD_SECTIONS, spawn=_spawn_household_refresh)
-    await household_reader.current()
+    await household.warm()
 
     # Fetch gateway configuration from database (with env var fallbacks)
     gateway_config = await admin_client.get_gateway_config()

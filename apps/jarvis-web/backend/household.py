@@ -9,6 +9,8 @@ copied ``household_settings`` module and the fetch is injected by ``main.py``
 then environment, then today's default. Only the startup hook awaits
 ``warm()``.
 """
+import asyncio
+import logging
 import os
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
@@ -17,6 +19,9 @@ import household_settings as hs
 Fetch = Callable[[], Awaitable[Optional[Dict[str, Any]]]]
 
 SECTIONS = ("jarvis_web",)
+WARM_TIMEOUT_SECONDS = 2.5
+
+logger = logging.getLogger(__name__)
 
 _cache: Optional[hs.HouseholdSettingsCache] = None
 
@@ -54,8 +59,12 @@ def settings() -> hs.JarvisWeb:
 
 
 async def warm() -> None:
-    """Load once at startup so the first request sees admin's values."""
-    await _reader().current()
+    """Load once at startup so the first request sees admin's values. Bounded in
+    total: the fetch's own timeout applies per phase."""
+    try:
+        await asyncio.wait_for(_reader().current(), timeout=WARM_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("household_settings_startup_timeout")
 
 
 async def aclose() -> None:

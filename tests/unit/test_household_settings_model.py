@@ -299,7 +299,7 @@ def test_the_worst_case_glob_is_fast_on_the_longest_entity_id(glob):
 
 # -- URLs -------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("url", ["https://example.org/f.zip", "http://example.org", "https://example.org:8443/a?k=v",
+@pytest.mark.parametrize("url", ["https://example.org/f.zip", "http://example.org", "https://example.org:443/a?k=v", "http://example.org:80/a",
                                  "https://8.8.8.8/f", "https://sub.example.co.uk/x"])
 def test_url_accepts(url):
     assert ok("transit", {"gtfs_feeds": [{**FEED, "url": url}]})["gtfs_feeds"][0]["url"] == url
@@ -310,7 +310,7 @@ def test_url_accepts(url):
     ("file:///etc/passwd", "url_scheme"), ("javascript:alert(1)", "url_scheme"),
     ("http://localhost/f", "url_private_host"), ("http://LOCALHOST./f", "url_private_host"),
     ("http://a.localhost/f", "url_private_host"), ("http://intranet/f", "url_private_host"),
-    ("http://10.0.0.1/f", "url_private_host"), ("http://192.168.1.1/f", "url_private_host"),
+    ("http://10.0.0.1/f", "url_private_host"), ("http://172.16.0.1/f", "url_private_host"),
     ("http://127.0.0.1/f", "url_private_host"), ("http://0x7f000001/f", "url_private_host"),
     ("http://2130706433/f", "url_private_host"), ("http://0177.0.0.1/f", "url_private_host"),
     ("http://[fd00::1]/f", "url_private_host"), ("http://[::1]/f", "url_private_host"),
@@ -318,11 +318,21 @@ def test_url_accepts(url):
     ("http://169.254.169.254/latest", "url_private_host"), ("http://100.64.0.1/f", "url_private_host"),
     ("http://0.0.0.0/f", "url_private_host"), ("http://224.0.0.1/f", "url_private_host"),
     ("http://svc.ns.svc/f", "url_private_host"), ("http://a.cluster.local/f", "url_private_host"),
+    ("http://[::7f00:1]/f", "url_private_host"), ("http://[::8.8.8.8]/f", "url_private_host"),
+    ("http://[2002:7f00:1::1]/f", "url_private_host"), ("http://[2002:808:808::1]/f", "url_private_host"),
+    ("http://[64:ff9b::7f00:1]/f", "url_private_host"), ("http://[64:ff9b::808:808]/f", "url_private_host"),
+    ("http://[64:ff9b:1::1]/f", "url_private_host"),
+    ("http://db.internal/f", "url_private_host"), ("http://nas.local/f", "url_private_host"),
+    ("http://router.lan/f", "url_private_host"), ("http://x.home.arpa/f", "url_private_host"),
+    ("http://A.INTERNAL./f", "url_private_host"),
     ("https://example.org/f#frag", "url_fragment"), ("https://example.org/f#", "url_fragment"),
     ("https://example.org/•••", "url_mask_token"),
     ("https://example.org/a b", "url_invalid"), ("https://example.org/a\nb", "url_invalid"),
     ("https://example.org\\@evil.org/", "url_invalid"), ("", "url_invalid"), ("https://", "url_invalid"),
-    ("https://example.org:99999/", "url_invalid"), ("https://[::1/f", "url_invalid"),
+    ("https://example.org:99999/", "url_invalid"),
+    ("https://example.org:8443/a?k=v", "url_port"), ("http://example.org:8080/f", "url_port"),
+    ("https://example.org:22/f", "url_port"), ("https://8.8.8.8:9000/f", "url_port"),
+    ("http://localhost:8080/f", "url_private_host"), ("http://10.0.0.1:8080/f", "url_private_host"), ("https://[::1/f", "url_invalid"),
     ("https://example.1/f", "url_invalid"), ("https://-bad.example.org/", "url_invalid"),
     ("https://" + "a" * 64 + ".org/", "url_invalid"), ("https://exämple.org/", "url_invalid"),
     ("https://example.org/" + "a" * 2100, "url_invalid"),

@@ -485,7 +485,7 @@ async def lifespan(app: FastAPI):
     await cache.connect()
 
     household_reader = household.configure(sections=("amtrak",))
-    await household_reader.current()
+    await household.warm()
     if not _default_origin():
         logger.warning("amtrak_default_origin_not_configured")
 

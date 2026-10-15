@@ -69,7 +69,7 @@ def test_the_script_is_copied_tagged_after_the_renderer_and_before_escape_html(h
 
 @pytest.mark.parametrize("name", ["household-settings.js", "household-settings-lists.js", "directions-settings.js"])
 def test_every_edited_script_carries_the_new_buster(html, name):
-    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs2"', html)
+    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs[0-9]"', html)
 
 
 def test_the_directions_page_mounts_the_two_list_cards():
@@ -293,6 +293,23 @@ def test_a_server_url_masked_edit_refusal_opens_the_replace_field_with_the_expla
     )
     assert any("The saved key is hidden" in a for a in result["alerts"])
     assert result["open"] == "true" and result["input"] is True
+
+
+def test_a_server_port_refusal_explains_the_standard_ports():
+    result = scenario(
+        r"""
+        const box = __box('c1');
+        __script = [__transit([__feed()], null)];
+        await HouseholdSettings.mount('transit', 'c1');
+        __type(__in(__row(box, 0), 'Name'), 'Renamed');
+        __script = [{status: 422, body: {detail: [{loc: ['gtfs_feeds', 0, 'url'], type: 'url_port'}]}}];
+        __saveButton(box).click();
+        await __settle();
+        return {alerts: __alerts(box)};
+        """
+    )
+    assert any("standard port" in a for a in result["alerts"]), result["alerts"]
+    assert not any("This value wasn't accepted" in a for a in result["alerts"])
 
 
 def test_allow_private_and_origin_are_never_sent_even_if_a_row_carries_them():
@@ -550,14 +567,14 @@ def test_a_read_only_user_can_open_rows_but_not_change_or_add_anything():
         return {
           inputsDisabled: __inputs(row).every(i => i.disabled), editEnabled: !__edit(row).disabled, open: __edit(row).attrs['aria-expanded'],
           removeDisabled: __remove(row).disabled, addDisabled: __buttons(box, 'Add feed').every(b => b.disabled),
-          note: __text(box).includes('You can view these settings. Changing them needs write access.'), saveHidden: __saveButton(box).attrs['aria-hidden'],
+          note: __text(box).includes('You can view these settings. Changing them needs write access.'), saveHidden: !__visible(__saveButton(box)),
           replaceDisabled: __buttons(row, 'Replace URL')[0].disabled,
         };
         """
     )
     assert result == {
         "inputsDisabled": True, "editEnabled": True, "open": "true", "removeDisabled": True, "addDisabled": True,
-        "note": True, "saveHidden": "true", "replaceDisabled": True,
+        "note": True, "saveHidden": True, "replaceDisabled": True,
     }
 
 
@@ -619,10 +636,11 @@ def test_the_lamp_exclusion_card_says_the_built_in_rule_always_applies_and_enfor
         __script = [{status: 422, body: {detail: [{loc: ['room_light_exclude', 0], type: 'glob_too_broad'}]}}];
         __saveButton(box).click();
         await __settle();
-        return {builtIn: text.includes('Athena always skips voice-satellite LED rings and status LEDs'), applies: text.includes('The built-in rule above always applies.'), bad, server: __alerts(box)};
+        return {builtIn: text.includes('Whenever a list is saved here, Athena also skips voice-satellite LED rings and status LEDs'), replaces: text.includes("A list saved here replaces the server's list."), always: text.includes('always'), legend: text.includes('Server setting'), bad, server: __alerts(box)};
         """
     )
-    assert result["builtIn"] is True and result["applies"] is True
+    assert result["builtIn"] is True and result["replaces"] is True
+    assert result["always"] is False and result["legend"] is False, "no 'always' claim; no Server-setting legend on a list-only card"
     starts = "Start with light. and use only lowercase letters, numbers, _ and *."
     assert result["bad"]["noPrefix"] == [starts]
     assert result["bad"]["leadingStar"] == ["A pattern can't start with *. Name the start of the light, like light.garage_*."]

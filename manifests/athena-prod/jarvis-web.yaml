@@ -30,6 +30,10 @@ spec:
         env:
         - name: PORT
           value: "8000"
+        # The room, appliance, climate and MIN_TEMP/MAX_TEMP keys here are
+        # fallbacks: the Devices page's "Jarvis web app" card (owner only)
+        # wins when it holds a value; admin first, then these, then the
+        # built-in default. jarvis-web reads them through household.py.
         # DEFAULT_ROOM: OSS template -- commented out, not a tracked value
         # (DC14 item 1d). The backend's own os.getenv("DEFAULT_ROOM",
         # "guest") default applies when this key isn't set at all; the
