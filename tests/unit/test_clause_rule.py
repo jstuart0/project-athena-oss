@@ -976,3 +976,24 @@ def test_without_the_agent_a_conditional_command_is_refused_not_run_now(utteranc
     from orchestrator.nodes.route_control import CONDITIONAL_COMMAND_TEXT
     state, _model, client = drive_control(utterance)
     assert writes(client) == [] and state.answer == CONDITIONAL_COMMAND_TEXT, (utterance, state.answer)
+
+
+# --- reconcile r3: recurring days, "when it ..." as a condition ---------------------------------
+
+@pytest.mark.parametrize("utterance", [
+    "unlock the front door on weekdays", "open the garage door on weekends", "lock the door on mondays",
+    "unlock the front door when it gets dark", "open the garage door when it rains",
+    "lock the front door once it is late",
+], ids=str)
+def test_recurring_days_and_when_it_defer_a_door_in_the_controller_on_its_own(utterance):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.deferred) == (UNKNOWN, True), utterance
+    domain, action = ("cover", "open") if "garage" in utterance else ("lock", "lock" if "lock the" in utterance and "unlock" not in utterance else "unlock")
+    answer, calls = _door_controller_calls(utterance, domain, action)
+    assert answer == NO_WRITE_CUE_TEXT and calls == [], (utterance, answer)
+
+
+def test_after_that_and_it_stay_sequence_words_but_when_it_is_a_condition():
+    from orchestrator.utterance_kind import _tail_deferral
+    assert _tail_deferral(["the", "door", "when", "it", "gets", "dark"], True, door_clause=True) == "condition"
+    assert _tail_deferral(["the", "lights", "after", "that"], False) is None  # a sequence step, as before
