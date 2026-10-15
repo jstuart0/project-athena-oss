@@ -8,20 +8,42 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import orchestrator.smart_home_controller as shc
-from orchestrator import room_context
-from shared.ha_registry import Area
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+# Import the services from src/ whatever else runs in this process (CI sets no PYTHONPATH).
+_SRC = str(_Path(__file__).resolve().parents[2] / "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
+
+import orchestrator.smart_home_controller as shc  # noqa: E402
+from orchestrator import room_context  # noqa: E402
+from shared.ha_registry import Area  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
 DIRECTORY = room_context.RoomDirectory.build(areas=[
     Area(f"area_{k}", n, (), k) for k, n in (("office", "Office"), ("den", "Den"), ("kitchen", "Kitchen"))
 ])
-NOW = datetime.now(timezone.utc)
-
-
 def sensor(room, state, seconds_ago=0):
-    return {"room": room, "state": state, "last_changed": (NOW - timedelta(seconds=seconds_ago)).isoformat()}
+    # The tables below are built at collection; answer() restamps last_changed
+    # when the test runs, so a slow suite can't age a row out of its window.
+    return {"room": room, "state": state, "_ago": seconds_ago, "last_changed": _stamp(seconds_ago)}
+
+
+def _stamp(seconds_ago):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def _fresh(sensors):
+    out = []
+    for s in sensors:
+        s = dict(s)
+        ago = s.pop("_ago", None)
+        if ago is not None:
+            s["last_changed"] = _stamp(ago)
+        out.append(s)
+    return out
 
 
 def controller(llm_text=None):
@@ -37,7 +59,7 @@ def answer(sensors, query, llm_text=None):
     admin = mock.MagicMock()
     admin.get_component_model = mock.AsyncMock(return_value=None)
     with mock.patch.object(shc, "get_admin_client", return_value=admin):
-        return asyncio.run(c._llm_occupancy_reasoning(sensors, "", query)), llm
+        return asyncio.run(c._llm_occupancy_reasoning(_fresh(sensors), "", query)), llm
 
 
 TEMPLATES = [
