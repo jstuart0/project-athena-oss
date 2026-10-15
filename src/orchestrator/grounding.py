@@ -17,6 +17,7 @@ import json
 import re
 from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional
 
+from orchestrator.favorite_teams import named_team
 from orchestrator.model_safe_errors import is_error_object
 from orchestrator.state import IntentCategory
 from shared.favorite_teams import FavoriteTeam
@@ -288,10 +289,7 @@ def _tool_call(index: int, name: str, arguments: Dict[str, Any]) -> Dict[str, An
 def _sports_team(state: Any) -> Optional[str]:
     """The team the request names; None when it names none."""
     entities = _field(state, "entities") or {}
-    team = entities.get("team")
-    if isinstance(team, str) and team.strip():
-        return team.strip()
-    return None
+    return named_team(entities.get("team"))
 
 
 # The leagues get_sports_scores accepts (rag_tools.py); a favourite in another

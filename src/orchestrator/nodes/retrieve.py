@@ -80,7 +80,7 @@ async def _retrieve_sports(state: OrchestratorState) -> None:
     the turn to tool calling) and ``resolve_default`` picks one; the pick is
     recorded on the state so a later forced tool call names the same team.
     """
-    named = state.entities.get("team")
+    named = favorite_teams.named_team(state.entities.get("team"))
     search_team = None
     if not named:
         decision = await favorite_teams.decide(request_text(state), state.knowledge_audience)

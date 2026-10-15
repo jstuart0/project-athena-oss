@@ -145,3 +145,55 @@ def test_opinion_and_season_wording_stays_general_info(query, pattern, llm_conf)
 ])
 def test_opinion_wording_with_a_time_cue_still_takes_the_pattern(query, pattern):
     assert _arb(query, G, 0.9, pattern).intent == pattern
+
+
+# --- "we" questions about the household's own team -------------------------------------------
+
+CONTEST_QUESTIONS = [
+    "how did we do last night",
+    "how did we do in the game last night",
+    "how'd we do yesterday",
+    "did we win last night",
+    "did we win the game",
+    "did we beat them on sunday",
+    "did we lose today",
+    "are we playing tonight",
+    "who did we play last night",
+    "what was our score last night",
+    "what's our record this season",
+]
+NOT_CONTEST = [
+    "how did we do on the project",
+    "did we win the lottery",
+    "did we do the dishes today",
+    "how do we play chess",
+    "did we win",
+    "we won the lottery last night",
+    "how did you do last night",
+    "what did we have for dinner last night",
+]
+
+
+@pytest.mark.parametrize("query", CONTEST_QUESTIONS)
+def test_a_we_contest_question_with_a_game_or_time_cue_is_sports(query):
+    from orchestrator.intent_arbitration import is_team_contest_question
+    assert is_team_contest_question(query)
+    out = _arb(query, G, 0.95, G, 0.5)  # the observed LLM answer: general_info 0.95; the pattern fallback says 0.5
+    assert (out.intent, out.rule) == (S, "team_contest_question")
+
+
+@pytest.mark.parametrize("query", NOT_CONTEST)
+def test_we_questions_without_a_contest_and_a_cue_are_not_sports(query):
+    from orchestrator.intent_arbitration import is_team_contest_question
+    assert not is_team_contest_question(query)
+    assert _arb(query, G, 0.95, G, 0.5).intent == G
+
+
+def test_the_rule_is_not_held_back_by_the_timeless_wording_list():
+    from orchestrator.intent_arbitration import _TIMELESS_WORDING
+    assert _TIMELESS_WORDING.search("how did we do last night")
+    assert _arb("how did we do last night", G, 0.99, G, 0.5).intent == S
+
+
+def test_an_explicit_web_search_still_wins_over_the_contest_rule():
+    assert _arb("search the web: did we win last night", G, 0.9, I.WEBSEARCH, 0.9).intent == I.WEBSEARCH

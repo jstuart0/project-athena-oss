@@ -51,6 +51,28 @@ LLM_MODERATE = 0.75
 OVERRIDE_CONFIDENCE = 0.9
 WEBSEARCH_CONFIDENCE = 0.95
 
+# "how did we do last night", "did we win the game": the household's own team.
+# Needs the speaker's "we", a contest verb and a game or time cue, so "how did we
+# do on the project" and "did we win the lottery" stay general. Not subject to
+# _TIMELESS_WORDING: "how did" here asks about a result.
+_CONTEST = re.compile(
+    r"\b(?:how(?:'d| did| do| are| have)? we (?:do|doing|been doing)"
+    r"|(?:did|do|does|will|are|were|can) we (?:\w+ )?(?:win|lose|beat|score|play|playing|tie)"
+    r"|(?:what(?:'s| is| was)|whats) our (?:score|record)"
+    r"|who (?:did|are|do) we (?:play|playing|face))\b"
+)
+_GAME_OR_TIME_CUE = re.compile(
+    r"\b(?:last night|tonight|today|yesterday|tomorrow|game|games|match|this (?:week|weekend|season)|last (?:week|weekend)|"
+    r"on (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)|this (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))\b"
+)
+
+
+def is_team_contest_question(query: str) -> bool:
+    """True for a first-person-plural contest question about a game or a day."""
+    lower = (query or "").lower().replace("\u2019", "'")
+    return bool(_CONTEST.search(lower) and _GAME_OR_TIME_CUE.search(lower))
+
+
 _UNSPECIFIC = (IntentCategory.GENERAL_INFO, IntentCategory.UNKNOWN)
 
 _SPORTS_EVIDENCE = re.compile(
@@ -216,6 +238,8 @@ def _chain(
         if pat != IntentCategory.GENERAL_INFO or pat_conf >= SPECIFIC_PATTERN:
             return take(pat, pat_conf, "unknown_takes_pattern")
         return None
+    if llm == IntentCategory.GENERAL_INFO and pat != IntentCategory.WEBSEARCH and is_team_contest_question(query):
+        return take(IntentCategory.SPORTS, OVERRIDE_CONFIDENCE, "team_contest_question")
     if llm == IntentCategory.DIRECTIONS and pat == IntentCategory.DINING:
         return take(IntentCategory.DINING, OVERRIDE_CONFIDENCE, "dining_over_directions")
     if pat == IntentCategory.WEBSEARCH:

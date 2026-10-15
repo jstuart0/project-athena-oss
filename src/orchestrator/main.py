@@ -48,7 +48,7 @@ from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
 from orchestrator import identity_answer, room_choice, room_context
 from orchestrator.entity_repair import repair_for_routing
-from orchestrator.intent_arbitration import arbitrate_intent
+from orchestrator.intent_arbitration import arbitrate_intent, is_team_contest_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
@@ -3128,6 +3128,13 @@ Respond in JSON format:
             state.entities = {**llm_entities}  # Start with LLM entities
             if preserved_location:
                 state.entities["location"] = preserved_location  # Preserve request location
+            if "team" in state.entities:
+                # "we"/"our team"/"none" name no team; drop it so the favourites apply.
+                team = favorite_teams.named_team(state.entities["team"])
+                if team is None:
+                    del state.entities["team"]
+                else:
+                    state.entities["team"] = team
             # Use feature-based complexity detection (more accurate than LLM output)
             state.complexity = determine_complexity(state.query, state.intent.value)
 
@@ -3147,7 +3154,7 @@ Respond in JSON format:
             state.confidence = arbitration.confidence
             if arbitration.entities_update:
                 state.entities = {**(state.entities or {}), **arbitration.entities_update}
-            if state.intent == IntentCategory.SPORTS and routing.team and not (state.entities or {}).get("team"):
+            if state.intent == IntentCategory.SPORTS and routing.team and not favorite_teams.named_team((state.entities or {}).get("team")):
                 state.entities = {**(state.entities or {}), "team": routing.team}
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse classification: {e}")
@@ -3600,6 +3607,10 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
     # Airport patterns
     if any(p in query_lower for p in ["airport", "flight", "delay", "bwi", "dca", "iad"]):
         return result(IntentCategory.AIRPORTS)
+
+    # "how did we do last night", "did we win the game": the household's own team
+    if is_team_contest_question(query_lower):
+        return result(IntentCategory.SPORTS)
 
     # Sports patterns
     sports_patterns = [
@@ -4908,7 +4919,7 @@ DIRECTIONS: When using get_directions:
         # A sports question that names no team is about the household's favourites:
         # the same decision the retrieve node made when the turn came through it.
         sports_decision = None
-        if state.intent == IntentCategory.SPORTS and not state.entities.get("team"):
+        if state.intent == IntentCategory.SPORTS and not favorite_teams.named_team(state.entities.get("team")):
             sports_decision = state.sports_default or await favorite_teams.decide(
                 request_text(state), state.knowledge_audience
             )

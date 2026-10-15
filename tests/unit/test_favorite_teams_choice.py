@@ -817,3 +817,141 @@ def test_no_environment_default_remains():
     from shared.config import AthenaConfig
 
     assert "sports_default_team" not in AthenaConfig.model_fields
+
+
+# --- a classifier that puts a pronoun in the team slot (observed: "did we win" -> team "we") ---------
+
+NOT_A_TEAM_VALUES = ["we", "We", "us", "our", "our team", "my team", "the team", "home team", "none", "None",
+                     "null", "N/A", "unknown", "", "   ", "we.", None]
+
+
+@pytest.mark.parametrize("value", NOT_A_TEAM_VALUES)
+def test_named_team_treats_pronouns_and_nulls_as_no_team(value):
+    assert ft.named_team(value) is None
+
+
+@pytest.mark.parametrize("value,expected", [("Giants", "Giants"), ("  Anytown  Owls ", "Anytown Owls"), ("Us Soccer", "Us Soccer")])
+def test_named_team_keeps_a_real_name_cleaned(value, expected):
+    assert ft.named_team(value) == expected
+
+
+@pytest.mark.parametrize("value", [v for v in NOT_A_TEAM_VALUES if v is not None])
+def test_retrieve_uses_the_favourite_when_the_classifier_put_a_pronoun_in_the_team_slot(value):
+    rag = FakeSports({"Anytown Owls": game_info("1", last=[-1])})
+    state, _ = retrieve(sports_state("did we win", entities={"team": value}), rag, favs=(OWLS,))
+    assert rag.searches() == [{"query": "Anytown Owls", "league": "nfl"}]
+    assert state.retrieved_data["team"] == "Anytown Owls"
+
+
+@pytest.mark.parametrize("value", [v for v in NOT_A_TEAM_VALUES if v is not None])
+def test_tool_route_uses_the_favourite_when_the_team_slot_holds_a_pronoun(monkeypatch, value):
+    out, llm, forced = tool_turn(monkeypatch, "did we win", favs=(OWLS, HAWKS), entities={"team": value})
+    assert forced == [{"name": "get_sports_scores", "arguments": {"team": "Anytown Owls", "league": "nfl"}}]
+    assert "FAVOURITE TEAMS" in llm.system() and out.sports_default.candidates
+
+
+@pytest.mark.parametrize("value", [v for v in NOT_A_TEAM_VALUES if v is not None])
+def test_forced_tool_calls_name_the_favourite_not_the_pronoun(value):
+    from orchestrator import grounding
+    state = sports_state("did we win", entities={"team": value})
+    assert grounding._sports_team(state) is None
+    assert grounding._sports_arguments(state, OWLS) == {"team": "Anytown Owls", "league": "nfl"}
+
+
+def test_the_decision_logs_one_event_with_a_reason_and_counts_only():
+    from structlog.testing import capture_logs
+    with capture_logs() as logs, favorites_are(OWLS, HAWKS):
+        run(ft.decide("how did we do in hockey", HOUSEHOLD))
+        run(ft.decide("how did we do", HOUSEHOLD))
+        run(ft.decide("how did we do", NO_DEFAULT_AUDIENCES["public"]))
+    events = [e for e in logs if e["event"] == "favorite_decision"]
+    assert [(e["reason"], e["candidates"]) for e in events] == [
+        ("no_league_match", 0), ("candidates", 2), ("audience_not_household", 0)
+    ]
+    assert not any("Owls" in str(e) or "Hawks" in str(e) for e in events)
+
+
+# The classifier's observed JSON for the three phrasings (qwen3:4b-instruct, production), through the
+# real classify_node, the real pattern classifier and the real arbitration.
+OBSERVED = {
+    "how did we do last night": {"intent": "general_info", "confidence": 0.95, "entities": {"team": "", "location": "last night"}},
+    "how did we do in the game last night": {"intent": "sports", "confidence": 0.98, "entities": {"team": "we"}},
+    "did we win": {"intent": "sports", "confidence": 0.98, "entities": {"team": "we"}},
+}
+
+
+class ClassifierLLM:
+    def __init__(self, answer):
+        self.answer = answer
+
+    async def generate(self, **kwargs):
+        import json
+        return {"response": json.dumps(self.answer), "eval_count": 1}
+
+
+def classifier_turn(monkeypatch, query):
+    """A fresh state for ``query`` with the classifier runtime answering the observed JSON."""
+    import pathlib
+    import orchestrator
+    from orchestrator.search_providers.intent_classifier import IntentClassifier
+    main = h.main
+    monkeypatch.syspath_prepend(str(pathlib.Path(orchestrator.__file__).parent))  # main.py's bare `semantic_cache` import
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=None)
+    cache.set = AsyncMock()
+    _runtime.set_cache_client(cache)
+    _runtime.set_llm_router(ClassifierLLM(OBSERVED[query]))
+    _runtime.set_intent_classifier(IntentClassifier())
+    monkeypatch.setattr(main, "get_component_config", AsyncMock(return_value={"model_name": "m"}))
+    monkeypatch.setattr(main, "get_conversation_context", AsyncMock(return_value=None))
+    state = OrchestratorState(query=query)
+    state.session_id = "s"
+    state.mode = "owner"
+    state.node_timings = {}
+    state.knowledge_audience = HOUSEHOLD
+    return state
+
+
+@pytest.mark.parametrize("query", list(OBSERVED))
+def test_the_three_we_phrasings_classify_as_sports_with_no_team(monkeypatch, query):
+    out = run(h.main.classify_node(classifier_turn(monkeypatch, query)))
+    assert out.intent == I.SPORTS
+    assert "team" not in (out.entities or {})
+
+
+def test_an_end_to_end_turn_with_team_we_looks_up_the_favourite_not_we(monkeypatch):
+    real = real_langgraph()
+    main = h.main
+    monkeypatch.setattr(main, "StateGraph", real.StateGraph)
+    monkeypatch.setattr(main, "END", real.END)
+    rag = FakeSports({"Anytown Owls": game_info("1", last=[-1])})
+    _runtime.set_rag_client(rag)
+    seen = {}
+
+    async def stop_after_retrieve(state):
+        seen["data"] = state.retrieved_data
+        state.answer = "x"
+        return state
+
+    for name in ("route_info_node", "validate_node", "finalize_node"):
+        monkeypatch.setattr(main, name, stop_after_retrieve)
+    monkeypatch.setattr(main, "should_use_tool_calling", AsyncMock(return_value=False))
+    state = classifier_turn(monkeypatch, "did we win")
+    with (
+        favorites_are(OWLS),
+        mock.patch("orchestrator.nodes.retrieve.get_rag_service_url", AsyncMock(return_value="u")),
+        mock.patch("orchestrator.nodes.retrieve.validator", valid_validator()),
+    ):
+        run(main.create_orchestrator_graph().ainvoke(state))
+    assert rag.searches() == [{"query": "Anytown Owls", "league": "nfl"}]
+    assert seen["data"]["team"] == "Anytown Owls"
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("how did we do last night", (I.SPORTS, 0.85)),
+    ("did we beat them on sunday", (I.SPORTS, 0.85)),
+    ("how did we do on the project", (I.GENERAL_INFO, 0.5)),
+    ("did we win the lottery", (I.GENERAL_INFO, 0.5)),
+])
+def test_the_pattern_classifier_routes_we_contest_questions_with_a_cue_to_sports(query, expected):
+    assert h.main._pattern_based_classification(query, return_confidence=True) == expected

@@ -111,6 +111,28 @@ class DefaultPick:
     looked_up: bool = False
 
 
+# What a classifier puts in the team slot when the speaker means their own side
+# (or nothing): "did we win" comes back as team="we". None of these names a team.
+_NOT_A_TEAM = frozenset({
+    "we", "us", "our", "ours", "my", "mine", "i", "me", "they", "them", "our team", "my team",
+    "the team", "home team", "the home team", "team", "none", "null", "nil", "n/a", "na", "unknown",
+    "unspecified", "not specified", "no team",
+})
+
+
+def named_team(value: Any) -> Optional[str]:
+    """The team a classifier entity names, else None. A pronoun, a generic word
+    ("our team", "the team"), a null-like string or anything but text names no
+    team, so the turn is about the household's favourites. The one reader of a
+    sports team entity."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip(" .,!?\"'")
+    if not cleaned or cleaned.lower() in _NOT_A_TEAM:
+        return None
+    return cleaned
+
+
 def _normalize(text: str) -> str:
     return (text or "").replace("’", "'")
 
@@ -229,8 +251,13 @@ async def decide(text: str, audience: KnowledgeAudience) -> Decision:
     caller outside the household (public, unresolved, guest) gets no candidates
     and no admin request is made."""
     if audience.public or audience.mode != HOUSEHOLD_MODE:
+        logger.info("favorite_decision", reason="audience_not_household", candidates=0)
         return Decision()
-    return Decision(candidates(await favorites(), text))
+    favs = await favorites()
+    chosen = candidates(favs, text)
+    reason = "no_favorites" if not favs else "no_league_match" if not chosen else "candidates"
+    logger.info("favorite_decision", reason=reason, favorites=len(favs), candidates=len(chosen))
+    return Decision(chosen)
 
 
 def default_applied(state: Any) -> bool:
