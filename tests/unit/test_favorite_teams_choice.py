@@ -1084,3 +1084,56 @@ def test_real_model_golden_the_three_phrasings_name_the_oct_11_final(query):
     )
     answer = json.loads(urllib.request.urlopen(request, timeout=120).read())["response"]
     assert "30" in answer and "11" in answer and "don't have information" not in answer.lower()
+
+
+SPORTS_SHELL = {
+    "team": "Anytown Owls", "team_id": "espn:football-nfl:33", "league": "football/nfl",
+    "last_games": [], "upcoming_games": [], "live_games": [],
+    "status": {"state": "none", "summary": "", "winner": None},
+}
+
+
+def test_a_sports_outage_shell_is_not_data_and_a_hedge_still_gets_the_web_fallback(web_fallback):
+    from orchestrator import grounding
+    state = hedging_state("how did we do last night", SPORTS_SHELL)
+    assert not grounding.has_substantive_data(SPORTS_SHELL) and not grounding.grounded(state)
+    run(h.helpers_module.maybe_post_synthesis_fallback(state))
+    web_fallback.search.assert_awaited_once()
+
+
+def test_a_real_last_game_is_substantive_and_a_hedge_gets_no_fallback(web_fallback):
+    from orchestrator import grounding
+    data = dict(SPORTS_SHELL, last_game={"result": "won", "summary": "x"}, today="Thursday, October 15")
+    assert grounding.has_substantive_data(data) and grounding.has_substantive_data(REAL_TEAM_DATA)
+    assert run(h.helpers_module.maybe_post_synthesis_fallback(hedging_state("did we win", data))) is False
+    web_fallback.search.assert_not_awaited()
+
+
+def test_an_upcoming_only_or_live_only_sports_result_is_substantive():
+    from orchestrator import grounding
+    assert grounding.has_substantive_data(dict(SPORTS_SHELL, upcoming_games=[{"strHomeTeam": "a"}]))
+    assert grounding.has_substantive_data(dict(SPORTS_SHELL, live_games=[{"home_team": "a"}]))
+
+
+def test_an_empty_generic_result_is_not_data_and_a_hedge_falls_back(web_fallback):
+    from orchestrator import grounding
+    for empty in ({"results": []}, {"query": "q", "results": [], "source": "s"}, {"items": {}, "note": " "}):
+        assert not grounding.has_substantive_data(empty)
+    state = hedging_state("who won the marathon", {"results": []})
+    run(h.helpers_module.maybe_post_synthesis_fallback(state))
+    web_fallback.search.assert_awaited_once()
+    assert grounding_grounded_tool_results_empty()
+
+
+def grounding_grounded_tool_results_empty():
+    from orchestrator import grounding
+    state = sports_state("q")
+    state.retrieved_data = {"tool_calls": ["search_web"], "tool_results": {"a": {"results": []}}}
+    return not grounding.grounded(state)
+
+
+def test_a_generic_result_with_content_is_data():
+    from orchestrator import grounding
+    assert grounding.has_substantive_data({"results": [{"title": "Hours"}]})
+    assert grounding.has_substantive_data({"places": [{"name": "x"}]})
+    assert grounding.has_substantive_data({"temperature": 70})

@@ -71,8 +71,42 @@ def request_text(state: Any) -> str:
     return _field(state, "resolved_request") or _field(state, "query") or ""
 
 
+# Keys that say what was asked, not what was found.
+_IDENTITY_KEYS = frozenset({
+    "team", "team_id", "league", "query", "source", "service", "type", "name", "id", "location",
+    "today", "success", "status_code", "provider", "data_source",
+})
+_SPORTS_LISTS = ("last_games", "upcoming_games", "live_games")
+
+
+def has_substantive_data(data: Any) -> bool:
+    """Whether a tool or retrieve result carries something to answer from, not
+    only an echo of the question. A sports result needs a ``last_game`` or a
+    non-empty games list (its ``status`` object always exists); any other mapping
+    needs a non-empty value under a key beyond the identity keys, so
+    ``{"results": []}`` and a team shell with empty lists are not data."""
+    if isinstance(data, Mapping):
+        if any(k in data for k in _SPORTS_LISTS):
+            return bool(data.get("last_game")) or any(data.get(k) for k in _SPORTS_LISTS)
+        return any(_has_content(v) for k, v in data.items() if k not in _IDENTITY_KEYS)
+    return _has_content(data)
+
+
+def _has_content(data: Any) -> bool:
+    """Anything non-empty below the top level (an item named "x" is content)."""
+    if isinstance(data, Mapping):
+        return any(_has_content(v) for v in data.values())
+    if isinstance(data, (list, tuple, set, frozenset)):
+        return any(_has_content(v) for v in data)
+    if isinstance(data, str):
+        return bool(data.strip())
+    return data is not None
+
+
 def _is_data(result: Any) -> bool:
     if result is None or result == {} or result == [] or result == "":
+        return False
+    if isinstance(result, Mapping) and not has_substantive_data(result):
         return False
     return not is_error_object(result)
 

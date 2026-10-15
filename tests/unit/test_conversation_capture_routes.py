@@ -66,7 +66,7 @@ class Graph:
             raise self.error
         return {"intent": h.IntentCategory.WEATHER, "answer": self.answer, "confidence": 1.0, "citations": [],
                 "request_id": "r1", "node_timings": {"classify": 3.0}, "validation_passed": True,
-                "retrieved_data": {"weather": {}}, "data_source": "weather", "model_used": "m"}
+                "retrieved_data": {"weather": {"temperature": 70}}, "data_source": "weather", "model_used": "m"}
 
 
 class SessionCache:
