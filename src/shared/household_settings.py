@@ -343,6 +343,25 @@ def _literal_ip(host: str) -> Optional[ipaddress._BaseAddress]:
     return None
 
 
+# IPv6 ranges that embed an IPv4 address (or translate to one) and that
+# ``is_global`` does not refuse: IPv4-compatible, 6to4 and both NAT64 prefixes.
+_EMBEDDING_V6_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in ("::/96", "2002::/16", "64:ff9b::/96", "64:ff9b:1::/48")
+)
+_PRIVATE_NAME_SUFFIXES = (
+    ".localhost", ".svc", ".cluster.local", ".internal", ".local", ".lan", ".home.arpa",
+)
+
+
+def _is_private_literal(ip: ipaddress._BaseAddress) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif any(ip in net for net in _EMBEDDING_V6_NETWORKS):
+            return True
+    return not ip.is_global or ip.is_multicast
+
+
 def _split_url(url: Any):
     if not isinstance(url, str) or not url or len(url) > MAX_URL_LENGTH:
         raise _err("url_invalid")
@@ -377,9 +396,7 @@ def check_fetch_url(url: Any) -> str:
     except ValueError:
         raise _err("url_invalid")
     if ip is not None:
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
-        if not ip.is_global or ip.is_multicast:
+        if _is_private_literal(ip):
             raise _err("url_private_host")
         return url
     name = host.rstrip(".")
@@ -390,10 +407,7 @@ def check_fetch_url(url: Any) -> str:
         or not any(c.isalpha() for c in labels[-1])
     ):
         raise _err("url_invalid")
-    if (
-        len(labels) < 2 or name == "localhost" or name.endswith(".localhost")
-        or name.endswith(".svc") or name.endswith(".cluster.local")
-    ):
+    if len(labels) < 2 or name == "localhost" or name.endswith(_PRIVATE_NAME_SUFFIXES):
         raise _err("url_private_host")
     return url
 

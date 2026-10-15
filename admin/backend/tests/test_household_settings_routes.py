@@ -492,3 +492,145 @@ def test_the_stored_text_is_the_documented_shape(client, db, operator_user):
     assert json.loads(row.value) == {"v": 1, "revision": 1, "value": {"fallback_model": "tiny:1b"}}
     model, revision = parse_stored("gateway", row.value)
     assert model.fallback_model == "tiny:1b" and revision == 1
+
+
+# -- hardening round: body cap, 422 size, audit throttle, owner-only reads ---------------------------------
+
+def _request_with(chunks, headers=()):
+    pending = list(chunks)
+
+    async def receive():
+        if pending:
+            return {"type": "http.request", "body": pending.pop(0), "more_body": bool(pending)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "PUT", "path": "/", "query_string": b"",
+             "headers": [(k.encode(), v.encode()) for k, v in headers]}
+    return Request(scope, receive), pending
+
+
+def test_a_declared_oversize_body_is_refused_before_a_byte_is_read():
+    request, unread = _request_with([b"x" * 10], headers=[("content-length", str(route_module.MAX_BODY_BYTES + 1))])
+    with pytest.raises(route_module.HTTPException) as caught:
+        asyncio.run(route_module._read_capped_body(request, route_module.MAX_BODY_BYTES))
+    assert caught.value.status_code == 413 and len(unread) == 1
+
+
+def test_an_understated_or_chunked_body_is_cut_off_by_the_running_count():
+    cap = 100
+    request, unread = _request_with([b"x" * 60, b"x" * 60, b"x" * 60], headers=[("content-length", "10")])
+    with pytest.raises(route_module.HTTPException) as caught:
+        asyncio.run(route_module._read_capped_body(request, cap))
+    assert caught.value.status_code == 413 and len(unread) == 1  # the third chunk was never pulled
+    request, _ = _request_with([b"x" * 60, b"x" * 40])
+    assert len(asyncio.run(route_module._read_capped_body(request, cap))) == 100  # exactly the cap passes
+
+
+def test_a_garbled_content_length_is_400():
+    request, _ = _request_with([b"{}"], headers=[("content-length", "lots")])
+    with pytest.raises(route_module.HTTPException) as caught:
+        asyncio.run(route_module._read_capped_body(request, 100))
+    assert caught.value.status_code == 400
+
+
+def test_a_scalar_section_has_a_lower_cap_than_a_list_section(client, operator_user, test_user):
+    assert route_module._body_cap(SECTIONS["amtrak"]) == route_module.MAX_SCALAR_BODY_BYTES
+    assert route_module._body_cap(SECTIONS["transit"]) == route_module.MAX_BODY_BYTES
+    padding = " " * (route_module.MAX_SCALAR_BODY_BYTES + 1)
+    raw = ('{"revision": 0, "value": {"default_station": "NYP"}, "pad": "' + padding + '"}').encode()
+    headers = {**_bearer(operator_user), "Content-Type": "application/json"}
+    assert client.put(f"{URL}/amtrak", content=raw, headers=headers).status_code == 413
+    # the same bytes are within a list section's cap, so they reach validation (422 for the extra key)
+    assert client.put(f"{URL}/transit", content=raw, headers=headers).status_code == 422
+    over_list_cap = b"x" * (route_module.MAX_BODY_BYTES + 1)
+    assert client.put(f"{URL}/transit", content=over_list_cap, headers=headers).status_code == 413
+
+
+def test_a_chunked_oversize_put_is_413(client, operator_user):
+    def chunks():
+        for _ in range(route_module.MAX_SCALAR_BODY_BYTES // 1024 + 2):
+            yield b" " * 1024
+
+    resp = client.put(f"{URL}/amtrak", content=chunks(),
+                      headers={**_bearer(operator_user), "Content-Type": "application/json"})
+    assert resp.status_code == 413
+
+
+def test_the_422_caps_loc_length_and_the_problem_count(client, operator_user):
+    body = {"value": {}, "revision": 0, **{("k" * 300) + str(i): 1 for i in range(100)}}
+    resp = client.put(f"{URL}/amtrak", json=body, headers=_bearer(operator_user))
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert len(detail) == route_module.MAX_PROBLEMS
+    assert all(len(p["loc"][0]) <= route_module.MAX_LOC_LENGTH for p in detail)
+    assert len(resp.text) < 4000
+
+
+def test_a_failed_refusal_audit_keeps_the_refusal_status_and_is_not_throttled(client, db, operator_user):
+    real_commit = db.commit
+    with mock.patch.object(db, "commit", side_effect=RuntimeError("secret-detail")):
+        resp = put(client, operator_user, "sms", {"default_country_code": "44"})
+    assert resp.status_code == 403 and "secret-detail" not in resp.text
+    assert not route_module._refusal_audited_at and not audits(db, "household_settings_refused")
+    assert db.commit == real_commit
+    again = put(client, operator_user, "sms", {"default_country_code": "44"})
+    assert again.status_code == 403
+    assert len(audits(db, "household_settings_refused")) == 1  # the throttle did not swallow the retry
+
+
+def test_a_failed_refusal_audit_keeps_409_and_422_for_an_owner_only_section(client, db, test_user):
+    put(client, test_user, "sms", {"default_country_code": "44"})
+    with mock.patch.object(db, "commit", side_effect=RuntimeError("down")):
+        assert put(client, test_user, "sms", {"default_country_code": "1"}, revision=0).status_code == 409
+        assert put(client, test_user, "sms", {"default_country_code": "0"}, revision=1).status_code == 422
+    assert not route_module._refusal_audited_at
+
+
+OWNER_ONLY_VALUES = {
+    "sms": {"default_country_code": "44"},
+    "lights": {"room_light_exclude": ["light.porch_*"]},
+    "bed_warmer": {"power_main": "switch.bed"},
+    "jarvis_web": {"default_room": "Den"},
+}
+
+
+@pytest.fixture
+def owner_only_stored(client, test_user):
+    for section, value in OWNER_ONLY_VALUES.items():
+        assert put(client, test_user, section, value).status_code == 200
+
+
+def test_owner_only_values_are_withheld_from_a_user_without_the_permission(client, operator_user, owner_only_stored):
+    body = client.get(URL, headers=_bearer(operator_user)).json()
+    for section in OWNER_ONLY_VALUES:
+        entry = body[section]
+        assert entry["value"] is None and entry["restricted"] is True
+        assert entry["revision"] == 1 and entry["required_permission"] == "manage_infrastructure"
+        assert any(entry["stored"].values())
+    assert "44" not in json.dumps(body["sms"]) and "Den" not in json.dumps(body["jarvis_web"])
+    assert "restricted" not in body["amtrak"]
+
+
+def test_owner_only_values_still_reach_the_owner_and_the_service(client, test_user, owner_only_stored):
+    for headers in (_bearer(test_user), _service()):
+        body = client.get(URL, headers=headers).json()
+        assert body["sms"]["value"]["default_country_code"] == "44" and "restricted" not in body["sms"]
+        assert body["jarvis_web"]["value"]["default_room"] == "Den"
+        assert body["lights"]["value"]["room_light_exclude"] == ["light.porch_*"]
+
+
+def test_write_level_sections_stay_readable_by_an_operator(client, operator_user):
+    assert put(client, operator_user, "amtrak", {"default_station": "NYP"}).status_code == 200
+    entry = client.get(URL, headers=_bearer(operator_user)).json()["amtrak"]
+    assert entry["value"]["default_station"] == "NYP" and "restricted" not in entry
+
+
+def test_422_builders_cap_the_problem_count_on_their_own(client, operator_user):
+    many = [{"loc": ("x" * 200,), "type": "t"} for _ in range(50)]
+    exc = route_module._422(many)
+    assert len(exc.detail) == route_module.MAX_PROBLEMS and len(exc.detail[0]["loc"][0]) == route_module.MAX_LOC_LENGTH
+    seen = []
+    with mock.patch.object(route_module, "_422", side_effect=lambda problems: (seen.append(problems), route_module.HTTPException(422))[1]):
+        body = {"value": {}, "revision": 0, **{f"extra{i}": 1 for i in range(500)}}
+        assert client.put(f"{URL}/amtrak", json=body, headers=_bearer(operator_user)).status_code == 422
+    assert len(seen[0]) <= route_module.MAX_PROBLEMS + 1  # the cap, plus nothing built from the other 480 keys
