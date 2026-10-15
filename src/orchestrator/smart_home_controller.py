@@ -591,22 +591,6 @@ def _plain_speaker_room(device_room: Optional[str]) -> Optional[str]:
     return None
 
 
-class _RoomLightIds(tuple):
-    """One room's configured light ids. A room with exactly one id still equals
-    that bare id string, the form ``_get_light_groups`` returned before a room
-    could list several (``test_room_lights_golden.py`` pins it)."""
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, str):
-            return len(self) == 1 and self[0] == other
-        return tuple.__eq__(self, other)
-
-    def __ne__(self, other: object) -> bool:
-        return not self == other
-
-    __hash__ = tuple.__hash__
-
-
 def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
     """room key -> the light entity ids that room's commands write, from the
     household's Room lights setting (admin), else ``HA_LIGHT_GROUPS``.
@@ -626,7 +610,7 @@ def _get_light_groups() -> Mapping[str, Tuple[str, ...]]:
     from orchestrator.nodes import _runtime
     provider = _runtime.get_room_directory()
     value = provider.room_lights() if provider is not None else household.room_lights()
-    return {room: _RoomLightIds(ids) for room, ids in value.mapping.items()}
+    return dict(value.mapping)
 
 
 @dataclass(frozen=True)

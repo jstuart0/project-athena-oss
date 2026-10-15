@@ -222,7 +222,8 @@ def test_invalid_json_and_non_object_values_configure_nothing_and_the_name_tier_
 
 def test_light_group_keys_are_normalised_and_the_last_duplicate_wins(monkeypatch):
     set_env(monkeypatch, groups='{"Living Room": "light.a", "living_room": "light.b", "!!!": "light.c", "Den": 7}')
-    assert shc._get_light_groups() == {"living_room": "light.b", "": "light.c", "den": "7"}
+    # Each room is now a tuple of ids; a one-id tuple pins the same target the bare string did.
+    assert shc._get_light_groups() == {"living_room": ("light.b",), "": ("light.c",), "den": ("7",)}
 
 
 # ---------------------------------------------------------------------------

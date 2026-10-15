@@ -309,8 +309,8 @@ def test_every_resolver_section_is_configured_by_a_production_process():
 
 def test_the_named_processes_configure_their_sections():
     expected = {
-        "src/orchestrator/main.py": {"location", "lights", "bed_warmer"},
-        "src/gateway/main.py": {"gateway", "location"},
+        "src/orchestrator/main.py": {"location", "lights", "bed_warmer", "room_lights", "speaker_rooms"},
+        "src/gateway/main.py": {"gateway", "location", "speaker_rooms"},
         "src/rag/directions/main.py": {"location"},
         "src/rag/transportation/main.py": {"transit"},
         "src/rag/community_events/main.py": {"community_events"},

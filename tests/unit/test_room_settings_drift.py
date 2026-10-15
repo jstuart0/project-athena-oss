@@ -27,11 +27,8 @@ RESOLVER_READERS = {
     ("src/shared/household.py", "room_lights"),
     ("src/shared/household.py", "speaker_rooms"),
 }
-# The gateway still reads its own copy until its phase lands; that phase empties
-# this set, and the test below fails if an entry is listed that no longer exists.
 # A file that has never parsed (it is not run anywhere); any other that fails to parse fails the test.
 UNPARSEABLE = {"src/jetson/athena_lite_llm.py"}
-PENDING_GATEWAY = {("src/gateway/main.py", "_get_satellite_room_map")}
 LIGHT_GROUP_CALLERS = {"_resolve_room_lights", "_whole_house_lamp_rooms", "_configured_room_targets"}
 SCENE_FUNCTIONS = ("_handle_scene_intent", "_run_scene_fallback", "_scene_fallback_room_lights")
 
@@ -107,13 +104,13 @@ def test_only_the_resolvers_read_the_two_environment_attributes():
         if relative == "src/shared/config.py" or relative in UNPARSEABLE:
             continue
         found |= attribute_readers(path.read_text(encoding="utf-8"), relative)
-    assert found - PENDING_GATEWAY == RESOLVER_READERS
+    assert found == RESOLVER_READERS
 
 
-def test_a_pending_gateway_entry_must_still_exist():
+def test_the_gateway_reads_the_resolver_not_the_environment_attribute():
     source = (ROOT / "src/gateway/main.py").read_text(encoding="utf-8")
-    still_there = attribute_readers(source, "src/gateway/main.py")
-    assert PENDING_GATEWAY <= still_there, "remove the entry: the gateway reads the resolver now"
+    assert attribute_readers(source, "src/gateway/main.py") == set()
+    assert "household.speaker_rooms()" in source
 
 
 class TestAttributeReadPlantedNegatives:
