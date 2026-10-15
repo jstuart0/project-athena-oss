@@ -402,6 +402,29 @@ def _build_settings_response(db: Session) -> Dict[str, Any]:
     return {**settings, "city": city, "state": state, "default_location": default_location}
 
 
+def location_for_services(db: Session) -> Optional[Dict[str, Optional[str]]]:
+    """The home location as household settings serve it (D4), or ``None``.
+
+    Only an enabled, non-empty ``applies_to == "both"`` row counts (the lowest
+    id when there are several); a row of any other audience never does, so
+    nothing private is served to every service. ``city``/``state`` come from the
+    settings blob only when its ``"city, state"`` join equals the row's value;
+    otherwise the section is text only (``city = state = None``), so a street
+    address never becomes a city keyword.
+    """
+    rows = [
+        e for e in _preferred_location_entries(db)
+        if e.applies_to == "both" and e.enabled and e.value
+    ]
+    if not rows:
+        return None
+    row = min(rows, key=lambda e: e.id)
+    settings = _load_settings_blob(db)
+    if settings["city"] and _nonempty_join(settings["city"], settings["state"]) == row.value:
+        return {"city": settings["city"], "state": settings["state"] or None, "text": row.value}
+    return {"city": None, "state": None, "text": row.value}
+
+
 class BaseKnowledgeCreate(BaseModel):
     """Schema for creating a new base knowledge entry."""
     category: str  # 'property', 'location', 'user', 'temporal', 'general'

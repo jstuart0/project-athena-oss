@@ -30,6 +30,10 @@ BASE_KNOWLEDGE_CACHE_TTL_SECONDS = 5.0
 FAVORITE_TEAMS_TTL_SECONDS = 60.0
 FAVORITE_TEAMS_TIMEOUT_SECONDS = 2.0
 
+# One request per section set per 60 s (the cache's TTL); bounded so a lifespan
+# that waits for the first load can't hang on an unreachable admin-backend.
+HOUSEHOLD_SETTINGS_TIMEOUT_SECONDS = 2.0
+
 logger = structlog.get_logger()
 
 
@@ -583,6 +587,29 @@ class AdminConfigClient:
                 logger.warning("favorite_teams_fetch_error", error_type=type(e).__name__)
             self._favorite_teams_checked_at = _clock()
             return self._favorite_teams
+
+    async def fetch_household_settings(self, sections: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
+        """The household settings sections admin-backend holds, as the GET body
+        (``{section: {value, stored, revision, ...}}``), or ``None`` when it
+        can't answer. The caller (``shared.household``) owns caching."""
+        if not self.admin_url:
+            return None
+        try:
+            response = await self.client.get(
+                f"{self.admin_url}/api/settings/household",
+                params=[("sections", s) for s in sections],
+                headers=self._service_key_headers(),
+                timeout=HOUSEHOLD_SETTINGS_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                note_admin_refusal(response.status_code, "/api/settings/household")
+                logger.warning("household_settings_fetch_failed", status_code=response.status_code)
+                return None
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+        except Exception as e:
+            logger.warning("household_settings_fetch_error", error_type=type(e).__name__)
+            return None
 
     async def is_feature_enabled(self, feature_name: str) -> Optional[bool]:
         """

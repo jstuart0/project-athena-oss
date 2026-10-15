@@ -359,6 +359,9 @@ def reset_for_test() -> None:
     _ctx = RuntimeContext()
     _strict_warn_in_test_mode = False
     _background_tasks.clear()
+    from shared import household  # lazy: the household reader imports admin_config
+
+    household.reset_for_test()
 
 
 def enable_strict_test_mode() -> None:

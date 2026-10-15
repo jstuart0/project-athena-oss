@@ -176,6 +176,8 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/guests.py", "create_guest"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/guests.py", "delete_guest"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/guests.py", "update_guest"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/household_settings.py", "_audit_refusal"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/household_settings.py", "put_household_section"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/ha_pipelines.py", "set_preferred_pipeline"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/hallucination_checks.py", "create_hallucination_check"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/hallucination_checks.py", "delete_hallucination_check"): (1, OPERATOR_AUDIT),

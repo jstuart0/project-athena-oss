@@ -49,3 +49,20 @@ def captured_logs():
     with structlog.testing.capture_logs() as logs:
         yield logs
     _uncache_lazy_loggers()
+
+
+@pytest.fixture(autouse=True)
+def _household_settings_seam():
+    """No test ever makes a real admin request for household settings: every
+    resolver reads an inert reader (admin has no value, so the environment and
+    the built-in defaults apply) and the singleton is dropped afterwards.
+    Skipped where ``shared`` isn't importable (the jarvis-web job)."""
+    try:
+        from shared import household
+    except ImportError:
+        yield
+        return
+    household.reset_for_test()
+    household.install_for_test()
+    yield
+    household.reset_for_test()

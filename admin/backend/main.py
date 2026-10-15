@@ -63,6 +63,7 @@ from app.routes import (
     dashboard, integrations, escalation, debug_logs, modules, local_auth, oss_profiles,
     conversations
 )
+from app.routes import household_settings as household_settings_routes
 from app.routes import telemetry as telemetry_routes
 from app.utils import service_state
 
@@ -153,6 +154,7 @@ app.include_router(validation_models.router)
 app.include_router(conversation.router)
 app.include_router(llm_backends.router)
 app.include_router(settings.router)
+app.include_router(household_settings_routes.router)
 app.include_router(telemetry_routes.router)
 app.include_router(intent_routing.router)
 app.include_router(features.router)
