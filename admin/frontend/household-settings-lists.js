@@ -27,9 +27,8 @@
         console.error('household-settings-lists.js must load after household-settings.js');
         return;
     }
-    const { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN } = HS.ui;
+    const { el, clear, setLine, errorLine, INPUT_CLASS, BUTTON_CLASS, SECONDARY_BUTTON_CLASS, LINK_BUTTON_CLASS, HIDDEN } = HS.ui;
 
-    const SECONDARY_BUTTON_CLASS = 'min-h-[44px] px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
     const LABEL_CLASS = 'block text-sm font-medium text-gray-400 mb-1';
     const HELP_CLASS = 'text-xs text-gray-500 mt-1';
     const MASK = '•••';
@@ -55,6 +54,7 @@
         url_userinfo: () => 'Remove the username and password from the address.',
         url_fragment: () => 'Remove the # part of the address.',
         url_private_host: () => PRIVATE_URL_COPY,
+        url_port: () => 'Use a web address on the standard port, without :8080 or similar. Other ports can only be set in the server\'s environment.',
         url_mask_token: () => MASKED_URL_COPY,
         url_masked_edit: () => MASKED_URL_COPY,
         duplicate_id: () => 'Another row already uses this id. Pick a different one.',

@@ -18,6 +18,7 @@ Stdlib only: this runs on the unit-min CI requirements.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
@@ -321,6 +322,29 @@ def test_the_named_processes_configure_their_sections():
     assert _jarvis_web_sections() == {"jarvis_web"}
 
 
+_WARMING_LIFESPANS = (
+    "src/gateway/main.py", "src/rag/directions/main.py", "src/rag/transportation/main.py",
+    "src/rag/community_events/main.py", "src/rag/amtrak/main.py",
+)
+
+
+def unbounded_first_loads(source: str) -> int:
+    """Calls of ``<x>.current()`` awaited on a household reader in one file."""
+    return len(re.findall(r"await\s+household_reader\.current\(\)", source))
+
+
+def test_the_gateway_and_rag_lifespans_bound_their_first_load():
+    for rel in _WARMING_LIFESPANS:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "await household.warm()" in text, f"{rel} must warm the reader through the bounded helper"
+        assert unbounded_first_loads(text) == 0, f"{rel} awaits the reader without a total bound"
+
+
+def test_a_planted_unbounded_first_load_is_caught():
+    assert unbounded_first_loads("    await household_reader.current()\n") == 1
+    assert unbounded_first_loads("    await household.warm()\n") == 0
+
+
 def test_a_planted_resolver_without_a_configured_section_is_caught():
     source = 'from shared import household\nhousehold.configure(sections=("location",))\n'
     configured, calls = configured_sections(source)
@@ -362,3 +386,23 @@ def test_admin_backend_app_never_imports_the_http_reader():
             if any(m == "shared.household" or m.startswith("shared.household.") for m in modules):
                 offenders.append(path.relative_to(REPO_ROOT).as_posix())
     assert not offenders, offenders
+
+
+def test_the_env_example_audit_sees_the_names_the_household_registry_reads():
+    """scripts/check-env-example.py can't see names handed to a pure module as an
+    ``env`` mapping; without its household collector the jarvis-web variables
+    would all read as documented-but-unused."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_env_example_hh", REPO_ROOT / "scripts" / "check-env-example.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = module.collect_household_env_names()
+    assert {
+        "DEFAULT_ROOM", "CLIMATE_ENTITY", "OVEN_ENTITY_ID", "FRIDGE_ENTITY_ID", "FREEZER_ENTITY_ID",
+        "STOVE_COOK_MODE_SENSOR_ID", "STOVE_DISPLAY_TEMP_SENSOR_ID", "STOVE_TIMER_SENSOR_ID",
+        "FRIDGE_DOOR_SENSOR_ID", "MIN_TEMP", "MAX_TEMP",
+    } <= names
+    example_text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in names:
+        assert name in example_text, f"{name} is read by the registry but not documented in .env.example"

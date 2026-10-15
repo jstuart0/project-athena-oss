@@ -114,7 +114,7 @@ jobs:
       - name: Run the household orchestrator reader tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_orchestrator_readers.py tests/unit/test_household_orchestrator_lifespan.py tests/unit/test_household_bypass_zone_prompt.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_household_orchestrator_readers.py tests/unit/test_household_orchestrator_lifespan.py tests/unit/test_household_bypass_zone_prompt.py tests/unit/test_household_public_location.py
 
       # Stubs prometheus_client and langgraph in sys.modules at import.
       - name: Run the bed warmer tests (own process)

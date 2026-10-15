@@ -775,3 +775,128 @@ def test_log_lines_of_the_reader_carry_no_values(caplog):
         household.sms_country_code()
         household.room_light_exclude_patterns()
     assert "hidden_value" not in caplog.text and "44" not in re.sub(r"\d+ms|sections=\d", "", caplog.text)
+
+
+# -- startup bound, reconfigure after close, scheduling release, backoff -----------------------------
+
+def test_warm_returns_within_its_bound_when_admin_hangs(caplog):
+    household.reset_for_test()
+    never = asyncio.Event()
+
+    async def hang():
+        await never.wait()
+
+    household.configure(sections=("sms",), fetch=hang)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await household.warm(timeout=0.05)
+        return loop.time() - started
+
+    with caplog.at_level(logging.WARNING, logger=household.logger.name):
+        elapsed = asyncio.run(run())
+    assert elapsed < 1.0
+    assert "household_settings_startup_timeout" in caplog.text
+
+
+def test_warm_loads_the_snapshot_when_admin_answers():
+    household.reset_for_test()
+    fetch = counting_fetch()
+    household.configure(sections=("sms",), fetch=fetch)
+    asyncio.run(household.warm())
+    assert fetch.calls == [1] and household.reader().peek().loaded
+
+
+def test_configure_after_aclose_builds_a_working_reader():
+    household.reset_for_test()
+    fetch = counting_fetch()
+    first = household.configure(sections=("sms",), fetch=fetch)
+    asyncio.run(first.aclose())
+    assert first.closed
+    second = household.configure(sections=("sms",), fetch=fetch)
+    assert second is not first and not second.closed
+    asyncio.run(second.current())
+    assert fetch.calls == [1], "the second lifespan fetches instead of serving a frozen snapshot"
+
+
+def test_a_refresh_cancelled_before_its_first_step_does_not_stop_scheduling_for_good():
+    spawned = []
+
+    def spawn(coro):
+        task = asyncio.ensure_future(coro)
+        task.cancel()  # before the coroutine's first step: its finally never runs
+        spawned.append(task)
+        return task
+
+    cache = hs.HouseholdSettingsCache(counting_fetch(), spawn=spawn, clock=Clock())
+
+    async def run():
+        cache.peek()
+        cache.peek()
+        assert len(spawned) == 1, "floor: one task while it is pending"
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert spawned[0].cancelled()
+        cache.peek()
+        assert len(spawned) == 2, "the loop can schedule again once the cancelled task is done"
+
+    asyncio.run(run())
+
+
+def test_reload_backoff_doubles_up_to_its_cap_and_resets_on_success():
+    now = [0.0]
+    backoff = household.ReloadBackoff(base=60.0, cap=300.0, clock=lambda: now[0])
+    assert not backoff.held_back("a")
+    assert backoff.failed("a") == 60.0 and backoff.held_back("a")
+    now[0] += 61
+    assert not backoff.held_back("a")
+    assert backoff.failed("a") == 120.0
+    assert backoff.failed("a") == 240.0
+    assert backoff.failed("a") == 300.0 and backoff.failed("a") == 300.0
+    assert backoff.held_back("a") and not backoff.held_back("b"), "only the failing key is held back"
+    backoff.succeeded()
+    assert not backoff.held_back("a")
+    assert backoff.failed("a") == 60.0
+
+
+def test_reload_backoff_restarts_the_count_for_a_different_key():
+    backoff = household.ReloadBackoff(base=60.0, cap=1800.0, clock=lambda: 0.0)
+    backoff.failed("a")
+    backoff.failed("a")
+    assert backoff.failed("b") == 60.0
+
+
+# -- env thermostat bounds follow the admin rules --------------------------------------------------------
+
+@pytest.mark.parametrize("env", [
+    {"MIN_TEMP": "90", "MAX_TEMP": "50"},   # min above max
+    {"MIN_TEMP": "0", "MAX_TEMP": "200"},   # outside 40-95
+    {"MIN_TEMP": "30"},                      # a lone bound below the range
+    {"MAX_TEMP": "99"},                      # a lone bound above the range
+    {"MIN_TEMP": "80"},                      # lone min above the default max (75)
+])
+def test_invalid_env_thermostat_bounds_fall_back_to_the_defaults_with_one_warning(env, monkeypatch, caplog):
+    monkeypatch.setattr(hs, "_warned_env_temps", False)
+    set_env(monkeypatch, env)
+    with caplog.at_level(logging.WARNING, logger=hs.logger.name):
+        first = household.jarvis_web()
+        second = household.jarvis_web()
+    assert (first.min_temp, first.max_temp) == (65, 75) == (second.min_temp, second.max_temp)
+    assert first.sources["min_temp"] == "default"
+    assert caplog.text.count("household_env_invalid section=jarvis_web") == 1
+    assert "90" not in caplog.text and "200" not in caplog.text, "the warning names no value"
+
+
+@pytest.mark.parametrize("env,expect", [
+    ({"MIN_TEMP": "60", "MAX_TEMP": "80"}, (60, 80)),
+    ({"MIN_TEMP": "40", "MAX_TEMP": "95"}, (40, 95)),
+    ({"MIN_TEMP": "70", "MAX_TEMP": "70"}, (70, 70)),
+    ({"MIN_TEMP": "60"}, (60, 75)),
+    ({"MAX_TEMP": "70"}, (65, 70)),
+])
+def test_valid_env_thermostat_bounds_are_kept(env, expect, monkeypatch):
+    set_env(monkeypatch, env)
+    result = household.jarvis_web()
+    assert (result.min_temp, result.max_temp) == expect
+    assert result.sources["min_temp"] == "env"

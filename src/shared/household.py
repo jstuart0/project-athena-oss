@@ -17,6 +17,7 @@ The registry, models and cache live in ``shared.household_settings``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -83,7 +84,7 @@ def configure(*, sections: Tuple[str, ...], spawn: Optional[Callable] = None,
     reader and logs ``household_reader_reconfigured`` once."""
     global _reader, _configured, _configured_args, _seam
     args = (tuple(sections), spawn, fetch)
-    if _reader is not None and _configured_args == args and not _seam:
+    if _reader is not None and _configured_args == args and not _seam and not _reader.closed:
         return _reader
     if _reader is not None and _configured_args is not None and _configured_args != args:
         logger.warning("household_reader_reconfigured")
@@ -93,6 +94,48 @@ def configure(*, sections: Tuple[str, ...], spawn: Optional[Callable] = None,
     _reader = HouseholdSettingsCache(fetch or _admin_fetch(tuple(sections)), spawn=spawn)
     _configured, _configured_args, _seam = tuple(sections), args, False
     return _reader
+
+
+WARM_TIMEOUT_SECONDS = 2.5
+
+
+async def warm(timeout: float = WARM_TIMEOUT_SECONDS) -> None:
+    """Load the snapshot once at startup, for at most ``timeout`` seconds in
+    total (the fetch's own timeout applies per phase, so a slow admin could
+    otherwise hold a service's startup several times over). On a timeout the
+    environment stays in force until the next refresh succeeds."""
+    try:
+        await asyncio.wait_for(reader().current(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("household_settings_startup_timeout")
+
+
+class ReloadBackoff:
+    """Retry timing for a service that reloads config-driven data from the
+    network. After a failed reload of ``key`` the same key is held back for a
+    doubling delay (``base`` up to ``cap`` seconds); a different key (the admin
+    changed something) is never held back. ``succeeded()`` resets it."""
+
+    def __init__(self, *, base: float = 60.0, cap: float = 1800.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._base, self._cap, self._clock = base, cap, clock
+        self._key: Any = None
+        self._failures = 0
+        self._not_before = 0.0
+
+    def failed(self, key: Any) -> float:
+        """Record a failed reload of ``key``; returns the delay before the next try."""
+        self._failures = self._failures + 1 if key == self._key else 1
+        self._key = key
+        delay = min(self._base * 2 ** (self._failures - 1), self._cap)
+        self._not_before = self._clock() + delay
+        return delay
+
+    def succeeded(self) -> None:
+        self._key, self._failures, self._not_before = None, 0, 0.0
+
+    def held_back(self, key: Any) -> bool:
+        return self._failures > 0 and key == self._key and self._clock() < self._not_before
 
 
 def reader() -> HouseholdSettingsCache:

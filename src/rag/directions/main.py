@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
     admin_client = get_admin_client()
 
     household_reader = household.configure(sections=("location",))
-    await household_reader.current()
+    await household.warm()
 
     # Try to fetch API key from Admin API
     try:
@@ -266,7 +266,7 @@ def get_default_origin() -> str:
 
     # Fallback: the home location from Base Knowledge as the admin UI has it now,
     # else the env-configured default (empty string if unconfigured).
-    return household.location().text
+    return household.location().city_level
 
 
 def generate_google_maps_url(

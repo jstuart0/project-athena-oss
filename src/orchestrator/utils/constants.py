@@ -80,11 +80,16 @@ def default_city() -> str:
     return household.location().city
 
 
-def default_location() -> str:
-    """The house's location text (``"City, ST"`` or a full address)."""
+def default_location(audience) -> str:
+    """The house's location for ``audience`` (a ``KnowledgeAudience``): the full
+    text (``"City, ST"`` or a street address) only when the audience may see an
+    Everyone row, else ``"City, ST"``. The public and unresolved audiences see no
+    Base Knowledge row, so a stored address never reaches their prompts, search
+    queries or origins. ``audience`` is required so no caller can forget it."""
     from shared import household
 
-    return household.location().text
+    where = household.location()
+    return where.text if "both" in audience.visible_tiers() else where.city_level
 
 
 # OSS-First: empty default; set DEFAULT_TIMEZONE in env for local time awareness.

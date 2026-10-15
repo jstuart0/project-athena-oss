@@ -297,7 +297,7 @@ def test_the_worst_case_glob_is_fast_on_the_longest_entity_id(glob):
 
 # -- URLs -------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("url", ["https://example.org/f.zip", "http://example.org", "https://example.org:8443/a?k=v",
+@pytest.mark.parametrize("url", ["https://example.org/f.zip", "http://example.org", "https://example.org:443/a?k=v", "http://example.org:80/a",
                                  "https://8.8.8.8/f", "https://sub.example.co.uk/x"])
 def test_url_accepts(url):
     assert ok("transit", {"gtfs_feeds": [{**FEED, "url": url}]})["gtfs_feeds"][0]["url"] == url
@@ -327,7 +327,10 @@ def test_url_accepts(url):
     ("https://example.org/•••", "url_mask_token"),
     ("https://example.org/a b", "url_invalid"), ("https://example.org/a\nb", "url_invalid"),
     ("https://example.org\\@evil.org/", "url_invalid"), ("", "url_invalid"), ("https://", "url_invalid"),
-    ("https://example.org:99999/", "url_invalid"), ("https://[::1/f", "url_invalid"),
+    ("https://example.org:99999/", "url_invalid"),
+    ("https://example.org:8443/a?k=v", "url_port"), ("http://example.org:8080/f", "url_port"),
+    ("https://example.org:22/f", "url_port"), ("https://8.8.8.8:9000/f", "url_port"),
+    ("http://localhost:8080/f", "url_private_host"), ("http://10.0.0.1:8080/f", "url_private_host"), ("https://[::1/f", "url_invalid"),
     ("https://example.1/f", "url_invalid"), ("https://-bad.example.org/", "url_invalid"),
     ("https://" + "a" * 64 + ".org/", "url_invalid"), ("https://exämple.org/", "url_invalid"),
     ("https://example.org/" + "a" * 2100, "url_invalid"),

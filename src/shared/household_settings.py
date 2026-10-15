@@ -386,11 +386,12 @@ def _split_url(url: Any):
     return parts, host
 
 
-def check_fetch_url(url: Any) -> str:
-    """Raise a ``PydanticCustomError`` unless ``url`` may be fetched from an
-    admin-supplied setting. A name that *resolves* privately passes here and is
-    blocked at fetch time."""
-    _parts, host = _split_url(url)
+# An admin-supplied feed may only use the web's own ports; a service on another
+# port of a public host is not a feed.
+FETCH_PORTS = (80, 443)
+
+
+def _check_public_host(host: str) -> None:
     try:
         ip = _literal_ip(host)
     except ValueError:
@@ -398,7 +399,7 @@ def check_fetch_url(url: Any) -> str:
     if ip is not None:
         if _is_private_literal(ip):
             raise _err("url_private_host")
-        return url
+        return
     name = host.rstrip(".")
     labels = name.split(".")
     if (
@@ -409,6 +410,16 @@ def check_fetch_url(url: Any) -> str:
         raise _err("url_invalid")
     if len(labels) < 2 or name == "localhost" or name.endswith(_PRIVATE_NAME_SUFFIXES):
         raise _err("url_private_host")
+
+
+def check_fetch_url(url: Any) -> str:
+    """Raise a ``PydanticCustomError`` unless ``url`` may be fetched from an
+    admin-supplied setting. A name that *resolves* privately passes here and is
+    blocked at fetch time."""
+    parts, host = _split_url(url)
+    _check_public_host(host)
+    if parts.port not in (None, *FETCH_PORTS):
+        raise _err("url_port")
     return url
 
 
@@ -603,11 +614,15 @@ class BedWarmerSection(_Strict):
     power_side_b: BedSwitch = None
 
 
+# The guest-safe thermostat bounds an admin value or the environment may set (degrees F).
+THERMOSTAT_RANGE = (40, 95)
+
+
 class JarvisWebSection(_Strict):
     default_room: Room = None
     climate_entity: ClimateEntity = None
-    min_temp: Optional[int] = Field(default=None, ge=40, le=95)
-    max_temp: Optional[int] = Field(default=None, ge=40, le=95)
+    min_temp: Optional[int] = Field(default=None, ge=THERMOSTAT_RANGE[0], le=THERMOSTAT_RANGE[1])
+    max_temp: Optional[int] = Field(default=None, ge=THERMOSTAT_RANGE[0], le=THERMOSTAT_RANGE[1])
     oven_entity: ApplianceEntity = None
     fridge_entity: ApplianceEntity = None
     freezer_entity: ApplianceEntity = None
@@ -957,6 +972,12 @@ class Location:
     text: str
     source: str
 
+    @property
+    def city_level(self) -> str:
+        """``"City, ST"`` only. ``text`` can be a street address; an audience that
+        may not see the Base Knowledge row gets this form, never ``text``."""
+        return ", ".join(p for p in (self.city, self.state) if p)
+
 
 SOURCE_ADMIN, SOURCE_ENV, SOURCE_DEFAULT = "admin", "env", "default"
 
@@ -1002,6 +1023,16 @@ _JARVIS_ENV: Mapping[str, Tuple[str, Any]] = MappingProxyType({
 _JARVIS_DEFAULT_TEMPS = (65, 75)
 
 
+_warned_env_temps = False
+
+
+def _warn_env_temps_once() -> None:
+    global _warned_env_temps
+    if not _warned_env_temps:
+        _warned_env_temps = True
+        logger.warning("household_env_invalid section=jarvis_web field=thermostat_range using=defaults")
+
+
 def resolve_jarvis_web(section: Optional[JarvisWebSection], env: Mapping[str, str]) -> JarvisWeb:
     """Admin value, then ``env``, then today's default, per field; the
     thermostat bounds resolve as a unit (both stored, or both from env/default).
@@ -1029,8 +1060,13 @@ def resolve_jarvis_web(section: Optional[JarvisWebSection], env: Mapping[str, st
             low = high = None
         low = _JARVIS_DEFAULT_TEMPS[0] if low is None else low
         high = _JARVIS_DEFAULT_TEMPS[1] if high is None else high
-        values["min_temp"], values["max_temp"] = low, high
         from_env = bool(env.get("MIN_TEMP") or env.get("MAX_TEMP"))
+        in_range = all(THERMOSTAT_RANGE[0] <= t <= THERMOSTAT_RANGE[1] for t in (low, high))
+        if not (in_range and low <= high):
+            _warn_env_temps_once()
+            low, high = _JARVIS_DEFAULT_TEMPS
+            from_env = False
+        values["min_temp"], values["max_temp"] = low, high
         sources["min_temp"] = sources["max_temp"] = SOURCE_ENV if from_env else SOURCE_DEFAULT
     return JarvisWeb(sources=MappingProxyType(sources), **values)
 
@@ -1094,6 +1130,10 @@ class HouseholdSettingsCache:
         self._task: Optional["asyncio.Future[Any]"] = None
         self._closed = False
         self._pinned = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def preload(self, snapshot: Snapshot) -> None:
         """Test seam: serve ``snapshot`` as fresh forever (no fetch is ever made)."""
@@ -1163,8 +1203,21 @@ class HouseholdSettingsCache:
             self._scheduled_loop = None
             logger.warning("household_settings_spawn_failed")
             return self._snapshot
-        self._task = task if isinstance(task, asyncio.Future) else None
+        if isinstance(task, asyncio.Future):
+            self._task = task
+            # A task cancelled before its first step never runs the coroutine's
+            # finally, so scheduling is released here too.
+            task.add_done_callback(self._release_schedule)
+        else:
+            self._task = None
         return self._snapshot
+
+    def _release_schedule(self, task: "asyncio.Future[Any]") -> None:
+        pending = self._scheduled_loop() if self._scheduled_loop is not None else None
+        if pending is task.get_loop():
+            self._scheduled_loop = None
+        if self._task is task:
+            self._task = None
 
     async def _refresh(self) -> None:
         try:

@@ -183,6 +183,12 @@ fetch_errors: Dict[str, str] = {}
 _generation = 0
 _reload_task: Optional["asyncio.Task[None]"] = None
 _target: Optional[CommunityEventsConfig] = None
+# Holds a failed config back from the 60 s poll for a doubling delay.
+_backoff = household.ReloadBackoff()
+# The one scrape a search shares when the cache is empty (single flight), and
+# how long a search waits for it before answering with what it has.
+_search_refresh: Optional["asyncio.Task[Any]"] = None
+FIRST_SCRAPE_WAIT_SECONDS = 20.0
 _poll_task: Optional["asyncio.Task[None]"] = None
 
 
@@ -946,6 +952,7 @@ async def scrape_sources(cfg: CommunityEventsConfig, errors: Dict[str, str]) -> 
     for src, result in zip(cfg.sources, results):
         if isinstance(result, Exception):
             logger.error("source_scrape_exception", source=src.name, error_type=type(result).__name__)
+            errors.setdefault(src.name, f"{type(result).__name__} while reading the source")
             result = []
         counts[src.name] = len(result)
         source_lists.append(result)
@@ -961,21 +968,58 @@ async def scrape_sources(cfg: CommunityEventsConfig, errors: Dict[str, str]) -> 
     return all_events
 
 
+def every_source_failed(cfg: CommunityEventsConfig, events: List[Dict[str, Any]], errors: Dict[str, str]) -> bool:
+    """True when ``cfg`` has sources, none gave an event and each one reported
+    a failure: the signature of an outage, not of an empty calendar."""
+    return bool(cfg.sources) and not events and all(src.name in errors for src in cfg.sources)
+
+
 async def refresh_events_cache(cfg: CommunityEventsConfig) -> List[Dict[str, Any]]:
     """Refresh the events cache from all sources of ``cfg``. Writes nothing if
-    the service has moved to a different config while this was scraping."""
+    the service has moved to a different config while this was scraping, and
+    keeps the cached events when every source failed."""
     if not cfg.configured:
         logger.warning("community_events_not_configured")
         return []
 
     logger.info("refreshing_events_cache")
-    all_events = await scrape_sources(cfg, fetch_errors)
+    errors: Dict[str, str] = {}
+    all_events = await scrape_sources(cfg, errors)
     if cfg != event_sources_config:
         logger.info("refresh_superseded")
         return []
 
+    fetch_errors.clear()
+    fetch_errors.update(errors)
+    if every_source_failed(cfg, all_events, errors):
+        logger.warning("refresh_all_sources_failed_kept_cache")
+        return []
+
     await cache_events(all_events)
     return all_events
+
+
+async def await_scrape(cfg: CommunityEventsConfig) -> None:
+    """Fill an empty cache for a search. Searches that find the cache empty
+    share one scrape (a reload in flight, else one started here) and wait for
+    it at most ``FIRST_SCRAPE_WAIT_SECONDS``; a search that stops waiting leaves
+    the scrape running for the next one."""
+    global _search_refresh
+    task: Optional["asyncio.Task[Any]"] = _reload_task if _reload_task is not None and not _reload_task.done() else None
+    if task is None:
+        if _search_refresh is None or _search_refresh.done():
+            _search_refresh = asyncio.create_task(refresh_events_cache(cfg))
+        task = _search_refresh
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=FIRST_SCRAPE_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("first_scrape_wait_timeout")
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise  # this search was cancelled, not the scrape it was waiting on
+        logger.info("first_scrape_superseded")
+    except Exception as e:
+        logger.error("first_scrape_failed", error_type=type(e).__name__)
 
 
 async def clear_events_cache() -> None:
@@ -1038,7 +1082,7 @@ async def search_events(
 
     # If cache miss, refresh and re-query
     if not events:
-        await refresh_events_cache(event_sources_config)
+        await await_scrape(event_sources_config)
         if query:
             events = await get_all_cached_events()
         elif start_date or end_date:
@@ -1144,17 +1188,28 @@ async def periodic_refresh_task():
 
 async def _run_reload(cfg: CommunityEventsConfig, generation: int) -> None:
     """Scrape ``cfg`` and commit it if no newer config has arrived. A failure
-    keeps the previous events and config, and lets the next poll try again.
-    Going unconfigured empties the cached events."""
+    (the scrape raising, or every source failing) keeps the previous events and
+    config, and the same config is tried again after a doubling delay. Going
+    unconfigured empties the cached events."""
     global event_sources_config, _target
     try:
         errors: Dict[str, str] = {}
         events = await scrape_sources(cfg, errors) if cfg.configured else []
         if generation != _generation:
             return
-        event_sources_config = cfg
+        outage = every_source_failed(cfg, events, errors)
+        keep_previous = outage and event_sources_config.configured
+        if outage:
+            delay = _backoff.failed(cfg)
+            _target = None
+            logger.warning("community_reload_all_sources_failed", retry_in_seconds=int(delay), kept_previous=keep_previous)
+        else:
+            _backoff.succeeded()
         fetch_errors.clear()
         fetch_errors.update(errors)
+        if keep_previous:
+            return
+        event_sources_config = cfg
         if cfg.configured:
             await cache_events(events)
         else:
@@ -1165,7 +1220,9 @@ async def _run_reload(cfg: CommunityEventsConfig, generation: int) -> None:
     except Exception as e:
         logger.error("community_reload_failed", error_type=type(e).__name__)
         if generation == _generation:
+            delay = _backoff.failed(cfg)
             _target = None
+            logger.warning("community_reload_retry_scheduled", retry_in_seconds=int(delay))
 
 
 async def _cancel_and_wait(task: Optional["asyncio.Task[None]"]) -> None:
@@ -1179,7 +1236,7 @@ async def apply_event_sources(cfg: CommunityEventsConfig) -> bool:
     already loading or loaded; otherwise it supersedes any reload in flight and
     starts a new one. Returns whether a reload started."""
     global _generation, _reload_task, _target
-    if cfg == _target:
+    if cfg == _target or _backoff.held_back(cfg):
         return False
     _generation += 1
     generation = _generation
@@ -1217,7 +1274,7 @@ async def lifespan(app: FastAPI):
     logger.info("community_events_service.startup", msg="Initializing Community Events RAG service")
 
     household_reader = household.configure(sections=("community_events",))
-    await household_reader.current()
+    await household.warm()
     await sync_household_config()
     _poll_task = asyncio.create_task(poll_household_config())
 
@@ -1235,6 +1292,7 @@ async def lifespan(app: FastAPI):
     await _cancel_and_wait(_poll_task)
     _poll_task = None
     await _cancel_and_wait(_reload_task)
+    await _cancel_and_wait(_search_refresh)
     await _cancel_and_wait(_refresh_task)
     await household_reader.aclose()
 

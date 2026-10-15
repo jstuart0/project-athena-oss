@@ -96,3 +96,22 @@ def test_a_corrupt_stored_value_falls_back_to_the_environment(db, monkeypatch):
                          category="household"))
     db.commit()
     assert resolve_sms_country_code(db) == "44"
+
+
+@pytest.mark.parametrize("raw", [
+    "not json at all", "[]", "null", '"text"', "42", "{}", '{"v":2,"revision":1,"value":{"default_country_code":"44"}}',
+    '{"v":1,"revision":1,"value":[]}',
+    '{"v":1,"revision":1,"value":{"default_country_code":["44"]}}',
+    '{"v":1,"revision":1,"value":{"default_country_code":{"a":1}}}',
+    '{"v":1,"revision":1,"value":{"default_country_code":"' + "9" * 5000 + '"}}',
+    '{"v":1,"revision":1,"value":{"default_country_code":null,"extra":1}}', "\x00\x01",
+], ids=lambda raw: raw[:24])
+def test_a_corrupt_stored_row_never_breaks_the_stay_match(db, raw):
+    """The webhook calls this for every inbound text: a bad row is the default
+    code, never a 500."""
+    db.add(SystemSetting(key=SECTIONS["sms"].key, value=raw, category="household"))
+    db.commit()
+    _stay(db, UK_BOOKING_NATIONAL)
+    code = resolve_sms_country_code(db)
+    assert code == "1" and code.source == "default"
+    assert _match(db) is None, "the national UK booking doesn't match under the default code"

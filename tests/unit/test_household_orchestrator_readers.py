@@ -17,10 +17,12 @@ from orchestrator import room_probe
 from orchestrator import semantic_cache
 from orchestrator.utils import constants
 from shared.base_knowledge_utils import extract_home_address
+from shared.knowledge_tiers import KnowledgeAudience
 
 from .test_smart_home_controller_permissions import _controller, _guest_perms, _raw_ha_client
 from . import _room_chat_harness as rch
 
+OWNER = KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False)
 LED_RING = "light.kitchen_satellite_led_ring"
 BED = {
     "level_left": "select.bed_left", "level_right": "select.bed_right", "power_main": "switch.bed_main",
@@ -50,7 +52,7 @@ def _matches(entity_id):
 def test_a_matching_city_blob_keys_the_cache_by_the_admin_city():
     household.install_for_test(sources={"location": {"city": "Springfield", "state": "IL", "text": "Springfield, IL"}})
     assert constants.default_city() == "Springfield"
-    assert constants.default_location() == "Springfield, IL"
+    assert constants.default_location(OWNER) == "Springfield, IL"
     assert semantic_cache.normalize_location("what's the weather") == "default_springfield"
     assert semantic_cache.normalize_location("weather in springfield") == "default_springfield"
 
@@ -58,7 +60,7 @@ def test_a_matching_city_blob_keys_the_cache_by_the_admin_city():
 def test_a_text_only_row_keeps_the_env_city_keyword_and_uses_the_text_as_location():
     household.install_for_test(sources={"location": {"text": "123 Main St, Springfield, IL"}})
     assert constants.default_city() == "Denver"
-    assert constants.default_location() == "123 Main St, Springfield, IL"
+    assert constants.default_location(OWNER) == "123 Main St, Springfield, IL"
     assert semantic_cache.normalize_location("what's the weather") == "default_denver"
 
 
@@ -70,7 +72,7 @@ def test_admin_unreachable_since_boot_serves_the_env_city():
     asyncio.run(household.reader().current())
     assert household.reader().peek().loaded is False
     assert semantic_cache.normalize_location("what's the weather") == "default_denver"
-    assert constants.default_location() == "Denver, CO"
+    assert constants.default_location(OWNER) == "Denver, CO"
     assert household.location().source == "env"
 
 
@@ -79,7 +81,7 @@ def test_nothing_set_anywhere_gives_the_generic_key(monkeypatch):
     monkeypatch.delenv("DEFAULT_STATE")
     shared.config._clear_cache_for_tests()
     assert constants.default_city() == ""
-    assert constants.default_location() == ""
+    assert constants.default_location(OWNER) == ""
     assert semantic_cache.normalize_location("what's the weather") == "default_location"
 
 
@@ -90,10 +92,10 @@ def test_a_location_change_is_picked_up_without_a_restart():
     assert semantic_cache.normalize_location("what's the weather") == "default_boulder"
 
 
-def test_base_knowledge_home_address_falls_back_to_the_household_location():
+def test_base_knowledge_home_address_falls_back_to_the_city_level_household_location():
     household.install_for_test(sources={"location": {"text": "12 Elm Rd, Springfield, IL"}})
-    assert extract_home_address([]) == "12 Elm Rd, Springfield, IL"
-    assert extract_home_address([{"category": "misc", "key": "x", "value": "y"}]) == "12 Elm Rd, Springfield, IL"
+    assert extract_home_address([]) == "Denver, CO"
+    assert extract_home_address([{"category": "misc", "key": "x", "value": "y"}]) == "Denver, CO"
     assert extract_home_address([{"category": "property", "key": "address", "value": "1 Row"}]) == "1 Row"
 
 

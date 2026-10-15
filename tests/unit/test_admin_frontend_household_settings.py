@@ -42,7 +42,7 @@ def test_the_script_is_copied_tagged_before_escape_html_and_versioned(html):
 
 @pytest.mark.parametrize("name", ["app.js", "gateway-settings.js", "sms.js", "directions-settings.js", "memory-context.js"])
 def test_every_edited_page_script_carries_the_new_buster(html, name):
-    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs2?"', html)
+    assert re.search(rf'/{re.escape(name)}\?v=20261015-hs[0-9]?"', html)
 
 
 def test_the_script_never_assigns_markup_or_writes_handlers(source):
@@ -371,27 +371,27 @@ def test_owner_only_section_is_read_only_for_a_non_owner_and_editable_for_the_ow
         let box = __box('c1');
         __script = [__ok('bed_warmer', bed)];
         await HouseholdSettings.mount('bed_warmer', 'c1');
-        const operator = {inputsDisabled: __inputs(box).every(i => i.disabled), note: __text(box).includes('Only the house owner can change these settings.'), saveHidden: __saveButton(box).attrs['aria-hidden'], saveDisabled: __saveButton(box).disabled, clears: __buttons(box, 'Clear').every(b => !__visible(b) || b.disabled)};
+        const operator = {inputsDisabled: __inputs(box).every(i => i.disabled), note: __text(box).includes('Only the house owner can change these settings.'), saveHidden: !__visible(__saveButton(box)), saveDisabled: __saveButton(box).disabled, clears: __buttons(box, 'Clear').every(b => !__visible(b) || b.disabled)};
         __perms = ['read', 'write', 'manage_infrastructure'];
         box = __box('c2');
         __script = [__ok('bed_warmer', bed)];
         await HouseholdSettings.mount('bed_warmer', 'c2');
-        const owner = {inputsDisabled: __inputs(box).some(i => i.disabled), note: __text(box).includes('Only the house owner'), saveHidden: __saveButton(box).attrs['aria-hidden'], legends: box.find(e => e.tagName === 'LEGEND').map(e => e.textContent)};
+        const owner = {inputsDisabled: __inputs(box).some(i => i.disabled), note: __text(box).includes('Only the house owner'), saveHidden: !__visible(__saveButton(box)), legends: box.find(e => e.tagName === 'LEGEND').map(e => e.textContent)};
         __perms = ['read'];
         box = __box('c3');
         __script = [__ok('amtrak', __entry({default_station: 'NYP'}, {default_station: true}))];
         await HouseholdSettings.mount('amtrak', 'c3');
-        const viewer = {disabled: __inputs(box).every(i => i.disabled), note: __text(box).includes('You can view these settings. Changing them needs write access.'), saveHidden: __saveButton(box).attrs['aria-hidden']};
+        const viewer = {disabled: __inputs(box).every(i => i.disabled), note: __text(box).includes('You can view these settings. Changing them needs write access.'), saveHidden: !__visible(__saveButton(box))};
         return {operator, owner, viewer};
         """
     )
     assert result["operator"] == {
-        "inputsDisabled": True, "note": True, "saveHidden": "true", "saveDisabled": True, "clears": True,
+        "inputsDisabled": True, "note": True, "saveHidden": True, "saveDisabled": True, "clears": True,
     }
     assert result["owner"]["inputsDisabled"] is False and result["owner"]["note"] is False
-    assert result["owner"]["saveHidden"] == "false"
+    assert result["owner"]["saveHidden"] is False
     assert result["owner"]["legends"] == ["Left side", "Right side", "Power"]
-    assert result["viewer"] == {"disabled": True, "note": True, "saveHidden": "true"}
+    assert result["viewer"] == {"disabled": True, "note": True, "saveHidden": True}
 
 
 def test_a_restricted_response_shows_set_by_the_owner_or_not_set_and_no_values_or_inputs():
@@ -407,7 +407,7 @@ def test_a_restricted_response_shows_set_by_the_owner_or_not_set_and_no_values_o
         __script = [__ok('jarvis_web', {value: null, stored: {min_temp: true, max_temp: true, default_room: false}, revision: 0, required_permission: 'manage_infrastructure', writable: true, restricted: true})];
         await HouseholdSettings.mount('jarvis_web', 'c2');
         const jarvisItems = jarvis.find(e => e.tagName === 'LI').map(e => e.textContent);
-        return {items, inputs: __inputs(box).length + __inputs(jarvis).length, buttons: __buttons(box).filter(__visible).map(b => b.textContent), saveHidden: __saveButton(box).attrs['aria-hidden'], note: __text(box).includes('Only the house owner can see and change these settings.'), jarvisItems};
+        return {items, inputs: __inputs(box).length + __inputs(jarvis).length, buttons: __buttons(box).filter(__visible).map(b => b.textContent), saveHidden: !__visible(__saveButton(box)), note: __text(box).includes('Only the house owner can see and change these settings.'), jarvisItems};
         """
     )
     assert result["items"] == [
@@ -420,7 +420,7 @@ def test_a_restricted_response_shows_set_by_the_owner_or_not_set_and_no_values_o
     assert "Default room: Not set here" in result["jarvisItems"]
     assert "Thermostat range: Set by the owner" in result["jarvisItems"]
     assert result["inputs"] == 0
-    assert result["buttons"] == ["Save"] and result["saveHidden"] == "true"
+    assert result["buttons"] == [] and result["saveHidden"] is True, "Save is not shown when it cannot be used"
     assert result["note"] is True
 
 
@@ -593,3 +593,257 @@ def test_extension_points_accept_a_new_kind_and_card():
         """
     )
     assert result["title"] == "Replaced"
+
+
+# --- review round: focus, hidden Save, discard, hash, legend, copy ------------------------------
+
+STATUS = "(box => box.find(e => e.className === 'sr-only')[0].textContent)"
+
+
+def test_focus_goes_to_the_heading_after_a_save_and_to_reapply_after_a_conflict():
+    result = scenario(
+        rf"""
+        const box = __box('c1');
+        const status = {STATUS};
+        __script = [__ok('amtrak', __entry({{default_station: 'NYP'}}, {{default_station: true}}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        __type(__labelled(box, 'Station code'), 'bos');
+        __script = [__put(__entry({{default_station: 'BOS'}}, {{default_station: true}}, {{revision: 4}}))];
+        __saveButton(box).click();
+        await __settle();
+        const afterSave = {{id: __focused.attrs.id, tag: __focused.tagName}};
+        __type(__labelled(box, 'Station code'), 'phl');
+        __script = [{{status: 409, body: {{detail: 'stale_revision'}}}}, __ok('amtrak', __entry({{default_station: 'NYP'}}, {{default_station: true}}, {{revision: 9}}))];
+        __saveButton(box).click();
+        await __settle();
+        const afterConflict = {{text: __focused.textContent, visible: __visible(__focused)}};
+        return {{afterSave, afterConflict}};
+        """
+    )
+    assert result["afterSave"] == {"id": "hh-amtrak-heading", "tag": "H3"}
+    assert result["afterConflict"] == {"text": "Re-apply my changes", "visible": True}
+
+
+def test_save_is_not_shown_while_loading_failing_forbidden_restricted_or_read_only():
+    result = scenario(
+        r"""
+        const seen = {};
+        __perms = ['read'];
+        let box = __box('c1');
+        __script = [{status: 500, body: {}}];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        seen.error = __visible(__saveButton(box));
+        box = __box('c2');
+        __script = [{status: 403, body: {}}];
+        await HouseholdSettings.mount('gateway', 'c2');
+        seen.forbidden = __visible(__saveButton(box));
+        seen.forbiddenCopy = __text(box).includes("You don't have permission to view this setting.");
+        box = __box('c3');
+        __script = [__ok('sms', __entry({default_country_code: '44'}, {default_country_code: true}))];
+        await HouseholdSettings.mount('sms', 'c3');
+        seen.readOnly = __visible(__saveButton(box));
+        seen.noAriaHidden = !('aria-hidden' in __saveButton(box).attrs);
+        __perms = ['read', 'write', 'manage_infrastructure'];
+        box = __box('c4');
+        __script = [__ok('amtrak', __entry({default_station: 'NYP'}, {default_station: true}))];
+        await HouseholdSettings.mount('amtrak', 'c4');
+        seen.editable = __visible(__saveButton(box));
+        return seen;
+        """
+    )
+    assert result == {
+        "error": False, "forbidden": False, "forbiddenCopy": True, "readOnly": False, "noAriaHidden": True, "editable": True,
+    }
+
+
+def test_discard_changes_restores_the_saved_values_and_moves_focus_to_the_heading():
+    result = scenario(
+        rf"""
+        const box = __box('c1');
+        const status = {STATUS};
+        __script = [__ok('amtrak', __entry({{default_station: 'NYP'}}, {{default_station: true}}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        const discard = () => __buttons(box, 'Discard changes')[0];
+        const clean = __visible(discard());
+        const input = __labelled(box, 'Station code');
+        __type(input, 'bos');
+        const dirty = __visible(discard());
+        const fetchesBefore = __fetches.length;
+        discard().click();
+        return {{
+          clean, dirty, value: input.value, after: __visible(discard()), marker: __visible(box.find(e => e.textContent === 'Unsaved changes')[0]),
+          focus: __focused.attrs.id, announced: status(box), fetched: __fetches.length - fetchesBefore,
+        }};
+        """
+    )
+    assert result == {
+        "clean": False, "dirty": True, "value": "NYP", "after": False, "marker": False,
+        "focus": "hh-amtrak-heading", "announced": "Changes discarded.", "fetched": 0,
+    }
+
+
+def test_a_cancelled_leave_puts_the_url_back_on_the_tab_that_is_still_showing():
+    result = scenario(
+        r"""
+        const box = __box('c1');
+        const urls = [];
+        global.history = { replaceState(a, b, url) { urls.push(url); } };
+        __script = [__ok('amtrak', __entry({default_station: 'NYP'}, {default_station: true}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        __type(__labelled(box, 'Station code'), 'bos');
+        __confirmAnswer = false;
+        showTab('dashboard');
+        const cancelled = urls.slice();
+        __confirmAnswer = true;
+        showTab('dashboard');
+        return {cancelled, afterLeaving: urls.slice(cancelled.length)};
+        """
+    )
+    assert result == {"cancelled": ["#devices"], "afterLeaving": []}
+
+
+def test_the_legend_shows_only_where_a_server_setting_placeholder_exists_and_a_card_can_override_it():
+    result = scenario(
+        r"""
+        const legend = box => __text(box).includes('Fields marked "Server setting"');
+        const out = {};
+        let box = __box('c1');
+        __script = [__ok('amtrak', __entry({default_station: null}, {default_station: false}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        out.text = legend(box);
+        box = __box('c2');
+        __script = [__ok('lights', __entry({room_light_exclude: null}, {room_light_exclude: false}, {required_permission: 'manage_infrastructure'}))];
+        await HouseholdSettings.mount('lights', 'c2');
+        out.listOnly = legend(box);
+        const field = {name: 'fallback_model', kind: 'text', label: 'Model', maxlength: 20};
+        HouseholdSettings.defineCard('gateway', {title: 'Custom', blurb: 'b', legend: 'Our own legend.', fields: [field]});
+        box = __box('c3');
+        __script = [__ok('gateway', __entry({fallback_model: null}, {fallback_model: false}))];
+        await HouseholdSettings.mount('gateway', 'c3');
+        out.override = {own: __text(box).includes('Our own legend.'), default: legend(box)};
+        HouseholdSettings.defineCard('sms', {title: 'Quiet', blurb: 'b', legend: '', fields: [Object.assign({}, field, {name: 'default_country_code'})]});
+        box = __box('c4');
+        __script = [__ok('sms', __entry({default_country_code: null}, {default_country_code: false}))];
+        await HouseholdSettings.mount('sms', 'c4');
+        out.empty = legend(box);
+        return out;
+        """
+    )
+    assert result["text"] is True and result["listOnly"] is False
+    assert result["override"] == {"own": True, "default": False}
+    assert result["empty"] is False
+
+
+def test_the_saved_line_goes_when_the_user_edits_again():
+    result = scenario(
+        r"""
+        const box = __box('c1');
+        __script = [__ok('amtrak', __entry({default_station: 'NYP'}, {default_station: true}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        const input = __labelled(box, 'Station code');
+        __type(input, 'bos');
+        __script = [__put(__entry({default_station: 'BOS'}, {default_station: true}, {revision: 4}))];
+        __saveButton(box).click();
+        await __settle();
+        const saved = __text(box).includes('Saved.');
+        __type(input, 'phl');
+        return {saved, after: __text(box).includes('Saved.')};
+        """
+    )
+    assert result == {"saved": True, "after": False}
+
+
+def test_a_conflict_whose_reload_failed_offers_retry_not_a_dead_reapply_button():
+    result = scenario(
+        r"""
+        const box = __box('c1');
+        __script = [__ok('amtrak', __entry({default_station: 'NYP'}, {default_station: true}))];
+        await HouseholdSettings.mount('amtrak', 'c1');
+        __type(__labelled(box, 'Station code'), 'bos');
+        __script = [{status: 409, body: {}}, {status: 500, body: {}}];
+        __saveButton(box).click();
+        await __settle();
+        const reapply = () => __buttons(box, 'Re-apply my changes')[0];
+        const failed = {reapplyVisible: __visible(reapply()), retry: __buttons(box, 'Retry').filter(__visible).length};
+        __script = [__ok('amtrak', __entry({default_station: 'PHL'}, {default_station: true}, {revision: 4}))];
+        __buttons(box, 'Retry')[0].click();
+        await __settle();
+        return {failed, recovered: __visible(reapply())};
+        """
+    )
+    assert result == {"failed": {"reapplyVisible": False, "retry": 1}, "recovered": True}
+
+
+def test_the_thermostat_range_is_a_labelled_group_and_short_codes_use_short_inputs():
+    result = scenario(
+        r"""
+        let box = __box('c1');
+        __script = [__ok('jarvis_web', __entry({min_temp: null, max_temp: null}, {}, {required_permission: 'manage_infrastructure'}))];
+        await HouseholdSettings.mount('jarvis_web', 'c1');
+        const group = box.find(e => e.tagName === 'FIELDSET' && e.find(x => x.tagName === 'LEGEND' && x.textContent === 'Thermostat range').length);
+        const thermostat = __labelled(box, 'Thermostat');
+        box = __box('c2');
+        __script = [__ok('amtrak', __entry({default_station: null}, {}))];
+        await HouseholdSettings.mount('amtrak', 'c2');
+        const station = __labelled(box, 'Station code');
+        return {group: group.length, thermostat: thermostat.className, station: station.className};
+        """
+    )
+    assert result["group"] == 1
+    assert "max-w-xl" in result["thermostat"] and "max-w-[8rem]" in result["station"]
+
+
+def test_a_removed_pattern_label_follows_what_the_user_types():
+    result = scenario(
+        r"""
+        const box = __box('c1');
+        __script = [__ok('lights', __entry({room_light_exclude: ['light.a']}, {room_light_exclude: true}, {required_permission: 'manage_infrastructure'}))];
+        await HouseholdSettings.mount('lights', 'c1');
+        const remove = () => __buttons(box, 'Remove')[0];
+        const before = remove().attrs['aria-label'];
+        __type(__inputs(box)[0], 'light.garage_*');
+        return {before, after: remove().attrs['aria-label'], secondary: remove().className.includes('bg-gray-700') && !remove().className.includes('bg-blue-600')};
+        """
+    )
+    assert result == {"before": "Remove pattern 1: light.a", "after": "Remove pattern 1: light.garage_*", "secondary": True}
+
+
+def test_changing_the_country_code_warns_about_guest_matching_only_while_dirty():
+    result = scenario(
+        rf"""
+        const box = __box('c1');
+        const status = {STATUS};
+        __script = [__ok('sms', __entry({{default_country_code: '1'}}, {{default_country_code: true}}, {{required_permission: 'manage_infrastructure'}}))];
+        await HouseholdSettings.mount('sms', 'c1');
+        const note = () => box.find(e => e.tagName === 'P' && __visible(e) && e.textContent.includes("check that a current guest's texts are still recognised")).length === 1;
+        const clean = note();
+        const input = __labelled(box, 'Country code');
+        __type(input, '44');
+        const dirty = {{note: note(), announced: status(box).includes('guest')}};
+        __type(input, '1');
+        return {{clean, dirty, reverted: note()}};
+        """
+    )
+    assert result == {"clean": False, "dirty": {"note": True, "announced": True}, "reverted": False}
+
+
+def test_a_warning_present_at_load_is_not_announced_but_one_caused_by_an_edit_is():
+    result = scenario(
+        rf"""
+        const box = __box('c1');
+        const status = {STATUS};
+        const bed = __entry({{level_left: 'select.l', level_right: null, power_main: null, power_side_a: null, power_side_b: null}}, {{level_left: true}}, {{required_permission: 'manage_infrastructure'}});
+        __script = [__ok('bed_warmer', bed)];
+        await HouseholdSettings.mount('bed_warmer', 'c1');
+        const warning = () => box.find(e => e.textContent.startsWith('The bed warmer needs all five'))[0];
+        const atLoad = {{shown: __visible(warning()), role: warning().attrs.role === undefined, announced: status(box)}};
+        const empty = __box('c2');
+        __script = [__ok('bed_warmer', __entry({{level_left: null, level_right: null, power_main: null, power_side_a: null, power_side_b: null}}, {{}}, {{required_permission: 'manage_infrastructure'}}))];
+        await HouseholdSettings.mount('bed_warmer', 'c2');
+        const before = status(empty);
+        __type(__labelled(empty, 'Left heat level'), 'select.l');
+        return {{atLoad, before, afterEdit: status(empty).startsWith('The bed warmer needs all five')}};
+        """
+    )
+    assert result["atLoad"] == {"shown": True, "role": True, "announced": ""}
+    assert result["before"] == "" and result["afterEdit"] is True
