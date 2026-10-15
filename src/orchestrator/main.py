@@ -180,6 +180,7 @@ from orchestrator.followup import last_exchange_from_session
 from orchestrator.grounding import (
     DECLINE_TEXT,
     forced_tool_calls,
+    TOOL_OWNED,
     grounded,
     local_business_cue,
     no_data_prompt,
@@ -232,6 +233,7 @@ from shared.fast_path_vocab import AMBIENT_REPLY
 from shared.llm_router import current_usage, llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
 from orchestrator.helpers import (
     answer_max_tokens,
+    place_entity,
     finish_spoken_answer,
     get_feature_config,
     is_long_form_turn,
@@ -2727,6 +2729,11 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             cached = await cache.get(cache_key)
             if state.timing_tracker:
                 state.timing_tracker.track_substage("graph", "classify", "cache_check", time.time() - cache_start)
+            if cached and cached.get("intent") in ("general_info", "unknown") and (
+                _rule_routed_intent(state.query) in {i.value for i in TOOL_OWNED}
+            ):
+                logger.info("intent_cache_skipped_rule_routed", query_len=len(state.query))
+                cached = None
             if cached:
                 state.intent = IntentCategory(cached["intent"])
                 state.confidence = cached.get("confidence", 0.9)
@@ -3128,6 +3135,12 @@ Respond in JSON format:
             state.entities = {**llm_entities}  # Start with LLM entities
             if preserved_location:
                 state.entities["location"] = preserved_location  # Preserve request location
+            if "location" in state.entities:
+                place = place_entity(state.entities["location"])
+                if place is None:
+                    del state.entities["location"]
+                else:
+                    state.entities["location"] = place
             if "team" in state.entities:
                 # "we"/"our team"/"none" name no team; drop it so the favourites apply.
                 team = favorite_teams.named_team(state.entities["team"])
@@ -3232,6 +3245,16 @@ Respond in JSON format:
 
     state.node_timings["classify"] = time.time() - start
     return state
+
+def _rule_routed_intent(query: str) -> Optional[str]:
+    """The tool-owned intent today's rules send ``query`` to without the LLM (the
+    team-contest rule, or a specific pattern match); None otherwise. Used to
+    refuse a cached answer stored under an older rule."""
+    if is_team_contest_question(query):
+        return IntentCategory.SPORTS.value
+    intent, confidence = _pattern_based_classification(query, return_confidence=True)
+    return intent.value if confidence >= 0.8 else None
+
 
 def _pattern_based_classification(query: str, return_confidence: bool = False):
     """
@@ -6801,7 +6824,9 @@ async def process_query(
             # Deny by default on the intent the entry was stored under: an
             # unmapped intent, a tool-owned answer stored without tool data and a
             # local-business answer are never replayed.
-            if cached_response and not cached_entry_usable(cached_response, request.query):
+            if cached_response and not cached_entry_usable(
+                cached_response, request.query, routed_intent=_rule_routed_intent(request.query)
+            ):
                 logger.info(
                     "semantic_cache_read_skipped",
                     cached_intent=cached_response.get("intent"),

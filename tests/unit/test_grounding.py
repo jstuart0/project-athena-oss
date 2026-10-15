@@ -514,6 +514,21 @@ def test_a_stored_entry_is_replayed_only_under_the_same_rule():
     assert usable({"intent": "general_info", "_cache_metadata": {"grounded": False}}, "what is a stock split")
 
 
+def test_an_answer_stored_before_a_routing_rule_is_not_replayed_for_a_tool_owned_route():
+    usable = semantic_cache.cached_entry_usable
+    stale = {"intent": "general_info", "_cache_metadata": {"grounded": False}}
+    assert usable(stale, "how did we do last night")                             # no rule routes it: replayable
+    assert not usable(stale, "how did we do last night", routed_intent="sports")
+    assert not usable({"intent": "unknown", "_cache_metadata": {}}, "q", routed_intent="weather")
+    assert usable(stale, "what is a stock split", routed_intent="general_info")
+    assert usable(stale, "what is a stock split", routed_intent=None)
+
+
+def test_the_release_epoch_was_bumped_for_the_rule_change():
+    assert semantic_cache.CACHE_EPOCH != "2026-10-r1"
+    assert semantic_cache.CACHE_EPOCH in semantic_cache.FLUSH_MARKER_KEY
+
+
 @pytest.mark.parametrize("query,expected", [
     ("Yes.", True), ("yes", True), ("YES!", True), ("no thanks.", True), ("nah", True), ("sure", True),
     ("sounds good", True), ("yes please", True),

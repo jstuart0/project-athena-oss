@@ -917,6 +917,7 @@ def test_the_three_we_phrasings_classify_as_sports_with_no_team(monkeypatch, que
     out = run(h.main.classify_node(classifier_turn(monkeypatch, query)))
     assert out.intent == I.SPORTS
     assert "team" not in (out.entities or {})
+    assert "location" not in (out.entities or {})  # the classifier's location "last night" is a time, not a place
 
 
 def test_an_end_to_end_turn_with_team_we_looks_up_the_favourite_not_we(monkeypatch):
@@ -975,3 +976,111 @@ def test_they_them_their_stay_a_named_team_so_a_follow_up_keeps_its_team(value):
         run(retrieve_node(state))
     favs.assert_not_awaited()
     assert state.sports_default is None
+
+
+# --- stale caches, the web fallback on grounded turns, and time words posing as places ------------------
+
+def test_a_stored_general_info_answer_for_a_we_question_is_not_replayed():
+    from orchestrator import semantic_cache
+    stale = {"intent": "general_info", "_cache_metadata": {"grounded": False}}
+    for query in ("how did we do last night", "how did we do in the game last night", "did we win last night"):
+        routed = h.main._rule_routed_intent(query)
+        assert routed == "sports"
+        assert not semantic_cache.cached_entry_usable(stale, query, routed_intent=routed)
+    assert h.main._rule_routed_intent("what is a stock split") is None
+
+
+def test_a_cached_general_info_classification_is_not_used_for_a_rule_routed_query(monkeypatch):
+    state = classifier_turn(monkeypatch, "how did we do last night")
+    _runtime.get_cache_client().get = AsyncMock(
+        return_value={"intent": "general_info", "confidence": 0.95, "complexity": "simple", "entities": {}}
+    )
+    out = run(h.main.classify_node(state))
+    assert out.intent == I.SPORTS
+
+
+class _Spy:
+    def __init__(self):
+        self.search = AsyncMock(return_value=("general_info", []))
+
+
+@pytest.fixture
+def web_fallback(monkeypatch):
+    spy = _Spy()
+    _runtime.set_parallel_search_engine(spy)
+    config = {"enabled": True, "config": {"excluded_intents": [], "detection_patterns": ["have information"]}}
+    monkeypatch.setattr(h.helpers_module, "get_post_synthesis_fallback_config", AsyncMock(return_value=config))
+    return spy
+
+
+REAL_TEAM_DATA = {
+    "team": "Anytown Owls", "league": "football/nfl", "today": "Thursday, October 15",
+    "last_games": [{"strHomeTeam": "Anytown Owls", "strAwayTeam": "Eastport Comets", "dateEvent": "2026-10-11",
+                    "intHomeScore": "30", "intAwayScore": "23"}],
+    "upcoming_games": [], "live_games": [], "status": {"state": "final", "summary": "x", "winner": "Anytown Owls"},
+}
+
+
+def hedging_state(query, data, **entities):
+    state = sports_state(query, entities=entities)
+    state.answer = "I don't have information about that."
+    state.retrieved_data = data
+    return state
+
+
+def test_a_grounded_sports_turn_that_hedges_never_triggers_the_web_search(web_fallback):
+    from structlog.testing import capture_logs
+    state = hedging_state("how did we do in the game last night", REAL_TEAM_DATA, location="last night")
+    with capture_logs() as logs:
+        assert run(h.helpers_module.maybe_post_synthesis_fallback(state)) is False
+    web_fallback.search.assert_not_awaited()
+    assert not any(e["event"] == "post_synthesis_fallback_triggered" for e in logs)
+
+
+def test_an_ungrounded_hedge_still_falls_back_but_never_appends_a_time_as_the_place(web_fallback):
+    state = hedging_state("how did the giants do last night", {}, location="last night")
+    run(h.helpers_module.maybe_post_synthesis_fallback(state))
+    web_fallback.search.assert_awaited_once()
+    query = web_fallback.search.await_args.kwargs["query"]
+    assert query.lower().count("last night") == 1
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("last night", None), ("Today", None), ("tonight", None), ("this week", None), ("on Sunday", None),
+    ("Anytown last night", "Anytown"), ("Anytown", "Anytown"), ("", None), (None, None),
+])
+def test_place_entity_drops_time_words(value, expected):
+    assert h.helpers_module.place_entity(value) == expected
+
+
+def test_the_sports_rule_answers_a_past_question_from_last_game_even_off_the_named_day():
+    from orchestrator.grounding import SPORTS_STATUS_RULE
+    for part in ("data.last_game", "display_date", "last_game.summary", "Their last game was", "never answer \"I don't have information\""):
+        assert part in SPORTS_STATUS_RULE
+
+
+import os  # noqa: E402
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("ATHENA_REAL_MODEL_GOLDEN") and os.environ.get("OLLAMA_URL")),
+    reason="opt-in: set ATHENA_REAL_MODEL_GOLDEN=1 and OLLAMA_URL (and ATHENA_SYNTHESIS_MODEL) to run against a real model",
+)
+@pytest.mark.parametrize("query", ["how did we do last night", "how did we do in the game last night", "did we win"])
+def test_real_model_golden_the_three_phrasings_name_the_oct_11_final(query):
+    import json
+    import urllib.request
+    from orchestrator.grounding import SPORTS_STATUS_RULE
+    data = dict(REAL_TEAM_DATA, last_game={"display_date": "Sunday, October 11", "result": "won", "summary":
+                "Anytown Owls won 30-23 at home against Eastport Comets on Sunday, October 11 (final)"})
+    prompt = (f"Answer the following question using ONLY the provided context.\n\nQuestion: {query}\n\n"
+              f"Context Data:\n{json.dumps(data, indent=2)}\n\nCRITICAL ANTI-HALLUCINATION INSTRUCTIONS:\n"
+              '1. ONLY use facts from the Context Data above\n2. If the context doesn\'t have specific information, '
+              'say "I don\'t have information about that"\n' + SPORTS_STATUS_RULE + "\n\nResponse:")
+    request = urllib.request.Request(
+        os.environ["OLLAMA_URL"].rstrip("/") + "/api/generate",
+        data=json.dumps({"model": os.environ.get("ATHENA_SYNTHESIS_MODEL", ""), "prompt": prompt, "stream": False}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    answer = json.loads(urllib.request.urlopen(request, timeout=120).read())["response"]
+    assert "30" in answer and "11" in answer and "don't have information" not in answer.lower()

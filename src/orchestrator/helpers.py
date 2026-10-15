@@ -1083,6 +1083,23 @@ def web_search_allowed(state: Any) -> bool:
     return allowed
 
 
+_TEMPORAL_PHRASES = re.compile(
+    r"\b(?:last night|tonight|this (?:morning|afternoon|evening|week|weekend|season)|last (?:week|weekend|month)|"
+    r"yesterday|today|tomorrow|right now|(?:on |this |last )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+    re.IGNORECASE,
+)
+
+
+def place_entity(value: Any) -> Optional[str]:
+    """A ``location`` entity with the time words a classifier sometimes puts in it
+    ("last night", "today") removed; None when nothing but time is left. Used for
+    the classified entity and for any search query built from it."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(_TEMPORAL_PHRASES.sub(" ", value).split()).strip(" ,.-")
+    return cleaned or None
+
+
 async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     """
     Check if synthesis produced insufficient response and retry with web search.
@@ -1104,6 +1121,13 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
         return False
     # A refusal is the answer; a web search must never route around it.
     if getattr(state, "error", None) == "permission_denied":
+        return False
+    # An answer built from tool data is the answer, even when it hedges: the web
+    # search below would replace real data with snippets about something else.
+    from orchestrator.grounding import grounded  # call time: grounding imports the favourites module
+
+    if grounded(state):
+        logger.info("post_synthesis_fallback_skipped_grounded", intent=str(getattr(state.intent, "value", state.intent)))
         return False
     # A raw fragment is never searched. Decided in code, before any admin
     # setting: a full UNKNOWN question still falls back, a fragment doesn't.
@@ -1152,7 +1176,7 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
         # Build enhanced search query with year for relevance
         search_query = enhance_query_with_year(state.query)
         if state.entities:
-            location = state.entities.get("location")
+            location = place_entity(state.entities.get("location"))
             if location:
                 search_query = f"{search_query} {location}"
 

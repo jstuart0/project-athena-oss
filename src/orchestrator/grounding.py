@@ -439,7 +439,12 @@ SPORTS_STATUS_RULE = (
     "7. SPORTS STATUS: the data's status object says where the game stands. If status.state is "
     '"live", say the game is in progress and give the score; never call it the last result, a win '
     'or a loss. If status.state is "final", the winner is status.winner (a tie when status.tie is true). '
-    'If it is "upcoming", say when it starts.'
+    'If it is "upcoming", say when it starts. A question about a game that already happened ("how did we do", '
+    '"did we win", "last night", "yesterday", "how did the <team> do") is answered from data.last_game, '
+    "whatever status.state says: give last_game.display_date and repeat last_game.summary and last_game.result "
+    "as written (data.today is today's date); never work out a winner or a score order yourself. When the game "
+    'was not on the day the question named, say so: "Their last game was Saturday, October 11: ...". '
+    'If data.last_game exists, never answer "I don\'t have information" (rule 2 does not apply).'
 )
 
 

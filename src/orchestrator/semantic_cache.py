@@ -119,15 +119,22 @@ def cacheable_turn(
     return True
 
 
-def cached_entry_usable(entry: Dict[str, Any], query: str) -> bool:
+def cached_entry_usable(entry: Dict[str, Any], query: str, routed_intent: Optional[str] = None) -> bool:
     """Whether a stored entry may be replayed: the same deny-by-default rule on
     the intent it was stored under. An entry written before the grounding flag
-    existed has no flag and is not replayed for a tool-owned intent."""
+    existed has no flag and is not replayed for a tool-owned intent. An answer
+    stored as general_info or unknown is not replayed when today's rules route
+    the query (``routed_intent``) to a tool-owned intent: a rule change moves a
+    query between intents, and the old answer was written under the old rule."""
     from orchestrator.grounding import TOOL_OWNED, local_business_cue
     from orchestrator.state import IntentCategory
 
     intent = _intent_value(entry.get("intent"))
     if _intent_ttl(intent) <= 0:
+        return False
+    if routed_intent in {i.value for i in TOOL_OWNED} and intent in (
+        IntentCategory.GENERAL_INFO.value, IntentCategory.UNKNOWN.value
+    ):
         return False
     metadata = entry.get("_cache_metadata") or {}
     if intent in {i.value for i in TOOL_OWNED}:
@@ -927,7 +934,7 @@ async def invalidate_cache(pattern: str = None) -> int:
 # Bump with a release that changes what an answer may be cached or replayed as, so
 # the entries written under the old rules are flushed once. The keys sit outside
 # the ``athena_semantic:`` prefix, so the flush can't remove them.
-CACHE_EPOCH = "2026-10-r1"
+CACHE_EPOCH = "2026-10-r2"
 FLUSH_MARKER_KEY = f"athena_semantic_meta:flushed:{CACHE_EPOCH}"
 FLUSH_LOCK_KEY = f"athena_semantic_meta:flushing:{CACHE_EPOCH}"
 FLUSH_LOCK_TTL_SECONDS = 300

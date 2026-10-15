@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -97,16 +97,74 @@ def _is_today(event: Dict[str, Any], now: datetime) -> bool:
     return not date or str(date) == now.date().isoformat()
 
 
+def _same_team(name: Any, team: str) -> bool:
+    a, b = str(name or "").strip().lower(), (team or "").strip().lower()
+    return bool(a and b and (a == b or a in b or b in a))
+
+
+def _event_date(event: Dict[str, Any]) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(event.get("dateEvent", ""))[:10])
+    except ValueError:
+        return None
+
+
+def _display_date(day: date) -> str:
+    return f"{day.strftime('%A')}, {day.strftime('%B')} {day.day}"
+
+
+def last_game(last_games: List[Dict[str, Any]], team: str, now: datetime) -> Optional[Dict[str, Any]]:
+    """The team's most recent finished game, tense-neutral: its date (with
+    weekday and ``days_ago``), the opponent, home or away, both scores from the
+    asked team's side, and ``result`` (won/lost/tied) computed from those
+    scores. ``summary`` is the one sentence a reply can repeat. None when no
+    finished game with a readable matchup exists."""
+    played = [e for e in last_games if e.get("strHomeTeam") and e.get("strAwayTeam")]
+    played.sort(key=lambda e: str(e.get("dateEvent", "")), reverse=True)
+    if not played:
+        return None
+    event = played[0]
+    home, away = event["strHomeTeam"], event["strAwayTeam"]
+    hs, as_ = _score(event.get("intHomeScore")), _score(event.get("intAwayScore"))
+    day = _event_date(event)
+    is_home, is_away = _same_team(home, team), _same_team(away, team)
+    side = "home" if is_home and not is_away else "away" if is_away and not is_home else None
+    out: Dict[str, Any] = {"opponent": None, "home_away": side, "team_score": None, "opponent_score": None, "result": None}
+    if day:
+        out.update(date=day.isoformat(), weekday=day.strftime("%A"), display_date=_display_date(day),
+                   days_ago=(now.date() - day).days)
+    if side:
+        mine, theirs = (hs, as_) if side == "home" else (as_, hs)
+        out.update(opponent=away if side == "home" else home, team_score=mine, opponent_score=theirs)
+        if mine is not None and theirs is not None:
+            out["result"] = "tied" if mine == theirs else "won" if mine > theirs else "lost"
+    out["winner"] = winner_from_scores(home, away, hs, as_)
+    out["tie"] = out["result"] == "tied" or (side is None and is_tie(event.get("intHomeScore"), event.get("intAwayScore"), event.get("winner")))
+    when = f" on {out['display_date']}" if day else ""
+    if out["result"]:
+        where = "at home against" if side == "home" else "away at"
+        verb = f"tied {out['team_score']}-{out['opponent_score']} {where}" if out["result"] == "tied" else (
+            f"{out['result']} {out['team_score']}-{out['opponent_score']} {where}")
+        out["summary"] = f"{team} {verb} {out['opponent']}{when} (final)"
+    else:
+        out["summary"] = f"{away} {event.get('intAwayScore', '')} - {event.get('intHomeScore', '')} {home}{when} (final)"
+    return out
+
+
 def status_headline(
     next_games: List[Dict[str, Any]],
     last_games: List[Dict[str, Any]],
     live_games: List[Dict[str, Any]],
     now: datetime,
+    team: str = "",
 ) -> Dict[str, Any]:
     """Pure: {state: live|final|upcoming|none, summary, winner}.
 
     ``live_games`` is the team's scoreboard rows (any state). Priority: a game
     in progress; a game that finished today; the next game; the last game.
+    ``upcoming`` is only a game dated today or later (a past-dated row in the
+    next list is stale). Every non-live answer also carries the team's
+    ``last_game`` so a past-tense question has its answer in any state.
     """
     in_play = [g for g in live_games if _game_state(g) == LIVE_STATE]
     if in_play:
@@ -125,28 +183,42 @@ def status_headline(
     played = [e for e in last_games if e.get("strHomeTeam")]
     last = played[0] if played else None
     if last and last.get("dateEvent") == now.date().isoformat():
-        return _final_headline(last)
+        return _final_headline(last, last_game(played, team, now))
 
-    upcoming = [e for e in next_games if e.get("game_state") != LIVE_STATE and e.get("strHomeTeam")]
+    previous = last_game(played, team, now)
+    upcoming = [
+        e for e in next_games
+        if e.get("game_state") != LIVE_STATE and e.get("strHomeTeam")
+        and (_event_date(e) is None or _event_date(e) >= now.date())
+    ]
     if upcoming:
         e = upcoming[0]
         when = " ".join(str(p) for p in (e.get("dateEvent"), e.get("strTime")) if p)
-        return {"state": "upcoming", "summary": f"{e.get('strAwayTeam', '')} at {e.get('strHomeTeam', '')} on {when}".strip(), "winner": None}
+        headline: Dict[str, Any] = {
+            "state": "upcoming", "summary": f"{e.get('strAwayTeam', '')} at {e.get('strHomeTeam', '')} on {when}".strip(),
+            "winner": None,
+        }
+        if previous:
+            headline["last_game"] = previous
+        return headline
 
     if last:
-        return _final_headline(last)
+        return _final_headline(last, previous)
     return {"state": "none", "summary": "", "winner": None}
 
 
-def _final_headline(event: Dict[str, Any]) -> Dict[str, Any]:
+def _final_headline(event: Dict[str, Any], previous: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     home, away = event.get("strHomeTeam"), event.get("strAwayTeam")
     hs, as_ = event.get("intHomeScore"), event.get("intAwayScore")
-    return {
+    headline = {
         "state": "final",
         "summary": f"{away} {as_} - {hs} {home} (final, {event.get('dateEvent', '')})",
         "winner": winner_from_scores(home, away, hs, as_),
         "tie": is_tie(hs, as_, event.get("winner")),
     }
+    if previous:
+        headline["last_game"] = previous
+    return headline
 
 
 def _final_event(g: Dict[str, Any], now: datetime) -> Dict[str, Any]:
@@ -254,7 +326,11 @@ async def team_events(
     if live_games:
         data["has_live_game"] = True
         data["live_score_summary"] = _scoreboard_line(live_games[0], str(live_games[0].get("status", "LIVE")))
-    data["status"] = status_headline(next_games, last_games, scoreboard, now)
+    previous = last_game(last_games, full_name, now)
+    if previous:
+        data["today"] = _display_date(now.date())
+        data["last_game"] = previous
+    data["status"] = status_headline(next_games, last_games, scoreboard, now, full_name)
 
     logger.info(
         "sports_data_fetched",

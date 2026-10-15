@@ -248,3 +248,85 @@ def test_the_default_team_is_an_admin_setting_not_an_environment_variable():
     assert "SPORTS_DEFAULT_TEAM" not in (ROOT / "config.env.example").read_text(encoding="utf-8")
     assert '"Ravens"' not in (ROOT / "src/orchestrator/nodes/retrieve.py").read_text(encoding="utf-8")
     assert '"Ravens"' not in (ROOT / "src/orchestrator/favorite_teams.py").read_text(encoding="utf-8")
+
+
+# --- last_game: tense-neutral, from the asked team's side, on real-shaped provider payloads --------------
+
+REAL_NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)  # a Thursday
+HERONS = {"idTeam": "espn:football-nfl:33", "strTeam": "Riverton Herons", "strLeague": "football/nfl"}
+
+
+def provider_event(date, home, away, hs, as_, winner="WRONG PROVIDER VALUE"):
+    """The shape /sports/events/<id>/last returns (rag/sports/main.py)."""
+    return {"strEvent": f"{away} at {home}", "dateEvent": date, "strHomeTeam": home, "strAwayTeam": away,
+            "intHomeScore": hs, "intAwayScore": as_, "strResult": f"{hs}-{as_}", "winner": winner, "source": "espn"}
+
+
+def upcoming_event(date, home, away):
+    return {"strEvent": f"{away} at {home}", "dateEvent": date, "strTime": "17:00", "strHomeTeam": home,
+            "strAwayTeam": away, "game_state": "pre"}
+
+
+class FakeRag:
+    def __init__(self, last, nxt, live=()):
+        self.payloads = {"last": last, "next": nxt}
+        self.live = list(live)
+
+    async def get(self, service, path, params=None, **kw):
+        if path.endswith("/last"):
+            return SimpleNamespace(success=True, data={"events": self.payloads["last"]})
+        if path.endswith("/next"):
+            return SimpleNamespace(success=True, data={"events": self.payloads["next"]})
+        return SimpleNamespace(success=True, data={"games": self.live})
+
+
+def run_team_events(last, nxt, now=REAL_NOW):
+    return asyncio.run(ss.team_events(FakeRag(last, nxt), HERONS, now=now))
+
+
+def test_last_night_on_an_off_day_yields_the_oct_11_final_with_the_right_winner_and_never_upcoming_as_the_answer():
+    data = run_team_events(
+        [provider_event("2026-10-11", "Riverton Herons", "Eastport Comets", "30", "23"),
+         provider_event("2026-10-04", "Lakeside Otters", "Riverton Herons", "24", "17")],
+        [upcoming_event("2026-10-18", "Riverton Herons", "Harbor Gulls")],
+    )
+    game = data["last_game"]
+    assert (game["date"], game["weekday"], game["days_ago"]) == ("2026-10-11", "Sunday", 4)
+    assert game["display_date"] == "Sunday, October 11"
+    assert (game["opponent"], game["home_away"], game["team_score"], game["opponent_score"], game["result"]) == (
+        "Eastport Comets", "home", 30, 23, "won")
+    assert game["summary"] == "Riverton Herons won 30-23 at home against Eastport Comets on Sunday, October 11 (final)"
+    assert data["today"] == "Thursday, October 15"
+    assert data["status"]["state"] == "upcoming" and "2026-10-18" in data["status"]["summary"]
+    assert data["status"]["last_game"] == game
+
+
+@pytest.mark.parametrize("team_home,hs,as_,result,winner,line", [
+    (True, "30", "23", "won", "Riverton Herons", "won 30-23 at home against"),
+    (True, "17", "24", "lost", "Eastport Comets", "lost 17-24 at home against"),
+    (True, "20", "20", "tied", None, "tied 20-20 at home against"),
+    (False, "23", "30", "won", "Riverton Herons", "won 30-23 away at"),
+    (False, "24", "17", "lost", "Eastport Comets", "lost 17-24 away at"),
+    (False, "20", "20", "tied", None, "tied 20-20 away at"),
+])
+def test_the_result_is_computed_from_the_asked_teams_side(team_home, hs, as_, result, winner, line):
+    home, away = ("Riverton Herons", "Eastport Comets") if team_home else ("Eastport Comets", "Riverton Herons")
+    # The provider's own winner field is wrong or "Tie": it is never used.
+    data = run_team_events([provider_event("2026-10-11", home, away, hs, as_, winner="Tie" if result != "tied" else "X")], [])
+    game = data["last_game"]
+    assert game["result"] == result and game["winner"] == winner and game["tie"] is (result == "tied")
+    assert line in game["summary"]
+    assert data["status"]["state"] == "final" and data["status"]["winner"] == winner
+
+
+def test_a_past_dated_row_in_the_next_list_is_never_called_upcoming():
+    data = run_team_events(
+        [provider_event("2026-10-11", "Riverton Herons", "Eastport Comets", "30", "23")],
+        [upcoming_event("2026-10-11", "Riverton Herons", "Eastport Comets")],
+    )
+    assert data["status"]["state"] == "final" and data["last_game"]["result"] == "won"
+
+
+def test_no_finished_game_means_no_last_game():
+    data = run_team_events([], [upcoming_event("2026-10-18", "Riverton Herons", "Harbor Gulls")])
+    assert "last_game" not in data and data["status"]["state"] == "upcoming"
