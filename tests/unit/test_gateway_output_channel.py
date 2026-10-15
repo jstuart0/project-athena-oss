@@ -385,14 +385,14 @@ class _BrokenStream:
         return False
 
 
-def test_a_failed_orchestrator_stream_returns_a_generic_error(client, orchestrator, monkeypatch):
+def test_a_failed_orchestrator_stream_ends_with_the_closed_apology_and_done(client, orchestrator, monkeypatch):
     monkeypatch.setattr(orchestrator, "stream", lambda *a, **k: _BrokenStream(), raising=False)
     log = mock.MagicMock()
     monkeypatch.setattr(gw, "logger", log)
     resp = _post(client, "chat", True)
     assert resp.status_code == 200
     assert "secret-internal-detail" not in resp.text
-    assert gw.STREAM_ERROR_MESSAGE in resp.text
+    assert gw.SPOKEN_FAILURE_TEXT in resp.text and resp.text.rstrip().endswith("data: [DONE]")  # D23: as the non-stream path
     assert [c for c in log.error.call_args_list if c.kwargs.get("error_type") == "RuntimeError"], "class logged server-side"
 
 

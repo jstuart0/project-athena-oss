@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 from . import access_target, room_choice, room_context
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
@@ -21,7 +21,8 @@ from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import (
-    UtteranceClassification, UtteranceKind, classify_utterance, imperative_text, is_indoor_temperature_question,
+    UtteranceClassification, UtteranceKind, classify_utterance, has_deferral, has_narration, imperative_text,
+    is_indoor_temperature_question,
 )
 from shared.ha_registry import room_key, tokens as _words
 from shared.ha_registry import tokens as _name_tokens
@@ -471,6 +472,21 @@ def media_write_refusal(
     if access_target.media_write_allowed(kind, query, assistant_names):
         return None
     return NO_WRITE_CUE_TEXT
+
+
+_COMMAND_LEAD_FILLER = frozenset({
+    "please", "hey", "ok", "okay", "can", "could", "would", "will", "you", "go", "ahead", "and", "then", "just",
+})
+
+
+def _leads_with_opening_verb(query: str) -> bool:
+    """Whether the words open with an opening verb ("release the deadbolt"): a
+    command in other words than the classifier's verbs, never a scene-setting
+    lead ("in the movie they unlock the front door")."""
+    spoken = [w for w in _words(query.lower())]
+    while spoken and spoken[0] in _COMMAND_LEAD_FILLER:
+        spoken.pop(0)
+    return bool(spoken) and spoken[0] in _OPENING_VERBS
 
 
 _LETS_PREFIXES = ("let's ", "lets ", "let us ")
@@ -1664,6 +1680,39 @@ class SmartHomeController:
         return response
 
     @staticmethod
+    def _door_command_refusal(
+        device_type: Any, action: Any, query: Optional[str], utterance: Optional[UtteranceClassification],
+        *, carried_words: bool, confirmed: bool,
+    ) -> Optional[str]:
+        """The answer when the words don't ask for this lock or cover to move
+        now, else None. A door never moves for a time or a condition ("in 5
+        minutes unlock the front door", "...when I get home"), and one that
+        opens needs a command that is no one's report ("she said unlock the
+        front door", "maybe unlock it")."""
+        if (
+            query is None or access_target.canonical_device_type(device_type) not in ('lock', 'cover')
+            or action in access_target.READ_ONLY_ACTIONS
+        ):
+            return None
+        import logging
+        log = logging.getLogger(__name__)
+        if (utterance is not None and utterance.deferred) or has_deferral(query):
+            log.info("deferred_door_command_refused")
+            return NO_WRITE_CUE_TEXT
+        if carried_words or confirmed or not access_target.is_opening_action(
+            access_target.canonical_device_type(device_type), action,
+        ):
+            return None
+        domain = access_target.canonical_device_type(device_type)
+        if domain == 'cover' and access_target.cover_intent_kind(query) != "access":
+            return None  # blinds and the like move on plain wording ("blinds up")
+        kind = (utterance or classify_utterance(query)).kind
+        if has_narration(query) or not (kind == UtteranceKind.IMPERATIVE or _leads_with_opening_verb(query)):
+            log.info("door_opening_without_command_refused")
+            return NO_WRITE_CUE_TEXT
+        return None
+
+    @staticmethod
     def _retried_intent_matches_words(intent: Dict, utterance: UtteranceClassification, query: str) -> bool:
         """An answer from a backend that can't promise it read the whole prompt
         writes only what the user's own words say. A read always passes. A write
@@ -2524,16 +2573,12 @@ Return ONLY valid JSON."""
             ):
                 original_query = imperative_text(original_query) or original_query
                 words = original_query if cue_query is None else words
-            if (
-                utterance is not None and utterance.deferred and original_query is not None
-                and access_target.canonical_device_type(device_type) in ('lock', 'cover')
-                and action not in access_target.READ_ONLY_ACTIONS
-            ):
-                # A door never moves now for words that name a later time or a
-                # condition ("in 5 minutes unlock the front door").
-                import logging
-                logging.getLogger(__name__).info("deferred_door_command_refused")
-                return NO_WRITE_CUE_TEXT
+            door_refusal = self._door_command_refusal(
+                device_type, action, original_query, utterance, carried_words=cue_query is not None,
+                confirmed=bool(scope.confirmed_entity_ids),
+            )
+            if door_refusal is not None:
+                return door_refusal
             kind_hint = utterance.kind if utterance is not None else None
             scene_phrase = scene_request_allowed(utterance) if utterance is not None else False
             problem = access_target.write_cue_problem(

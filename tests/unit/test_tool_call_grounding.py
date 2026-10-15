@@ -318,6 +318,19 @@ def test_a_first_person_experience_fails_validation_and_declines_on_a_tool_turn(
     assert out.validation_passed is False and out.answer == grounding.DECLINE_TEXT
 
 
+def test_a_grounded_tool_answer_is_not_declined_over_wording():
+    data = {"tool_calls": ["search_web"], "tool_results": {"a": {"results": [{"title": "Hours"}]}}}
+    state = _state(answer="I visited their website and they open at 5.", tool_call_attempted=True, retrieved_data=data)
+    out = _validate(state)
+    assert out.answer == "I visited their website and they open at 5." and out.validation_passed is not False
+
+
+def test_the_same_wording_with_no_tool_data_still_declines_when_it_claims_a_visit():
+    state = _state(answer="I visited there and they open at 5.", tool_call_attempted=True)
+    out = _validate(state)
+    assert out.validation_passed is False and out.answer == grounding.DECLINE_TEXT
+
+
 def test_an_empty_answer_on_a_tool_turn_is_left_to_finalize():
     state = _state(answer=None, tool_call_attempted=True)
     out = _validate(state)

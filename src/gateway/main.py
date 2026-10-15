@@ -1385,14 +1385,25 @@ def _log_orchestrator_failure(exc: BaseException, status: Optional[int]) -> None
     logger.error("orchestrator_failure", status=status, error_type=type(exc).__name__)
 
 
-def _spoken_failure_chunk(request: ChatCompletionRequest) -> str:
-    """The spoken failure as one OpenAI stream delta (the caller sends [DONE])."""
+def _sse_carries_text(line: str) -> bool:
+    """Whether an SSE data line holds a non-empty content delta."""
+    try:
+        delta = json.loads(line[6:])["choices"][0]["delta"]
+        return bool(delta.get("content"))
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return False
+
+
+def _spoken_failure_chunk(request: ChatCompletionRequest, *, after_partial: bool = False) -> str:
+    """The spoken failure as one OpenAI stream delta (the caller sends [DONE]).
+    After partial content it starts its own sentence."""
+    text = f". {SPOKEN_FAILURE_TEXT}" if after_partial else SPOKEN_FAILURE_TEXT
     data = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": request.model,
-        "choices": [{"index": 0, "delta": {"content": SPOKEN_FAILURE_TEXT}, "finish_reason": None}],
+        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
     }
     return f"data: {json.dumps(data)}\n\n"
 
@@ -1870,7 +1881,12 @@ async def stream_orchestrator_response(
     voice_device_id: Optional[str] = None,
     trusted_voice: bool = False,
 ) -> AsyncIterator[str]:
-    """Stream response from orchestrator's OpenAI-compatible endpoint."""
+    """Stream response from orchestrator's OpenAI-compatible endpoint.
+
+    A 5xx or a transport failure ends the stream with the spoken apology and
+    [DONE] on either channel (as the non-stream path answers it); a 4xx ends
+    it with the generic error line."""
+    yielded_content = False
     try:
         # Forward streaming request to orchestrator's /v1/chat/completions endpoint
         # Note: room context passed via extra_body for orchestrator to use
@@ -1891,14 +1907,15 @@ async def stream_orchestrator_response(
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
                     # Forward the SSE line as-is
+                    yielded_content = yielded_content or _sse_carries_text(line)
                     yield f"{line}\n\n"
 
     except Exception as e:
         status = _failure_status(e)
         _log_orchestrator_failure(e, status)
         request_counter.labels(endpoint="orchestrator", status="error").inc()
-        if channel is OutputChannel.SPEECH and (status is None or status >= 500):
-            yield _spoken_failure_chunk(request)
+        if status is None or status >= 500:
+            yield _spoken_failure_chunk(request, after_partial=yielded_content)
             yield "data: [DONE]\n\n"
         else:
             yield _stream_error_line()
@@ -2173,6 +2190,7 @@ async def responses_api(
     # Debug: Log the incoming request to see if streaming is enabled
     logger.info(f"Responses API request - model: {request.model}, stream: {request.stream}, temp: {request.temperature}")
 
+    chat_request: Optional[ChatCompletionRequest] = None
     try:
         # Convert Responses API format to Chat Completions format
         chat_request = _responses_to_chat_request(request)
@@ -2223,7 +2241,11 @@ async def responses_api(
         request_counter.labels(endpoint="responses_api", status="error").inc()
         logger.error("responses_api_unexpected_error", error_type=type(e).__name__)
         if channel is OutputChannel.SPEECH:
-            return _responses_from_completion(_failure_completion(_responses_to_chat_request(request)))
+            # Never convert again here: the conversion may be what failed.
+            fallback = chat_request or ChatCompletionRequest(
+                model=request.model, messages=[ChatMessage(role="user", content="")],
+            )
+            return _responses_from_completion(_failure_completion(fallback))
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

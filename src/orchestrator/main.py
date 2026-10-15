@@ -121,6 +121,7 @@ from orchestrator.semantic_cache import (
     cacheable_turn,
     cached_entry_usable,
     extract_semantic_intent,
+    flush_once_per_release,
     get_cached_response,
     is_bare_reply,
 )
@@ -1205,6 +1206,11 @@ async def lifespan(app: FastAPI):
     cache_client = CacheClient()
     _runtime.set_cache_client(cache_client)
 
+    # Entries written under an earlier release's caching rules are flushed once per
+    # release (a marker key and a lock make it safe across replicas); a background
+    # task, so startup never waits on a scan.
+    _runtime.spawn_background(flush_once_per_release())
+
     # Home Assistant credentials: the admin key wins, the environment is the
     # fallback, and the last admin value is kept while admin is unreachable.
     # Local first (R2-H1); a token saved later applies within a minute.
@@ -2093,7 +2099,8 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
 # ============================================================================
 
 def _resume_open_task(state: OrchestratorState, prev_context: Any, ref_info: Dict[str, Any]) -> bool:
-    """Apply `followup.resolve` to the turn. True when it decided the turn:
+    """Apply `followup.resolve` to the turn. True when it decided the turn (classify_node, the one
+    writer of `state.context_ref_info`, then stores the "continued" view):
     a decline ends it with "Okay."; an affirmation or a slot answer pins the
     stored intent and carries the original request in `resolved_request`, with
     its complexity judged on that request (a follow-up isn't a simple turn)."""
@@ -2117,7 +2124,6 @@ def _resume_open_task(state: OrchestratorState, prev_context: Any, ref_info: Dic
 
     state.intent = IntentCategory.GENERAL_INFO if isinstance(resolution, followup.Decline) else IntentCategory(prev_context.intent)
     state.confidence = 0.95
-    state.context_ref_info = context_ref_view(ref_info, "continued")
     if isinstance(resolution, followup.Decline):
         state.answer = "Okay."
         state.skip_synthesis = True
@@ -2502,8 +2508,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             # A bare reply to a question or offer the last exchange left open
             # ("Yes.", "no thanks", "in the north district") resumes that task:
             # it is not a new topic, and not a thin follow-up on the last intent.
-            resumed = _resume_open_task(state, prev_context, ref_info)
-            if resumed:
+            if _resume_open_task(state, prev_context, ref_info):
+                state.context_ref_info = context_ref_view(ref_info, "continued")
                 state.node_timings["classify"] = time.time() - start
                 return state
 
@@ -4769,7 +4775,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         logger.info("addressee_resolved", kind=addressee.kind)
 
         # Inject memory context for tool selection (e.g., "user's car is a Tesla")
-        if state.memory_context:
+        # A turn that asks who the speaker is or where they live carries no
+        # stored memory either, when nobody is addressed.
+        if state.memory_context and not (addressee.kind is None and identity_answer.mentions_identity(state.query)):
             system_content += f"\n{state.memory_context}\n"
             logger.info("Memory context injected into tool_call prompt")
 
@@ -6595,11 +6603,21 @@ async def process_query(
             ]
             logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
+        # Build context with guest info (if identified via device fingerprint)
+        query_context = build_query_context(
+            request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+        )
+
         # Retrieve relevant memories from Qdrant for context augmentation
         memory_context = ""
         async with timing_tracker.track_async("pre_graph", "memory_retrieval"):
             if is_public_audience(permissions):
                 logger.info("memory_retrieval_skipped", reason="public_audience")
+            elif (
+                identity_answer.mentions_identity(request.query)
+                and addressee_kind(query_context, audience=authz.knowledge_audience) is None
+            ):
+                logger.info("memory_retrieval_skipped", reason="identity_turn_unknown_speaker")
             elif _direct_general_info_response(request.query):
                 logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_len=len(request.query))
             else:
@@ -6633,11 +6651,6 @@ async def process_query(
                         logger.info("memory_retrieval_empty", mode=current_mode)
                 except Exception as e:
                     logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
-
-        # Build context with guest info (if identified via device fingerprint)
-        query_context = build_query_context(
-            request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
-        )
 
         # Create initial state with conversation history, mode, and permissions
         # Initialize entities with location if provided in request
@@ -6719,6 +6732,7 @@ async def process_query(
             cache_blocked = (
                 request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee
                 or authz.degraded or owner_caller or unverified_guest or identity_query
+                or identity_answer.mentions_identity(request.query)
             )
             if not cache_blocked:
                 # Same filtered rows the prompt uses; a failed load disables the
@@ -8196,7 +8210,7 @@ Response:"""
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
 
     # Inject relevant memories
-    if state.memory_context:
+    if state.memory_context and not (addressee.kind is None and identity_answer.mentions_identity(state.query)):
         system_context += state.memory_context
 
     # Distinguish owner profile from current conversation partner

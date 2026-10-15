@@ -28,7 +28,9 @@ from shared.output_channel import render_sink_text
 from orchestrator import access_target
 from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
-from orchestrator.utterance_kind import UtteranceKind, classify_utterance, command_query, has_narration, is_narration
+from orchestrator.utterance_kind import (
+    UtteranceKind, classify_utterance, command_query, has_deferral, has_narration, is_narration,
+)
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
 # in sequence_executor.py.
@@ -47,6 +49,7 @@ _COMMAND_ONLY_KINDS = frozenset({"cover", "lock"})
 
 
 async def _assistant_names() -> tuple:
+    import orchestrator.nodes  # noqa: F401  (the nodes package loads before helpers; helpers-first is a known cycle)
     from orchestrator.helpers import configured_assistant_names  # lazy: helpers imports the nodes package
     try:
         return tuple(await configured_assistant_names())
@@ -84,6 +87,8 @@ def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple =
         return None  # a question's write is stopped by the read-only scope or the fan-out gate
     if kind in ("scene", "script"):
         return None if scene_request_allowed(uk) else NO_WRITE_CUE_TEXT
+    if kind in _COMMAND_ONLY_KINDS and (uk.deferred or has_deferral(query, names)):
+        return NO_WRITE_CUE_TEXT  # a door never moves now for a time or condition; only create_automation carries it
     if kind in _COMMAND_ONLY_KINDS or kind not in _SERVICE_KINDS.values():
         return None if uk.kind == UtteranceKind.IMPERATIVE else NO_WRITE_CUE_TEXT
     problem = access_target.write_cue_problem(
@@ -1827,6 +1832,10 @@ def should_use_automation_agent(query: str, assistant_names=()) -> bool:
     # off the lights", "if it gets dark, turn on the porch light") is never for now:
     # the agent sets it up.
     if has_home_device and _SCHEDULE_LED_RE.search(query_lower):
+        return True
+    # The same for a time or condition that follows the command ("lock the
+    # door in an hour", "open the garage door at 5pm", "...when I get home").
+    if has_home_device and classify_utterance(query, assistant_names=assistant_names).deferred:
         return True
 
     # Only return True if we have clear home automation intent

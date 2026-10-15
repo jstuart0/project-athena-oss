@@ -327,7 +327,7 @@ def test_the_agent_is_still_chosen_for_an_automation(utterance):
 
 
 def test_a_command_still_writes_through_the_agent():
-    h = _agent_calls_after("turn off the office light at 6pm", *HA_OFF)
+    h = _agent_calls_after("turn off the office light", *HA_OFF)
     assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("light", "turn_off")]
 
 
@@ -778,3 +778,143 @@ def test_a_time_lead_stays_deferred(utterance):
 def test_a_place_or_filler_lead_writes(utterance, entity):
     state, _model, client = drive_control(utterance)
     assert {e for w in writes(client) for e in w[2]} == {entity}, (utterance, writes(client), state.answer)
+
+
+# --- reconcile r1: a time or condition after the command, and narrated openings ------------
+
+TRAILING_DEFERRED = [
+    "unlock the front door in 5 minutes", "unlock the front door when I get home", "open the garage door at 5pm",
+    "open the garage tonight", "lock the door in an hour", "lock the door once I arrive",
+    "open the garage door before I get home", "lock the front door after 10pm", "unlock the front door at 5",
+    "unlock the front door, when I get home", "open the garage door in half an hour",
+]
+# A light's timer is the sequence executor's and its condition the agent's, as before: the door rule leaves them alone.
+LIGHT_TIMERS = ["turn off the lights in 10 minutes", "turn off the lights at 10pm", "turn off the lights tonight"]
+LIGHT_CONDITIONS = ["turn off the lights when I leave", "turn on the porch light at sunset"]
+NARRATED_OPENINGS = [
+    "she said unlock the front door", "the neighbor said open the garage door", "maybe unlock the front door",
+    "in the movie they unlock the front door", "the burglar tried to unlock the front door",
+    "Unlock the front door, said nobody", "he asked to open the garage door",
+]
+DOOR_ENTITIES = {
+    "lock.front": {"state": "locked", "attributes": {"friendly_name": "Front Door"}},
+    "cover.garage": {"state": "closed", "attributes": {"friendly_name": "Garage Door", "device_class": "garage"}},
+}
+
+
+def _door_controller_calls(utterance, domain, action):
+    """Drive the controller with the lock or cover the model picked; the calls
+    that reached Home Assistant, and the answer."""
+    from orchestrator import mode_permission as mp
+    from orchestrator.smart_home_controller import SmartHomeController
+    from unittest.mock import AsyncMock, MagicMock
+    from ._clause_harness import run
+
+    class Doors:
+        entities = dict(DOOR_ENTITIES)
+
+        async def get_entities(self, force_refresh=False, max_age=None):
+            return dict(self.entities)
+
+        async def get_entity(self, entity_id, max_age=None):
+            return self.entities.get(entity_id)
+
+        def invalidate(self, ids):
+            pass
+
+    controller = SmartHomeController(entity_manager=Doors(), llm_router=MagicMock())
+    raw = MagicMock()
+    raw.call_service = AsyncMock(return_value={})
+    raw.get_state = AsyncMock(return_value={"state": "locked"})
+    intent = {"device_type": domain, "action": action, "room": "front door" if domain == "lock" else "garage",
+              "target_scope": "group", "parameters": {}}
+
+    async def go():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(utterance),
+                                    trusted_voice=True):
+            return await controller.execute_intent(intent, raw, original_query=utterance)
+
+    answer = run(go())
+    return answer, raw.call_service.await_args_list
+
+
+@pytest.mark.parametrize("utterance", TRAILING_DEFERRED, ids=str)
+def test_a_trailing_time_or_condition_defers_the_command(utterance):
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.command_text, uk.deferred) == (UNKNOWN, None, True), utterance
+    state, _model, client = drive_control(utterance)
+    assert writes(client) == [], (utterance, writes(client))
+
+
+@pytest.mark.parametrize("utterance", LIGHT_TIMERS + LIGHT_CONDITIONS, ids=str)
+def test_a_lights_trailing_time_keeps_its_route(utterance):
+    from orchestrator.smart_home_controller import SmartHomeController
+    from unittest.mock import MagicMock
+    uk = classify_utterance(utterance)
+    assert (uk.kind, uk.deferred) == (IMPERATIVE, False)
+    controller = SmartHomeController(entity_manager=MagicMock(), llm_router=MagicMock())
+    scheduled = controller.detect_sequence_intent(utterance)
+    assert scheduled if utterance in LIGHT_TIMERS else should_use_automation_agent(utterance), utterance
+
+
+@pytest.mark.parametrize("utterance", [u for u in TRAILING_DEFERRED if "door" in u or "garage" in u], ids=str)
+def test_a_door_never_moves_now_for_a_trailing_time(utterance):
+    domain, action = ("cover", "open") if "garage" in utterance else ("lock", "lock" if "lock the" in utterance and "unlock" not in utterance else "unlock")
+    answer, calls = _door_controller_calls(utterance, domain, action)
+    assert answer == NO_WRITE_CUE_TEXT and calls == [], (utterance, answer)
+
+
+@pytest.mark.parametrize("utterance", TRAILING_DEFERRED, ids=str)
+def test_a_trailing_time_or_condition_reaches_the_automation_agent(utterance):
+    assert should_use_automation_agent(utterance) is True
+
+
+@pytest.mark.parametrize("utterance,domain,service", [
+    ("unlock the front door when I get home", "lock", "unlock"), ("lock the door in an hour", "lock", "lock"),
+    ("open the garage door at 5pm", "cover", "open_cover"),
+], ids=str)
+def test_the_agents_immediate_tool_refuses_a_door_on_a_deferred_turn(utterance, domain, service):
+    h = _agent_calls_after(utterance, "ha_service", {"domain": domain, "service": service,
+                                                      "entity_id": f"{domain}.front_door"})
+    assert h.client.call_service.await_count == 0, utterance
+
+
+def test_a_trailing_time_is_still_set_up_by_the_agent_for_lights_and_doors():
+    create = ("create_automation", {"name": "Later", "trigger": {"type": "time", "time": "17:00"},
+                                    "actions": [{"type": "service", "entity_id": "light.office_0",
+                                                 "service": "turn_off"}]})
+    for utterance in ("turn off the lights in 10 minutes", "turn off the lights when I leave"):
+        h = _agent_calls_after(utterance, *create)
+        assert h.client.create_automation.await_count == 1, utterance
+
+
+@pytest.mark.parametrize("utterance", NARRATED_OPENINGS, ids=str)
+def test_a_narrated_opening_writes_nothing_through_the_controller(utterance):
+    domain, action = ("cover", "open") if "garage" in utterance else ("lock", "unlock")
+    answer, calls = _door_controller_calls(utterance, domain, action)
+    assert answer == NO_WRITE_CUE_TEXT and calls == [], (utterance, answer)
+
+
+@pytest.mark.parametrize("utterance", NARRATED_OPENINGS, ids=str)
+def test_a_narrated_opening_writes_nothing_through_the_agent(utterance):
+    domain, service = ("cover", "open_cover") if "garage" in utterance else ("lock", "unlock")
+    h = _agent_calls_after(utterance, "ha_service", {"domain": domain, "service": service,
+                                                      "entity_id": f"{domain}.front_door"})
+    assert h.client.call_service.await_count == 0, utterance
+
+
+@pytest.mark.parametrize("utterance,domain,action", [
+    ("unlock the front door", "lock", "unlock"), ("please unlock the front door", "lock", "unlock"),
+    ("open the garage door", "cover", "open"),
+], ids=str)
+def test_an_ordinary_door_opening_still_writes(utterance, domain, action):
+    answer, calls = _door_controller_calls(utterance, domain, action)
+    assert len(calls) == 1, (utterance, answer)
+
+
+@pytest.mark.parametrize("utterance", [
+    "she said unlock the front door", "in the movie they unlock the front door", "Unlock the front door, said nobody",
+], ids=str)
+def test_narrated_and_tagged_openings_are_no_command(utterance):
+    uk = classify_utterance(utterance)
+    assert uk.kind != IMPERATIVE and uk.command_text is None, utterance

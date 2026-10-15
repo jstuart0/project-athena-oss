@@ -328,7 +328,7 @@ def test_a_first_person_experience_is_ungrounded_for_any_intent():
 
 
 def test_a_story_in_the_first_person_is_not_an_experience_claim():
-    story = "I went to the market and I ate a pear, then I visited my grandmother."
+    story = "I went to the market and I ate there, then I visited my grandmother."
     assert not grounding.ungrounded_answer(story, I.GENERAL_INFO, "tell me a story about a market", False)
     assert grounding.experience_claim(story, "is the market good")
 
@@ -563,3 +563,116 @@ def test_the_cache_key_keeps_its_version_and_audience_segments():
     parts = key.split(":")
     assert semantic_cache.CACHE_KEY_VERSION == "kv2" and "kv2" in parts
     assert "kb_abc123" in parts and "mode_owner" in parts and parts[-1] == "iface_chat"
+
+
+@pytest.mark.parametrize("answer", [
+    "I visited their website and they open at 5.",
+    "I went to the forecast service and it says rain.",
+    "I went to the calendar and the game starts at 7.",
+])
+def test_bare_visited_or_went_to_is_no_experience_claim(answer):
+    assert not grounding.experience_claim(answer, "when do they open")
+
+
+@pytest.mark.parametrize("answer", [
+    "I visited there last week and loved it.", "I've visited there twice.", "I ate at the new place.",
+    "When I visited, the pasta was great.",
+])
+def test_a_visit_to_the_place_is_still_an_experience_claim(answer):
+    assert grounding.experience_claim(answer, "is it good")
+
+
+# --- flush_once_per_release (D24) ------------------------------------------------------------
+
+class _FlushRedis(_FakeRedis):
+    """A fake with the calls the release flush adds: exists, set(nx, ex) and delete."""
+
+    def __init__(self, keys, *, fail_scan=False):
+        super().__init__(keys)
+        self.fail_scan = fail_scan
+        self.set_calls = []
+
+    async def scan_iter(self, match=None, count=None):
+        if self.fail_scan:
+            raise ConnectionError("down")
+        async for key in super().scan_iter(match=match, count=count):
+            yield key
+
+    async def exists(self, key):
+        return int(key in self.keys)
+
+    async def set(self, key, value, nx=False, ex=None):
+        self.set_calls.append((key, nx, ex))
+        if nx and key in self.keys:
+            return None
+        self.keys.add(key)
+        return True
+
+    async def delete(self, *keys):
+        self.keys -= set(keys)
+
+
+ENTRIES = [f"athena_semantic:general_x:{n}:kv2" for n in range(3)] + ["conversation:abc"]
+
+
+def test_the_release_flush_empties_the_cache_once_and_sets_the_marker_after(monkeypatch):
+    redis = _FlushRedis(ENTRIES)
+    _install(monkeypatch, redis)
+    assert asyncio.run(semantic_cache.flush_once_per_release()) == 3
+    assert redis.keys == {"conversation:abc", semantic_cache.FLUSH_MARKER_KEY}  # the lock is released
+    redis.keys |= {"athena_semantic:general_x:new:kv2"}
+    assert asyncio.run(semantic_cache.flush_once_per_release()) is None  # same release: nothing again
+    assert "athena_semantic:general_x:new:kv2" in redis.keys
+
+
+def test_the_marker_and_lock_keys_sit_outside_the_flushed_prefix():
+    assert not semantic_cache.FLUSH_MARKER_KEY.startswith("athena_semantic:")
+    assert not semantic_cache.FLUSH_LOCK_KEY.startswith("athena_semantic:")
+
+
+def test_a_failed_scan_sets_no_marker_so_the_next_start_tries_again(monkeypatch):
+    redis = _FlushRedis(ENTRIES, fail_scan=True)
+    _install(monkeypatch, redis)
+    assert asyncio.run(semantic_cache.flush_once_per_release()) is None
+    assert semantic_cache.FLUSH_MARKER_KEY not in redis.keys and semantic_cache.FLUSH_LOCK_KEY not in redis.keys
+    redis.fail_scan = False
+    assert asyncio.run(semantic_cache.flush_once_per_release()) == 3  # positive control
+
+
+def test_a_replica_that_cannot_take_the_lock_flushes_nothing(monkeypatch):
+    redis = _FlushRedis(ENTRIES + [semantic_cache.FLUSH_LOCK_KEY])
+    _install(monkeypatch, redis)
+    assert asyncio.run(semantic_cache.flush_once_per_release()) is None
+    assert redis.scans == [] and semantic_cache.FLUSH_LOCK_KEY in redis.keys  # the other replica's lock is untouched
+    assert redis.set_calls[0] == (semantic_cache.FLUSH_LOCK_KEY, True, semantic_cache.FLUSH_LOCK_TTL_SECONDS)
+
+
+def test_the_release_flush_does_nothing_without_redis_and_never_raises(monkeypatch):
+    _install(monkeypatch, None)
+    assert asyncio.run(semantic_cache.flush_once_per_release()) is None
+
+    class Broken:
+        async def exists(self, key):
+            raise ConnectionError("down")
+
+    _install(monkeypatch, Broken())
+    assert asyncio.run(semantic_cache.flush_once_per_release()) is None
+
+
+def test_the_lifespan_starts_the_release_flush_in_the_background():
+    import ast, pathlib
+    tree = ast.parse(pathlib.Path("src/orchestrator/main.py").read_text())
+    lifespan = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
+    spawned = [
+        n for n in ast.walk(lifespan) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "spawn_background"
+        and any(isinstance(a, ast.Call) and getattr(a.func, "id", "") == "flush_once_per_release" for a in n.args)
+    ]
+    assert len(spawned) == 1
+
+
+def test_an_intent_that_is_not_hashable_is_judged_by_its_value():
+    from types import SimpleNamespace
+
+    assert not grounding.ungrounded_answer("It is sunny.", SimpleNamespace(value="weather"), "weather today", False)
+    assert grounding.ungrounded_answer(INVENTED, SimpleNamespace(value="dining"), "an italian place", False)  # positive control
+    assert grounding.ungrounded_answer(INVENTED, "dining", "an italian place", False)

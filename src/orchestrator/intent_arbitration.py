@@ -15,6 +15,8 @@ The rules, in order (the first that applies decides):
 4. An LLM ``general_info`` against a trusted, specific pattern answer
    (>= ``SPECIFIC_PATTERN``) takes the pattern answer, whatever the LLM's own
    confidence. This is the rule the old 0.75 ceiling left a dead zone in.
+   Definitional, historical and how/why wording with no time-sensitive cue
+   ("who invented basketball", "how does rain form") stays general_info.
 5. When the two agree and the LLM is unsure (< 0.7), the pattern answer's
    confidence is borrowed. A boost never changes the intent and never applies
    when they disagree.
@@ -66,6 +68,19 @@ _PATTERN_EVIDENCE: Mapping[IntentCategory, "re.Pattern[str]"] = {
     IntentCategory.WEATHER: _WEATHER_EVIDENCE,
 }
 
+# Definitional, historical and how/why wording ("who invented basketball", "how
+# does rain form") is general knowledge, unless the words also ask for something
+# that changes with the day: a score, a forecast, tonight.
+_TIMELESS_WORDING = re.compile(
+    r"\b(?:who (?:invented|founded|created|discovered)|invented|history of|origin of|origins of|"
+    r"rules? (?:of|for)|what are the rules|how (?:does|do|did)|why (?:does|do|did)|what causes|explain|"
+    r"difference between)\b"
+)
+_TIME_SENSITIVE_CUE = re.compile(
+    r"\b(?:today|tonight|tomorrow|tomorrow's|yesterday|now|right now|currently|current|latest|live|"
+    r"this (?:week|weekend|morning|afternoon|evening|season)|next (?:game|week)|last night|"
+    r"scores?|forecast|standings|playing|winning|schedule|outside|here)\b"
+)
 _IMPLICIT_BRIGHTNESS = (
     "take it easy on my eyes", "easy on my eyes", "easy on the eyes",
     "darken it up", "tone down", "tone it down",
@@ -165,6 +180,10 @@ def _any(query: str, phrases) -> bool:
     return any(p in query for p in phrases)
 
 
+def _timeless_general_knowledge(query: str) -> bool:
+    return bool(_TIMELESS_WORDING.search(query)) and not _TIME_SENSITIVE_CUE.search(query)
+
+
 def _has_evidence(intent: IntentCategory, query: str) -> bool:
     pattern = _PATTERN_EVIDENCE.get(intent)
     if pattern is None or (
@@ -238,6 +257,8 @@ def _chain(
         and pat_conf >= SPECIFIC_PATTERN
         and _has_evidence(pat, query)
     ):
+        if _timeless_general_knowledge(query):
+            return None  # "who invented basketball": general knowledge, not the sports service
         return take(pat, pat_conf, "pattern_over_general_info")
     if llm == pat:
         if llm_conf < LLM_UNSURE and pat_conf >= SPECIFIC_PATTERN:

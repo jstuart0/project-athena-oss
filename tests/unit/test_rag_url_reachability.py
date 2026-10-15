@@ -400,3 +400,30 @@ def test_a_forbidden_override_does_not_stop_a_working_registry(monkeypatch):
             server.close()
 
     run(main())
+
+
+def test_a_probe_failure_that_is_not_an_oserror_is_unreachable_and_logged_once_by_type(monkeypatch):
+    async def odd(host, port):
+        raise ValueError("odd")
+
+    monkeypatch.setattr(h, "_connect_probe", odd)
+    monkeypatch.setattr(h, "_probe_error_types_logged", set())
+    assert run(h._probe_url("http://rag.example.test:8000")) is False
+    assert run(h._probe_url("http://rag.example.test:8000")) is False
+    warned = [c for c in h.logger.warning.call_args_list if c.args and c.args[0] == "rag_url_probe_failed"]
+    assert len(warned) == 1 and warned[0].kwargs == {"error_type": "ValueError"}  # the type, never the text
+
+
+def test_a_cancelled_probe_is_still_cancelled(monkeypatch):
+    async def hang(host, port):
+        await asyncio.sleep(60)
+
+    async def main():
+        monkeypatch.setattr(h, "_connect_probe", hang)
+        task = asyncio.create_task(h._probe_url("http://rag.example.test:8000"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(main())

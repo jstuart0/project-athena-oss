@@ -174,7 +174,7 @@ def test_a_backstopped_answer_is_never_cached(monkeypatch, flagged, written):
     rig = Rig(monkeypatch)
     monkeypatch.setattr(h.main, "orchestrator_graph", _FlaggedGraph(flagged))
     rig.read.return_value = None
-    answer = asyncio.run(_send("query", "tell me the name you have on file for me"))
+    answer = asyncio.run(_send("query", "who do you think I am"))
     assert answer == "Sure, a reply."
     rig.read.assert_awaited_once()
     assert (rig.write.await_count == 1) is written
@@ -196,3 +196,24 @@ def test_the_streaming_runner_stops_after_the_identity_reply(monkeypatch):
     )
     result = asyncio.run(h.main.run_orchestrator_for_streaming(state))
     assert result.answer == ia.NAME_REPLY and result.identity_answer is True and reached == []
+
+
+@pytest.mark.parametrize("query,retrieved", [
+    ("what's my name and where do I live", False),
+    ("remind me what address I gave you", False),
+    ("what do you remember about my cats", True),
+])
+def test_an_identity_turn_for_an_unknown_speaker_retrieves_no_memory_and_skips_the_cache(monkeypatch, query, retrieved):
+    """H2: neither pattern is a fixed-reply identity question, but a stored memory such as
+    "the user's address is ..." must not reach the prompt, and the answer is never cached.
+    The cats question is the positive control: the same plumbing does retrieve and read the cache."""
+    rig = Rig(monkeypatch)
+    rig.read.return_value = None
+    monkeypatch.setattr(h.main, "orchestrator_graph", _FlaggedGraph(False))
+    manager = mock.MagicMock()
+    manager.get_relevant_memories = mock.AsyncMock(return_value=[])
+    monkeypatch.setattr(h.main, "get_memory_manager", mock.AsyncMock(return_value=manager))
+    assert ia.identity_question(query) is None
+    asyncio.run(_send("query", query))
+    assert (manager.get_relevant_memories.await_count == 1) is retrieved
+    assert (rig.read.await_count == 1) is retrieved

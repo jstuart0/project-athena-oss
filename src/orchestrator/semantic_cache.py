@@ -878,28 +878,8 @@ async def cache_response(
 INVALIDATE_BATCH = 500
 
 
-async def invalidate_cache(pattern: str = None) -> int:
-    """
-    Remove cached responses: every semantic key, or those matching ``pattern``.
-
-    The scan is a Redis SCAN over ``athena_semantic:*`` (or the pattern, always
-    kept under that prefix so it can't reach another feature's keys) in batches
-    of 500, and the removal is a batched UNLINK. Returns the number of keys
-    removed; 0 when Redis is unavailable. Keys carry no version bump (constraint
-    g): this is how a release flushes entries written under the old rules. There
-    is no per-category form: the normalized part of a key is not the TTL category
-    (recipes are ``recipe_*``, general answers are a hash).
-    """
-    client = getattr(get_cache_client(), "client", None)
-    if client is None:
-        return 0
-
-    prefix = "athena_semantic:"
-    if not pattern:
-        pattern = prefix + "*"
-    elif not pattern.startswith(prefix):
-        pattern = prefix + pattern.lstrip(":")
-
+async def _scan_and_unlink(client: Any, pattern: str) -> Tuple[int, bool]:
+    """The keys removed under ``pattern`` and whether the scan ran to the end."""
     removed = 0
     batch: list = []
     try:
@@ -912,7 +892,73 @@ async def invalidate_cache(pattern: str = None) -> int:
             removed += await client.unlink(*batch)
     except Exception as e:
         logger.warning("semantic_cache_invalidate_error", error_class=type(e).__name__, removed=removed)
-        return removed
-
+        return removed, False
     logger.info("semantic_cache_invalidated", pattern=pattern, removed=removed)
+    return removed, True
+
+
+async def invalidate_cache(pattern: str = None) -> int:
+    """
+    Remove cached responses: every semantic key, or those matching ``pattern``.
+
+    The scan is a Redis SCAN over ``athena_semantic:*`` (or the pattern, always
+    kept under that prefix so it can't reach another feature's keys) in batches
+    of 500, and the removal is a batched UNLINK. Returns the number of keys
+    removed; 0 when Redis is unavailable. Keys carry no version bump (constraint
+    g): this is how a release flushes entries written under the old rules (see
+    ``flush_once_per_release``). There is no per-category form: the normalized
+    part of a key is not the TTL category (recipes are ``recipe_*``, general
+    answers are a hash).
+    """
+    client = getattr(get_cache_client(), "client", None)
+    if client is None:
+        return 0
+
+    prefix = "athena_semantic:"
+    if not pattern:
+        pattern = prefix + "*"
+    elif not pattern.startswith(prefix):
+        pattern = prefix + pattern.lstrip(":")
+
+    removed, _complete = await _scan_and_unlink(client, pattern)
+    return removed
+
+
+# Bump with a release that changes what an answer may be cached or replayed as, so
+# the entries written under the old rules are flushed once. The keys sit outside
+# the ``athena_semantic:`` prefix, so the flush can't remove them.
+CACHE_EPOCH = "2026-10-r1"
+FLUSH_MARKER_KEY = f"athena_semantic_meta:flushed:{CACHE_EPOCH}"
+FLUSH_LOCK_KEY = f"athena_semantic_meta:flushing:{CACHE_EPOCH}"
+FLUSH_LOCK_TTL_SECONDS = 300
+
+
+async def flush_once_per_release() -> Optional[int]:
+    """Empty the semantic cache once per ``CACHE_EPOCH``, across replicas.
+
+    The marker is set only after a flush that ran to the end; a replica that
+    cannot take the lock (another is flushing) or finds the marker does nothing.
+    Returns the number of keys removed, or None when it did not flush. Never
+    raises (it runs as a background task at startup)."""
+    client = getattr(get_cache_client(), "client", None)
+    if client is None:
+        return None
+    try:
+        if await client.exists(FLUSH_MARKER_KEY):
+            return None
+        if not await client.set(FLUSH_LOCK_KEY, "1", nx=True, ex=FLUSH_LOCK_TTL_SECONDS):
+            return None
+        try:
+            if await client.exists(FLUSH_MARKER_KEY):
+                return None
+            removed, complete = await _scan_and_unlink(client, "athena_semantic:*")
+            if not complete:
+                return None
+            await client.set(FLUSH_MARKER_KEY, "1")
+        finally:
+            await client.delete(FLUSH_LOCK_KEY)
+    except Exception as e:
+        logger.warning("semantic_cache_release_flush_error", error_class=type(e).__name__)
+        return None
+    logger.info("semantic_cache_release_flushed", epoch=CACHE_EPOCH, removed=removed)
     return removed
