@@ -92,7 +92,7 @@ from orchestrator.complexity_detector import determine_complexity, get_complexit
 
 # Smart home control imports
 from orchestrator.ha_entity_manager import HAEntityManager
-from orchestrator.smart_home_controller import SmartHomeController
+from orchestrator.smart_home_controller import CLASSIFY_COLOR_NAMES, SmartHomeController
 from orchestrator.sequence_executor import SequenceExecutor, detect_sequence_intent
 from orchestrator.automation_agent import AutomationAgent, should_use_automation_agent
 
@@ -2831,11 +2831,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Check for room+color patterns (light control without "lights" keyword)
     # This catches commands like "change office to white", "random colors in the kitchen"
-    color_names = [
-        'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple',
-        'pink', 'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset',
-        'random colors', 'different colors', 'christmas colors', 'ocean'
-    ]
+    color_names = CLASSIFY_COLOR_NAMES
     query_lower = state.query.lower()
     room_mention = room_context.find_room_mention(state.query, current_directory())
     has_room = room_mention.kind != "none"

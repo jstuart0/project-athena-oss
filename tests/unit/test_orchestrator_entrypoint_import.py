@@ -124,6 +124,7 @@ FIRST_IMPORTS = [
     "orchestrator.room_context",
     "orchestrator.room_directory",
     "orchestrator.room_choice",
+    "orchestrator.light_effects",
     "orchestrator.main",
     "orchestrator.identity_answer",
     "orchestrator.grounding",

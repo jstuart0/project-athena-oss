@@ -151,6 +151,8 @@ def unprocessable_text(intent: object) -> Optional[str]:
 
 
 _REFUSALS: set = set()
+# Fixed answers that name a target or an effect: whole-string patterns.
+_REFUSAL_PATTERNS: list = []
 NO_WRITE_CUE_MARK: str = ""  # set by the controller to its no-cue phrase
 
 
@@ -158,6 +160,26 @@ def register_refusals(*texts: str) -> None:
     """The controller registers each fixed answer that means "nothing was
     changed and this was not a command to remember"."""
     _REFUSALS.update(t for t in texts if isinstance(t, str))
+
+
+# A template field: one to 200 characters, no sentence break, so the fixed words
+# can't be reached from a longer answer ("Sure. The lamp doesn't have effects.").
+_TEMPLATE_FIELD = r"(?:[^.!?\n]|\.(?!\s)){1,200}"
+
+
+def register_refusal_templates(*templates: str) -> None:
+    """Register answers built from a template with ``{placeholder}`` fields
+    ("There's no effect running on {target}."). A formatted answer is a refusal
+    when the WHOLE text fits the template: the fixed words exactly, each field
+    some text of one to 200 characters with no sentence break. Never a substring match."""
+    for template in templates:
+        if not isinstance(template, str):
+            continue
+        parts = re.split(r"\{[a-z_]+\}", template)
+        pattern = _TEMPLATE_FIELD.join(re.escape(p) for p in parts)
+        compiled = re.compile(pattern)
+        if compiled.pattern not in {p.pattern for p in _REFUSAL_PATTERNS}:
+            _REFUSAL_PATTERNS.append(compiled)
 
 
 def set_no_write_cue_text(text: str) -> None:
@@ -168,7 +190,7 @@ def set_no_write_cue_text(text: str) -> None:
 def is_refusal_text(text: object) -> bool:
     """Whether an answer is one of the registered fixed refusals. Matched
     exactly, never by a word in the text."""
-    return isinstance(text, str) and text in _REFUSALS
+    return isinstance(text, str) and (text in _REFUSALS or any(p.fullmatch(text) for p in _REFUSAL_PATTERNS))
 
 
 def strip_server_keys(obj: object) -> Optional[dict]:

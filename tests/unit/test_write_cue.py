@@ -846,3 +846,133 @@ class TestSequenceBackingChecksTheOtherKindFirst:
 
         assert asyncio.run(go()) == shc.NO_DEVICE_TEXT
         assert rig.written == []
+
+
+class TestEffectCue:
+    """``set_effect`` and ``clear_effect`` are backed only by the effect itself in
+    the words, never by a light word, an on/off word or a control verb."""
+
+    @staticmethod
+    def cue(action, query, effect=None, device_type="light"):
+        parameters = {"effect": effect} if effect is not None else {}
+        return access_target.write_cue_problem(device_type, action, query, parameters)
+
+    NO = access_target.NO_CUE
+
+    @pytest.mark.parametrize("query,effect", [
+        ("set the study prism to candlelight", "candlelight"),
+        ("make the living room twinkle", "twinkle"),
+        ("put the study on fire 2012", "Fire 2012"),
+        ("set the prism to candlelight mode", "candlelight"),
+        ("play the candle effect on the prism", "candle"),
+        ("turn on the tv simulator effect on the study prism", "TV Simulator"),
+    ])
+    def test_the_effect_named_in_the_words_is_the_cue(self, query, effect):
+        assert self.cue("set_effect", query, effect) is None
+
+    @pytest.mark.parametrize("query,effect", [
+        ("play the effect", "Rainbow"), ("turn on the effect", "twinkle"), ("set the effects on the study", "twinkle"),
+        ("turn off the effect", "Rainbow"), ("turn off the effect", None), ("play the sound effect", "rain"),
+        ("stop the effects", "twinkle"),
+    ])
+    def test_the_word_effect_alone_never_backs_a_set(self, query, effect):
+        """D16: it backs only a clear."""
+        assert self.cue("set_effect", query, effect) == self.NO
+
+    @pytest.mark.parametrize("query,effect", [
+        ("turn off the candlelight effect", "candlelight"), ("stop the twinkle", "twinkle"),
+        ("candlelight mode off", "candlelight"), ("end the candlelight", "candlelight"),
+    ])
+    def test_a_clear_verb_beside_the_named_effect_is_not_a_set(self, query, effect):
+        assert self.cue("set_effect", query, effect) == self.NO
+
+    @pytest.mark.parametrize("query", [
+        "set the lights to sparkle", "turn on the study lights", "make the study brighter", "set the lights to blue",
+        "turn the lights on please", "the prism",
+    ])
+    def test_a_model_only_effect_is_no_cue_even_with_a_light_word_or_a_control_verb(self, query):
+        assert self.cue("set_effect", query, "twinkle") == self.NO
+
+    @pytest.mark.parametrize("effect", ["off", "none", "Solid", "on", "the", "Light Mode", "Effect"])
+    def test_a_clear_alias_or_a_filler_effect_is_never_named(self, effect):
+        assert self.cue("set_effect", f"set the prism to {effect}", effect) == self.NO
+
+    def test_a_clear_with_a_filler_effect_is_not_backed_by_the_stop_word(self):
+        assert self.cue("clear_effect", "turn off the lights", "off") == self.NO
+        assert self.cue("clear_effect", "turn off the lights", "turn off") == self.NO
+
+    def test_the_stop_word_must_be_outside_the_matched_effect(self):
+        assert self.cue("clear_effect", "set the prism to stop motion", "Stop Motion") == self.NO
+        assert self.cue("clear_effect", "turn off stop motion", "Stop Motion") is None
+        assert self.cue("set_effect", "set the prism to stop motion", "Stop Motion") is None
+
+    def test_a_negated_or_narrated_effect_is_no_cue(self):
+        assert self.cue("set_effect", "don't set the prism to candlelight", "candlelight") == self.NO
+        assert self.cue("set_effect", "they set the lights to candlelight at night", "candlelight") == self.NO
+        assert self.cue("set_effect", "if it gets dark set the prism to candlelight", "candlelight") == self.NO
+
+    def test_an_effect_named_only_in_a_negated_clause_next_to_a_clean_one_is_no_cue(self):
+        query = "set the prism to twinkle but don't set it to candlelight"
+        assert self.cue("set_effect", query, "candlelight") == self.NO
+        assert self.cue("set_effect", query, "twinkle") is None
+
+    def test_the_effect_of_the_light_was_nice_is_not_a_request(self):
+        assert self.cue("set_effect", "the effect of the light was nice", "candlelight") == self.NO
+
+    def test_a_near_miss_word_is_not_the_effect(self):
+        assert self.cue("set_effect", "turn on the fireplace light", "Fire") == self.NO
+        assert self.cue("set_effect", "turn on the fire", "Fire") is None
+
+    def test_another_device_named_is_the_wrong_device(self):
+        assert self.cue("set_effect", "make the tv twinkle", "twinkle") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "play music on the prism", "twinkle") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "play the prism", "prism") == access_target.WRONG_DEVICE
+
+    def test_only_the_matched_words_of_an_effects_name_are_set_aside(self):
+        assert self.cue("set_effect", "turn on the tv simulator effect on the study prism", "TV Simulator") is None
+        assert self.cue("set_effect", "make the tv twinkle", "tv simulator") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "set the tv simulator effect on the tv", "TV Simulator") == access_target.WRONG_DEVICE
+
+    def test_an_effect_named_like_a_device_needs_the_word_effect_or_a_light_word(self):
+        assert self.cue("set_effect", "turn on the fan", "Fan") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "set the fan effect on the study prism", "Fan") is None
+        assert self.cue("set_effect", "set the study lamp to fan", "Fan") is None
+
+    def test_play_is_a_verb_only_in_the_clause_that_says_effect(self):
+        assert self.cue("set_effect", "play the candle effect on the prism", "candle") is None
+        assert self.cue("set_effect", "play the candle effect on the prism. then play it", "candle") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "play it. play the candle effect on the prism", "candle") == access_target.WRONG_DEVICE
+        assert self.cue("set_effect", "play the sound effect", "rain") == self.NO
+
+    def test_set_effect_is_not_a_generic_write_cue_action(self):
+        assert "set_effect" not in access_target.WRITE_CUE_ACTIONS and "clear_effect" not in access_target.WRITE_CUE_ACTIONS
+        assert access_target.EFFECT_ACTIONS == {"set_effect", "clear_effect"}
+
+    @pytest.mark.parametrize("device_type", ["fan", "scene", "script", "lock", "switch", "media_player", "climate", "cover", "routine", None])
+    @pytest.mark.parametrize("action", ["set_effect", "clear_effect"])
+    def test_another_kind_of_device_is_never_backed_by_an_effect(self, device_type, action):
+        assert self.cue(action, "set the thing to candlelight effect off", "candlelight", device_type) == self.NO
+
+    def test_no_words_is_not_judged_as_before(self):
+        assert access_target.write_cue_problem("light", "set_effect", None, {"effect": "x"}) is None
+
+    @pytest.mark.parametrize("query,effect", [
+        ("turn off the effect", None), ("stop the effects", None), ("turn the effect off", None),
+        ("candlelight mode off", "candlelight"), ("stop the twinkle on the prism", "twinkle"),
+        ("turn off the candlelight effect", "candlelight"), ("turn off candlelight mode", "candlelight"),
+        ("no more effects", None), ("effects off", None),
+    ])
+    def test_clearing_needs_a_clear_word_with_the_effect_word_or_a_named_effect(self, query, effect):
+        assert self.cue("clear_effect", query, effect) is None
+
+    @pytest.mark.parametrize("query,effect", [
+        ("turn them off", None), ("turn off the lights", None), ("stop it", None),
+        ("turn off the study lights", "candlelight"), ("set the study to candlelight", "candlelight"),
+        ("play the sound effect", None), ("set the effects on the study", None),
+    ])
+    def test_clearing_without_t4_words_is_no_cue(self, query, effect):
+        assert self.cue("clear_effect", query, effect) == self.NO
+
+    def test_lacks_write_cue_agrees(self):
+        assert access_target.lacks_write_cue("light", "set_effect", "turn on the lights", {"effect": "twinkle"}) is True
+        assert access_target.lacks_write_cue("light", "set_effect", "twinkle the lights", {"effect": "twinkle"}) is False

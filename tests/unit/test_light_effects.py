@@ -725,6 +725,18 @@ def test_spoken_in(effect, spoken, expected):
     assert le.spoken_in(effect, spoken) is expected
 
 
+@pytest.mark.parametrize("effect,spoken,expected", [
+    ("Fire 2012", ("set", "fire", "2012", "now"), (1, 3)),
+    ("Fire 2012", ("set", "fire2012"), (1, 2)),
+    ("Twinkle", ("twinkle", "twinkle"), (0, 1)),
+    ("Fire 2012", ("fire", "2013"), None),
+    ("", ("a",), None), (None, ("a",), None), ("Fire", (), None),
+])
+def test_spoken_span_is_the_first_matched_token_range(effect, spoken, expected):
+    assert le.spoken_span(effect, spoken) == expected
+    assert le.spoken_in(effect, spoken) is (expected is not None)
+
+
 def test_spoken_name_is_short_lower_case_and_clean():
     assert le.spoken_name("Fire  2012") == "fire 2012"
     long_name = "Chase Flash Rnd " * 4

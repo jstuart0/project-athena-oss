@@ -11,13 +11,14 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
-from . import access_target, room_choice, room_context, room_policy
+from . import access_target, light_effects, room_choice, room_context, room_policy
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared import household
 from shared.config import get_config
+from shared.fast_path_vocab import SCENE_OVERRIDE_PHRASES, SCENE_TRIGGER_PHRASES
 from shared.llm_context import ContextBudgetExceeded, estimate_tokens, reported_count_too_low
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
@@ -156,6 +157,9 @@ def light_reply(
     colour: Optional[str] = None,
     percent: Optional[int] = None,
     unavailable: int = 0,
+    effect: Optional[str] = None,
+    unsupported: int = 0,
+    failed: int = 0,
 ) -> str:
     """The one wording of a light command's reply, built from the room's
     spoken label and never from entity ids. A single physical light is named
@@ -181,13 +185,31 @@ def light_reply(
         text = f"Brightened {target}{except_text}."
     elif action == "decrease":
         text = f"Dimmed {target}{except_text}."
+    elif action == "set_effect":
+        text = f"Set {target}{except_text} to {effect}." if effect else f"Set the effect on {target}{except_text}."
+    elif action == "clear_effect":
+        text = f"Turned off the effect on {target}{except_text}."
     else:
         text = f"Updated {target}{except_text}."
+    if unsupported:
+        text += " " + _effect_gap(action, unsupported, bool(single_name))
     if unavailable == 1:
         text += " 1 isn't responding."
     elif unavailable > 1:
         text += f" {unavailable} aren't responding."
+    if failed:
+        text += f" {failed} didn't respond."
     return text
+
+
+def _effect_gap(action: str, count: int, other: bool) -> str:
+    """How many lights couldn't take the effect, by count and never by name:
+    "1 other light doesn't have that effect" after a named light was written,
+    "2 lights don't have that effect" after a room."""
+    noun = ("other " if other else "") + ("light" if count == 1 else "lights")
+    if action == "clear_effect":
+        return f"{count} {noun} had no effect running."
+    return f"{count} {noun} {'doesn' if count == 1 else 'don'}'t have that effect."
 
 
 # What the writers that cover several rooms can do. Anything else would write
@@ -250,6 +272,16 @@ _NO_SPEAKER_ROOM = ("unknown", "guest")
 NO_DEVICE_TEXT = "I couldn't tell which device you meant, so I didn't change anything."
 SKIPPED_STEP_NOTE = "I couldn't check that one."
 NO_WRITE_CUE_TEXT = "I'm not sure what you'd like me to change. Tell me what to turn on, off, up or down."
+# The answers to an effect request that changed nothing. The ones that name a
+# target or an effect are templates, registered below as whole-string patterns.
+EFFECT_NEEDS_WORDS = "Tell me which effect to set, or say turn off the effect."
+EFFECT_WRITE_FAILED = "I couldn't change the effect right now."
+EFFECT_NONE_RUNNING = "There's no effect running on {target}."
+EFFECT_NOT_FOUND = "I couldn't find that effect on {target}."
+EFFECT_NOT_FOUND_TRY = "I couldn't find that effect on {target}. Try {options}."
+EFFECT_UNSUPPORTED_DEVICE = "{target} doesn't have effects."
+EFFECT_NAME_NOT_IN_ROOM = "I couldn't find the {name} in the {room}."
+EFFECT_CANT_CLEAR = "I can't turn off the effect on {target}."
 
 # A door decision (decided_access) carried from an earlier opening or status
 # read opens a door only this long after it was made.
@@ -332,6 +364,150 @@ SCENE_PHRASES = {
 }
 
 
+# Creative colour requests the fast path answers ("sunset", "ocean").
+AMBIENT_COLOR_COMMANDS = {
+    'sunset': {
+        'hs_colors': [[20, 100], [35, 90], [10, 95]],
+        'description': 'warm sunset oranges and reds'
+    },
+    # Round 17: Added sunrise for waking up
+    'sunrise': {
+        'hs_colors': [[35, 80], [45, 70], [25, 90]],
+        'description': 'warm sunrise golden tones'
+    },
+    'ocean': {
+        'hs_colors': [[180, 70], [200, 85], [160, 60]],
+        'description': 'ocean blues and teals'
+    },
+    'christmas': {
+        'hs_colors': [[0, 100], [120, 100], [0, 100]],
+        'description': 'festive red and green'
+    },
+    'rainbow': {
+        'hs_colors': [[0, 100], [60, 100], [120, 100], [180, 100], [240, 100], [300, 100]],
+        'description': 'rainbow spectrum colors'
+    },
+    'forest': {
+        'hs_colors': [[120, 80], [100, 70], [140, 60]],
+        'description': 'forest greens'
+    },
+    'fire': {
+        'hs_colors': [[10, 100], [25, 95], [0, 100]],
+        'description': 'warm fire flickering tones'
+    }
+}
+
+
+# Colour names the fast path answers.
+BASIC_COLORS = {
+    'blue': (240, 100),
+    'red': (0, 100),
+    'green': (120, 100),
+    'yellow': (60, 100),
+    'orange': (30, 100),
+    'purple': (280, 100),
+    'pink': (330, 100),
+    'cyan': (180, 100),
+    'magenta': (300, 100),
+    'white': (0, 0),
+    'warm': (30, 50),  # Warm white
+    'cool': (200, 30),  # Cool white
+}
+
+
+# Whole-house on/off phrases the fast path answers.
+WHOLE_HOUSE_LIGHT_PATTERNS = [
+    ('all lights on', 'turn_on'),
+    ('all the lights on', 'turn_on'),
+    ('turn on all lights', 'turn_on'),
+    ('turn on all the lights', 'turn_on'),
+    ('all lights off', 'turn_off'),
+    ('all the lights off', 'turn_off'),
+    ('turn off all lights', 'turn_off'),
+    ('turn off all the lights', 'turn_off'),
+    ('turn everything off', 'turn_off'),
+    ('turn everything on', 'turn_on'),
+    ('everything off', 'turn_off'),
+    ('lights off everywhere', 'turn_off'),
+    ('lights on everywhere', 'turn_on'),
+]
+
+
+# Light status questions the fast path answers.
+LIGHT_STATUS_PATTERNS = [
+    'any lights left on', 'any lights on', 'lights left on',
+    'which lights are on', 'what lights are on', 'lights still on',
+    'lights on upstairs', 'lights on downstairs',
+    'are any lights on', 'are the lights on', 'anything left on'
+]
+
+
+# Loose turn-on phrases the fast path answers.
+TURN_ON_PHRASES = ['hit the lights', 'hit the light', 'lights please', 'light please',
+                  'just a little light', 'a little light', 'light me up', 'throw on some lights',
+                  'throw on the lights', 'flip the lights', 'flip on the lights',
+                  'flip em on', 'flip them on',  # Round 12
+                  'throw the lights on', 'get the lights', 'lights on low',  # Round 13
+                  'light going', 'lights going', 'get the light',  # Round 13: "get the porch light going"
+                  'flip the light', 'flip the',  # Round 15: "flip the porch light"
+                  'get it lit', 'get the', 'lemme get']
+
+
+# The colour words the classify node routes on ("change office to white").
+CLASSIFY_COLOR_NAMES = [
+    'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple',
+    'pink', 'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset',
+    'random colors', 'different colors', 'christmas colors', 'ocean'
+]
+
+
+# Words that make the fast path treat a request as a colour request.
+HAS_COLOR_WORDS = [
+    'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple', 'pink',
+    'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset', 'sunrise', 'random', 'christmas',
+    'color', 'colors', 'ravens', 'orioles', 'steelers', 'team'
+]
+
+
+# A trailing word that turns a phrase into a mode: "movie" is "movie mode".
+_MODE_SUFFIXES = frozenset({"mode", "time", "vibe", "vibes"})
+
+
+def _build_effect_claimed_phrases() -> frozenset:
+    """The phrases an existing deterministic path owns, normalised: every
+    phrase in the fast-path and routing tables, each with a trailing
+    mode/time/vibe/vibes removed, and every colour word. A claimed phrase means
+    a light effect only when the word "effect" is said. ``access_target.COLOR_WORDS``
+    is cue evidence, not a table of phrases, and is not here."""
+    sources = [
+        SCENE_PHRASES, AMBIENT_COLOR_COMMANDS, BASIC_COLORS, [p for p, _ in WHOLE_HOUSE_LIGHT_PATTERNS],
+        LIGHT_STATUS_PATTERNS, TURN_ON_PHRASES, HAS_COLOR_WORDS, CLASSIFY_COLOR_NAMES,
+        access_target.TURN_OFF_PHRASES, access_target.IMPLICIT_BRIGHTER, access_target.IMPLICIT_DIMMER,
+        access_target.BRIGHTER_PATTERNS, access_target.DIMMER_PATTERNS, access_target.MOTION_CONTROL_PATTERNS,
+        SCENE_TRIGGER_PHRASES, SCENE_OVERRIDE_PHRASES,
+    ]
+    claimed = set()
+    for source in sources:
+        for phrase in source:
+            words = light_effects.normalize(phrase)
+            if not words:
+                continue
+            claimed.add(words)
+            head, _, last = words.rpartition(" ")
+            if head and last in _MODE_SUFFIXES:
+                claimed.add(head)
+    return frozenset(claimed)
+
+
+_EFFECT_CLAIMED_PHRASES = _build_effect_claimed_phrases()
+
+
+def effect_word_claimed(phrase) -> bool:
+    """Whether an existing deterministic path owns the phrase (see
+    ``_build_effect_claimed_phrases``)."""
+    return light_effects.normalize(phrase) in _EFFECT_CLAIMED_PHRASES
+
+
 _BRIGHTNESS_WORD_VALUES = {
     "zero": 0, "one": 1, "five": 5, "ten": 10, "fifteen": 15, "twenty": 20, "twenty five": 25, "thirty": 30,
     "thirty five": 35, "forty": 40, "forty five": 45, "fifty": 50, "fifty five": 55, "sixty": 60,
@@ -412,6 +588,12 @@ room_context.set_no_write_cue_text(NO_WRITE_CUE_TEXT)
 room_context.register_refusals(
     NO_WRITE_CUE_TEXT, NO_DEVICE_TEXT, VERB_UNCLEAR_TEXT, ONE_DOOR_REFUSAL, SCHEDULED_OPENING_REFUSAL,
     UNKNOWN_SCENE_TEXT, SEVERAL_ROOMS_UNSUPPORTED, room_context.UNPROCESSABLE_TEXT,
+    EFFECT_NEEDS_WORDS, EFFECT_WRITE_FAILED,
+)
+# The effect answers that name a target or an effect, matched whole.
+room_context.register_refusal_templates(
+    EFFECT_NONE_RUNNING, EFFECT_NOT_FOUND, EFFECT_NOT_FOUND_TRY, EFFECT_UNSUPPORTED_DEVICE,
+    EFFECT_NAME_NOT_IN_ROOM, EFFECT_CANT_CLEAR,
 )
 
 
@@ -1046,27 +1228,12 @@ class SmartHomeController:
         if not has_exclusion_keywords:
             has_exclusion_keywords = bool(self._EVERYTHING_BUT_RE.search(query_lower))
 
-        whole_house_light_patterns = [
-            ('all lights on', 'turn_on'),
-            ('all the lights on', 'turn_on'),
-            ('turn on all lights', 'turn_on'),
-            ('turn on all the lights', 'turn_on'),
-            ('all lights off', 'turn_off'),
-            ('all the lights off', 'turn_off'),
-            ('turn off all lights', 'turn_off'),
-            ('turn off all the lights', 'turn_off'),
-            ('turn everything off', 'turn_off'),
-            ('turn everything on', 'turn_on'),
-            ('everything off', 'turn_off'),
-            ('lights off everywhere', 'turn_off'),
-            ('lights on everywhere', 'turn_on'),
-        ]
         # Only use whole_house fast path if NO exclusion keywords present, and
         # only when the wording really asks for the whole house: "turn off all
         # the lights in the galley" contains "turn off all the lights" and
         # names a room, so it falls through to the room path.
         if not has_exclusion_keywords and self._explicit_whole_house(query_lower) is not None:
-            for pattern, action in whole_house_light_patterns:
+            for pattern, action in WHOLE_HOUSE_LIGHT_PATTERNS:
                 if pattern in query_lower:
                     logger.info(f"Fast path whole house lights: pattern='{pattern}', action={action}")
                     return {
@@ -1230,13 +1397,7 @@ class SmartHomeController:
 
         # Round 16: FAST PATH: Light status queries (check BEFORE turn off!)
         # "any lights left on", "which lights are on" = status query, NOT control
-        light_status_patterns = [
-            'any lights left on', 'any lights on', 'lights left on',
-            'which lights are on', 'what lights are on', 'lights still on',
-            'lights on upstairs', 'lights on downstairs',
-            'are any lights on', 'are the lights on', 'anything left on'
-        ]
-        if any(p in query_lower for p in light_status_patterns):
+        if any(p in query_lower for p in LIGHT_STATUS_PATTERNS):
             # This is a status query, route to get_status action
             room = self._single_room(query_lower)
             logger.info(f"Fast path light STATUS query: has_room={bool(room)}")
@@ -1266,15 +1427,7 @@ class SmartHomeController:
             }
 
         # FAST PATH: Simple turn on patterns (hit the lights, lights please)
-        turn_on_phrases = ['hit the lights', 'hit the light', 'lights please', 'light please',
-                          'just a little light', 'a little light', 'light me up', 'throw on some lights',
-                          'throw on the lights', 'flip the lights', 'flip on the lights',
-                          'flip em on', 'flip them on',  # Round 12
-                          'throw the lights on', 'get the lights', 'lights on low',  # Round 13
-                          'light going', 'lights going', 'get the light',  # Round 13: "get the porch light going"
-                          'flip the light', 'flip the',  # Round 15: "flip the porch light"
-                          'get it lit', 'get the', 'lemme get']  # Round 16: "yo lemme get the kitchen lit"
-        if any(p in query_lower for p in turn_on_phrases):
+        if any(p in query_lower for p in TURN_ON_PHRASES):
             room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             # For "just a little light" or "on low" set low brightness
             params = {}
@@ -1358,40 +1511,9 @@ class SmartHomeController:
 
         # FAST PATH: Ambient/creative color commands ("sunset", "ocean", "christmas", "rainbow")
         # These common creative lighting requests are often misinterpreted by LLM as turn_off
-        ambient_color_commands = {
-            'sunset': {
-                'hs_colors': [[20, 100], [35, 90], [10, 95]],
-                'description': 'warm sunset oranges and reds'
-            },
-            # Round 17: Added sunrise for waking up
-            'sunrise': {
-                'hs_colors': [[35, 80], [45, 70], [25, 90]],
-                'description': 'warm sunrise golden tones'
-            },
-            'ocean': {
-                'hs_colors': [[180, 70], [200, 85], [160, 60]],
-                'description': 'ocean blues and teals'
-            },
-            'christmas': {
-                'hs_colors': [[0, 100], [120, 100], [0, 100]],
-                'description': 'festive red and green'
-            },
-            'rainbow': {
-                'hs_colors': [[0, 100], [60, 100], [120, 100], [180, 100], [240, 100], [300, 100]],
-                'description': 'rainbow spectrum colors'
-            },
-            'forest': {
-                'hs_colors': [[120, 80], [100, 70], [140, 60]],
-                'description': 'forest greens'
-            },
-            'fire': {
-                'hs_colors': [[10, 100], [25, 95], [0, 100]],
-                'description': 'warm fire flickering tones'
-            }
-        }
 
         # Check for ambient color keywords - use these as fast path to avoid LLM misinterpretation
-        for ambient_name, color_config in ambient_color_commands.items():
+        for ambient_name, color_config in AMBIENT_COLOR_COMMANDS.items():
             if ambient_name in query_lower:
                 # The room said, or the whole house only when the wording asks for it
                 room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
@@ -1401,26 +1523,12 @@ class SmartHomeController:
                     **room_fields,
                     "action": "set_color",
                     "target_scope": "all_individual",
-                    "parameters": {"hs_colors": color_config['hs_colors']},
+                    "parameters": {"hs_colors": [list(pair) for pair in color_config['hs_colors']]},
                     "color_description": color_config['description']
                 }
 
         # FAST PATH: Basic color commands (blue, red, green, etc.)
         # These explicit color requests are often misinterpreted by LLM as turn_off
-        basic_colors = {
-            'blue': (240, 100),
-            'red': (0, 100),
-            'green': (120, 100),
-            'yellow': (60, 100),
-            'orange': (30, 100),
-            'purple': (280, 100),
-            'pink': (330, 100),
-            'cyan': (180, 100),
-            'magenta': (300, 100),
-            'white': (0, 0),
-            'warm': (30, 50),  # Warm white
-            'cool': (200, 30),  # Cool white
-        }
 
         # Skip color fast path if this looks like a thermostat command
         # "make it warmer" and "make it cooler" should go to thermostat, not lights
@@ -1431,7 +1539,7 @@ class SmartHomeController:
             'thermostat', 'degrees', 'turn up', 'turn down', 'crank'
         ]
         # Round 13: "in here" is thermostat ONLY if no color word present
-        has_color_word = any(c in query_lower for c in basic_colors.keys())
+        has_color_word = any(c in query_lower for c in BASIC_COLORS.keys())
         if 'in here' in query_lower and not has_color_word:
             thermostat_indicators.append('in here')
         # Check if this is a light color temperature command (not thermostat)
@@ -1464,7 +1572,7 @@ class SmartHomeController:
         # Check for basic color in query (skip if thermostat context)
         color_match = None
         if not is_thermostat_context:
-            for color_name, hs_value in basic_colors.items():
+            for color_name, hs_value in BASIC_COLORS.items():
                 if color_name in query_lower:
                     color_match = (color_name, hs_value)
                     break
@@ -1846,11 +1954,7 @@ class SmartHomeController:
         # (a whole word: "split" is not)
         if re.search(r"\blit\b", query_lower) and not is_turn_off:
             is_turn_on = True
-        has_color = any(c in query_lower for c in [
-            'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple', 'pink',
-            'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset', 'sunrise', 'random', 'christmas',
-            'color', 'colors', 'ravens', 'orioles', 'steelers', 'team'
-        ])
+        has_color = any(c in query_lower for c in HAS_COLOR_WORDS)
 
         if not self._defers_to_model(query_lower):
             fast_intent = await self._fast_path_intent(

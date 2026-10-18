@@ -15,7 +15,7 @@ yes/no vocabulary (`shared.fast_path_vocab`) -- never `orchestrator.main`.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Tuple
 
 from shared.config import get_config
@@ -25,6 +25,7 @@ from shared.fast_path_vocab import (  # noqa: F401  (re-exported: the vocabulary
     normalize_reply,
 )
 from orchestrator.metrics import ha_write_fanout_confirm_total
+from orchestrator.light_effects import EFFECT_CHARSET, MAX_EFFECT_NAME_CHARS
 from orchestrator.mode_permission import current_ha_scope, noun_for_domains
 from orchestrator.room_context import SCOPE_CUE_RE as _SCOPE_CUE_RE
 from shared.ha_registry import tokens
@@ -36,6 +37,14 @@ class PlannedWrite:
     domain: str
     service: str
     entity_ids: Tuple[str, ...]
+    # What the change is, for the wording only ("candlelight" for an effect). It
+    # takes no part in equality or replay matching, and only a clean name gets in.
+    detail: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.detail, str) or len(self.detail) > MAX_EFFECT_NAME_CHARS or (
+                self.detail and not EFFECT_CHARSET.fullmatch(self.detail)):
+            raise ValueError("write_fanout: a write's detail must be a clean name of at most 64 characters")
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,8 @@ _VERB_FOR_SERVICE = {
     "unlock": "unlock",
     "open_cover": "open",
     "close_cover": "close",
+    "set_effect": "change the effect on",
+    "clear_effect": "turn off the effect on",
 }
 # Domains whose "turn_on" is an activation, not a power change.
 _ACTIVATED_DOMAINS = frozenset({"scene", "script"})
@@ -92,9 +103,11 @@ def _counted_noun(n: int, domains: Iterable[str]) -> str:
     return noun_for_domains(unique)
 
 
-def _verb_for(service: str, domain: Optional[str] = None) -> str:
+def _verb_for(service: str, domain: Optional[str] = None, detail: str = "") -> str:
     if domain in _ACTIVATED_DOMAINS:
         return "activate"
+    if service == "set_effect" and detail:
+        return f"set the {detail} effect on"
     # Anything else (set_temperature, a bed-warmer level, a motion
     # override) reads as a change to the device.
     return _VERB_FOR_SERVICE.get(service, "change")
@@ -197,6 +210,12 @@ def _room_text(room: Optional[str], scope_hint: Any) -> str:
 def _command_text(write: PlannedWrite, room: Optional[str] = None) -> str:
     verb = _verb_for(write.service, write.domain)
     where = f"{room.replace('_', ' ')} " if room else ""
+    if write.service == "set_effect" and write.detail:
+        # Reads as "set <target> to <effect> effect", which the effect recogniser takes
+        # even for a name an existing path owns ("sunset", "movie").
+        if len(write.entity_ids) == 1 and "all" not in write.entity_ids:
+            return f"set the {where}{_counted_noun(1, [write.domain])} to {write.detail} effect"
+        return f"set all the {where}{noun_for_domains([write.domain])} to {write.detail} effect"
     if len(write.entity_ids) == 1 and "all" not in write.entity_ids:
         return f"{verb} the {where}{_counted_noun(1, [write.domain])}"
     noun = noun_for_domains([write.domain])
@@ -214,7 +233,7 @@ def rewording(block: FanoutBlock) -> str:
         lead = f"That would affect all the {noun}."
     else:
         n = sum(len(w.entity_ids) for w in block.writes)
-        verb = _verb_for(block.writes[0].service, block.writes[0].domain) if block.writes else "control"
+        verb = _verb_for(block.writes[0].service, block.writes[0].domain, block.writes[0].detail) if block.writes else "control"
         lead = f"That would {verb} {n} {_counted_noun(n, [w.domain for w in block.writes])}{f' in the {block.room}' if block.room else ''}."
     return f"{lead} {say}"
 
@@ -226,6 +245,15 @@ def _resolve_uk(original_query: Optional[str]):
     return classify_utterance(original_query)
 
 
+def _one_detail_per_kind(writes: Sequence[PlannedWrite]) -> None:
+    """The wording reads one detail per kind of write, so writes of one kind that
+    carry different details can't be gated together."""
+    seen = {}
+    for w in writes:
+        if w.detail and seen.setdefault((w.domain, w.service), w.detail) != w.detail:
+            raise ValueError("write_fanout: writes of one kind carry different details")
+
+
 def _gate_writes(
     writes: Tuple[PlannedWrite, ...],
     original_query: Optional[str],
@@ -234,6 +262,7 @@ def _gate_writes(
     scope_hint: Any,
     room: Optional[str],
 ) -> Optional[str]:
+    _one_detail_per_kind(writes)
     scope = current_ha_scope()
     uk = _resolve_uk(original_query)
 
@@ -305,7 +334,7 @@ def _block(scope, writes, room, scope_hint, domain_for_metric: str, prompt_outco
     if scope is not None and scope.can_carry_pending:
         ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=prompt_outcome).inc()
         n = len({e for w in writes for e in w.entity_ids})
-        verb = _verb_for(writes[0].service, writes[0].domain)
+        verb = _verb_for(writes[0].service, writes[0].domain, writes[0].detail)
         return f"That would {verb} {n} {_counted_noun(n, [w.domain for w in writes])}{_room_text(room, scope_hint)}. Should I go ahead?"
     ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=reword_outcome).inc()
     return rewording(block)
@@ -338,6 +367,7 @@ def gate(
     unbounded: bool = False,
     scope_hint: Any = None,
     room: Optional[str] = None,
+    detail: Optional[str] = None,
 ) -> Optional[str]:
     """The single-write shorthand. Accepts either
     `gate(domain, service, entity_ids, original_query, ...)` or
@@ -347,10 +377,12 @@ def gate(
     if service is None and entity_ids is None:
         raise TypeError("write_fanout.gate: expected (domain, service, entity_ids, ...)")
     if isinstance(domain, (list, tuple)) and domain and isinstance(domain[0], PlannedWrite):
+        if detail is not None:
+            raise TypeError("write_fanout.gate: detail belongs on each PlannedWrite when gating a list")
         writes = tuple(domain)
         original_query = service  # gate(writes, original_query)
         return _gate_writes(writes, original_query, unbounded=unbounded, scope_hint=scope_hint, room=room)
-    writes = (PlannedWrite(domain, service, tuple(entity_ids)),)
+    writes = (PlannedWrite(domain, service, tuple(entity_ids), detail or ""),)
     return _gate_writes(writes, original_query, unbounded=unbounded, scope_hint=scope_hint, room=room)
 
 

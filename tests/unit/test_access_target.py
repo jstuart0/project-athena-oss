@@ -495,4 +495,5 @@ class TestPurity:
             alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == "orchestrator"
             for alias in node.names
         }
-        assert orchestrator == {"room_context"}
+        # light_effects is as pure as this module: no I/O, no logger (the effect words in the write cue).
+        assert orchestrator == {"room_context", "light_effects"}

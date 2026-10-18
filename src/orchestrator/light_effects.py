@@ -242,29 +242,35 @@ def suggestions(phrase: Any, effect_lists: Iterable[Sequence[str]], k: int = 3) 
     return [name for _, _, name in best]
 
 
-def spoken_in(effect: Any, spoken_tokens: Sequence[str]) -> bool:
-    """Whether the effect's own words appear, in order and side by side, in the
-    spoken tokens (or run together they spell it: "fire 2012" for "Fire2012")."""
+def spoken_span(effect: Any, spoken_tokens: Sequence[str]) -> Optional[Tuple[int, int]]:
+    """Where the effect's own words appear, in order and side by side, in the
+    spoken tokens, as the first ``(start, end)`` token range (or run together
+    they spell it: "fire 2012" for "Fire2012"); None when they don't."""
     if not isinstance(effect, str) or not spoken_tokens:
-        return False
+        return None
     want = tokens(effect)
     if not want:
-        return False
+        return None
     spoken = tuple(spoken_tokens)
     width = len(want)
     for start in range(len(spoken) - width + 1):
         if spoken[start:start + width] == want:
-            return True
+            return start, start + width
     target = "".join(want)
     for start in range(len(spoken)):
         joined = ""
         for end in range(start, min(len(spoken), start + 8)):
             joined += spoken[end]
             if joined == target:
-                return True
+                return start, end + 1
             if len(joined) >= len(target):
                 break
-    return False
+    return None
+
+
+def spoken_in(effect: Any, spoken_tokens: Sequence[str]) -> bool:
+    """Whether the effect's own words appear in the spoken tokens (see ``spoken_span``)."""
+    return spoken_span(effect, spoken_tokens) is not None
 
 
 MAX_SPOKEN_NAME_CHARS = 32
