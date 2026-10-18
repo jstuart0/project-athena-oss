@@ -648,6 +648,20 @@ class LightTargets:
     denied_ids: Tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class RoomLightTargets:
+    """One named room's resolved light targets: the finalized ``lt``, the
+    ``matches`` it came from, the (possibly disambiguated) ``room`` and its
+    spoken ``room_label``, how many lights are down, and ``single_name`` when
+    exactly one light is beneath the targets."""
+    lt: LightTargets
+    matches: Any
+    room: str
+    room_label: str
+    light_down: int
+    single_name: Optional[str]
+
+
 # Hours a sensor may report "on" before it is called stuck. mmWave presence
 # and occupancy sensors stay on for as long as someone is in the room, so
 # they get a day; motion and PIR sensors report short bursts.
@@ -3595,46 +3609,18 @@ Return ONLY valid JSON."""
         question = room_context.AskWhich(refs, room.replace("_", " "))
         return room_choice.ask(intent or {}, question, record=original_query is not None)
 
-    async def _dispatch_light_or_room_command(
-        self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
-        intent: Dict, ha_client, original_query: str = None,
-    ) -> str:
-        """The light/whole-house/multi-room/room-group tail of execute_intent,
-        extracted (ATHENA-69) so execute_intent can apply _finish() once to
-        whichever of these paths returns, rather than wrapping each
-        individual return here. Body otherwise unchanged."""
-        # Fallback room extraction if LLM didn't detect it
-        if not room and original_query:
-            room = self._extract_room_from_query(original_query)
+    async def _room_light_targets(
+        self, room: str, intent: Dict, original_query: Optional[str], *,
+        target_scope: str, per_light: bool, denial_service: str,
+    ) -> Union[RoomLightTargets, str]:
+        """The lights one named room's command writes, resolved and authorized.
 
-        if not room:
-            return "I couldn't determine which room you want to control."
-
-        # Handle whole-house commands specially
-        if room == 'whole_house':
-            return await self._execute_whole_house_command(
-                action, target_scope, parameters, intent, ha_client, original_query
-            )
-
-        # Handle multi-room commands (e.g., "kitchen and living room")
-        if room == 'multi_room':
-            rooms = intent.get('rooms', [])
-            if rooms:
-                return await self._execute_multi_room_command(
-                    rooms, action, target_scope, parameters, intent, ha_client, original_query
-                )
-
-        # Check if room is actually a room group (e.g., "first floor", "downstairs")
-        admin_client = get_admin_client()
-        room_group = await admin_client.resolve_room_group(room)
-
-        if room_group:
-            # This is a room group - execute on all member rooms
-            return await self._execute_room_group_command(
-                room_group, action, target_scope, parameters, intent, ha_client, original_query
-            )
-
-        # Find lights for the room
+        Returns the reply text for an ambiguous name that is refused or asks
+        which room, a room with no lights, every permitted light down, and
+        every light denied (recorded under ``denial_service``). Otherwise the
+        targets. The caller keeps the fan-out gate and the writes.
+        """
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
         light_matches = await self._resolve_room_lights(room)
         ambiguous = getattr(light_matches, 'ambiguous_rooms', ())
         if ambiguous and not light_matches:
@@ -3689,18 +3675,14 @@ Return ONLY valid JSON."""
                 # Work with the group
                 target_lights = [light_group['entity_id']]
 
-        from . import write_fanout
-        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
-        _fanout_service = "turn_off" if action == "turn_off" else "turn_on"
         lt = await self._finalize_light_targets(
             light_matches,
             ids=target_lights,
-            per_light=(action == "set_color" or target_scope in ("all_individual", "individual_lights")),
+            per_light=per_light,
         )
         if lt.denied_all:
-            self._record_light_denials(lt, _fanout_service)
+            self._record_light_denials(lt, denial_service)
             return permission_refusal_message(("light",), current_ha_scope())
-        target_lights = list(lt.write_ids)
 
         light_total, light_down = await self._light_availability(
             lt.gate_ids, refresh_key=room, missing=getattr(light_matches, 'missing', 0),
@@ -3708,6 +3690,60 @@ Return ONLY valid JSON."""
         if light_total and light_down == light_total:
             return f"The {room_label} lights aren't responding right now."
         single_name = await self._single_light_name(lt.gate_ids)
+        return RoomLightTargets(lt, light_matches, room, room_label, light_down, single_name)
+
+    async def _dispatch_light_or_room_command(
+        self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
+        intent: Dict, ha_client, original_query: str = None,
+    ) -> str:
+        """The light/whole-house/multi-room/room-group tail of execute_intent,
+        extracted (ATHENA-69) so execute_intent can apply _finish() once to
+        whichever of these paths returns, rather than wrapping each
+        individual return here. Body otherwise unchanged."""
+        # Fallback room extraction if LLM didn't detect it
+        if not room and original_query:
+            room = self._extract_room_from_query(original_query)
+
+        if not room:
+            return "I couldn't determine which room you want to control."
+
+        # Handle whole-house commands specially
+        if room == 'whole_house':
+            return await self._execute_whole_house_command(
+                action, target_scope, parameters, intent, ha_client, original_query
+            )
+
+        # Handle multi-room commands (e.g., "kitchen and living room")
+        if room == 'multi_room':
+            rooms = intent.get('rooms', [])
+            if rooms:
+                return await self._execute_multi_room_command(
+                    rooms, action, target_scope, parameters, intent, ha_client, original_query
+                )
+
+        # Check if room is actually a room group (e.g., "first floor", "downstairs")
+        admin_client = get_admin_client()
+        room_group = await admin_client.resolve_room_group(room)
+
+        if room_group:
+            # This is a room group - execute on all member rooms
+            return await self._execute_room_group_command(
+                room_group, action, target_scope, parameters, intent, ha_client, original_query
+            )
+
+        _fanout_service = "turn_off" if action == "turn_off" else "turn_on"
+        targets = await self._room_light_targets(
+            room, intent, original_query,
+            target_scope=target_scope,
+            per_light=(action == "set_color" or target_scope in ("all_individual", "individual_lights")),
+            denial_service=_fanout_service,
+        )
+        if isinstance(targets, str):
+            return targets
+        from . import write_fanout
+        lt, room, room_label = targets.lt, targets.room, targets.room_label
+        light_down, single_name = targets.light_down, targets.single_name
+        target_lights = list(lt.write_ids)
 
         # ATHENA-128 4.3: gate before any task list is built. Every branch
         # below (turn_on/turn_off/set_color, all sub-branches) writes the

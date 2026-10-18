@@ -617,8 +617,15 @@ def test_every_writer_has_a_finalizer_call_before_its_service_calls():
     methods = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for name in WRITERS:
         method = methods[name]
+        finalizers = {"_finalize_light_targets"}
+        if name == "_dispatch_light_or_room_command":
+            # The single-room tail finalizes inside the shared helper, which must itself finalize.
+            finalizers.add("_room_light_targets")
+            helper_calls = {getattr(n.func, "attr", "") for n in ast.walk(methods["_room_light_targets"])
+                            if isinstance(n, ast.Call)}
+            assert "_finalize_light_targets" in helper_calls
         finalize_lines = [n.lineno for n in ast.walk(method)
-                          if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "_finalize_light_targets"]
+                          if isinstance(n, ast.Call) and getattr(n.func, "attr", "") in finalizers]
         write_lines = [n.lineno for n in ast.walk(method)
                        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "call_service"]
         assert finalize_lines, f"{name} never finalizes"
