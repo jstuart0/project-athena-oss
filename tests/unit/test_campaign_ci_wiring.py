@@ -40,6 +40,7 @@ GLOBS = (
     "tests/unit/test_url_safety_*.py",
     "tests/unit/test_room_directory_refresh.py",
     "tests/unit/test_motion_control_rooms.py",
+    "tests/unit/test_room_policy*.py",
     "tests/unit/test_media_rag_seerr.py",
     "tests/unit/test_admin_frontend_*.py",
     "tests/unit/test_campaign_ci_wiring.py",

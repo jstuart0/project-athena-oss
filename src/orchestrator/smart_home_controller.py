@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
-from . import access_target, room_choice, room_context
+from . import access_target, room_choice, room_context, room_policy
 from .ha_entity_manager import HAEntityManager, RoomLights, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
@@ -532,6 +532,17 @@ def scene_grounded(entity_id: str, query: Optional[str], friendly_name: Optional
 
 class ModelOutputNotObject(ValueError):
     """The model's JSON parsed but is not an object (a list or a scalar)."""
+
+
+def _whole_number(value: Any) -> Optional[int]:
+    """A model's number as an int; None for anything else (null, text, a bool,
+    NaN or infinity)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return int(value)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _model_object(text: str) -> Dict:
@@ -2651,7 +2662,7 @@ Return ONLY valid JSON."""
             # Handle scene/routine activation
             if device_type == 'scene':
                 try:
-                    scene_answer = await self._handle_scene_intent(action, parameters, ha_client, original_query)
+                    scene_answer = await self._handle_scene_intent(action, parameters, ha_client, original_query, room=room)
                 except HAWritePermissionDenied:
                     # Already recorded on the scope: _finish surfaces the real
                     # refusal; this text is only the floor if it somehow wasn't.
@@ -6058,7 +6069,9 @@ Return ONLY valid JSON."""
             pass
         return scene_grounded(entity_id, query, friendly)
 
-    async def _handle_scene_intent(self, action: str, parameters: Dict, ha_client, original_query: str = None) -> str:
+    async def _handle_scene_intent(
+        self, action: str, parameters: Dict, ha_client, original_query: str = None, room: Optional[str] = None,
+    ) -> str:
         """Handle scene and routine activation commands"""
         from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
@@ -6105,6 +6118,11 @@ Return ONLY valid JSON."""
             _scene_prompt = write_fanout.gate(domain, service, (entity_id,), original_query)
             if _scene_prompt:
                 return _scene_prompt
+
+            if entity_id == "script.good_night" and room:
+                policy_reply = await self._good_night_via_room_policy(room, ha_client)
+                if policy_reply is not None:
+                    return policy_reply
 
             # Try to activate the scene/script
             try:
@@ -6827,7 +6845,7 @@ Return JSON with this structure:
     "room": "room name or null",
     "action": "leave_lights_on|leave_lights_off|disable_motion|enable_motion|set_brightness_override|keep_current_brightness",
     "parameters": {{
-        "duration_minutes": number or null (for leave_lights_on/off, default 60),
+        "duration_minutes": number or null (for leave_lights_on/off; null when no duration is stated),
         "brightness_percent": number 1-100 or null (for brightness override)
     }},
     "reason": "brief user-friendly explanation of what will happen"
@@ -6840,15 +6858,15 @@ Examples:
 "turn motion back on" -> {{"device_type": "motion_control", "room": null, "action": "enable_motion", "parameters": {{}}, "reason": "Motion detection resumed"}}
 "keep the room at this brightness" -> {{"device_type": "motion_control", "room": null, "action": "keep_current_brightness", "parameters": {{}}, "reason": "Brightness locked at current level"}}
 "set motion brightness to 50%" -> {{"device_type": "motion_control", "room": null, "action": "set_brightness_override", "parameters": {{"brightness_percent": 50}}, "reason": "Motion will set lights to 50%"}}
-"don't turn the lights on when I walk in" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_off", "parameters": {{"duration_minutes": 60}}, "reason": "Lights will stay off for 1 hour"}}
-"stop the lights from turning off" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_on", "parameters": {{"duration_minutes": 60}}, "reason": "Lights will stay on for 1 hour"}}
+"don't turn the lights on when I walk in" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_off", "parameters": {{}}, "reason": "Lights will stay off until you leave or press the switch"}}
+"stop the lights from turning off" -> {{"device_type": "motion_control", "room": null, "action": "leave_lights_on", "parameters": {{}}, "reason": "Lights will stay on until you leave or press the switch"}}
 
 DURATION PARSING:
 - "for X hours" -> X * 60 minutes
 - "for X minutes" -> X minutes
-- "for a while" / "for now" -> 60 minutes (default)
+- "for a while" / "for now" -> null (no duration)
 - "for the night" / "until morning" -> 480 minutes (8 hours)
-- No duration specified -> 60 minutes (default)
+- No duration specified -> null (no duration)
 
 Return ONLY the JSON, no other text."""
 
@@ -7011,6 +7029,66 @@ Return ONLY the JSON, no other text."""
                 return int((level / 255) * 100)
         return None
 
+    async def _motion_via_room_policy(
+        self, action: str, slug: str, key: str, spoken_room: str, duration: Optional[int], brightness: Any,
+        ha_client, equivalent_writes: List[str], policy_slugs: Any,
+    ) -> str:
+        """A motion command for a room the policy engine runs: the same
+        commands, done by the room's policy script (docs/ROOM_POLICY.md). No
+        duration means no end time; the caller is checked against the writes
+        this replaces."""
+        import logging
+        logger = logging.getLogger(__name__)
+        request: Optional[room_policy.PolicyRequest] = None
+        if action in ("leave_lights_on", "leave_lights_off"):
+            request = room_policy.PolicyRequest(
+                "hold_on" if action == "leave_lights_on" else "hold_off", slug, spoken_room, duration_minutes=duration,
+            )
+        elif action == "disable_motion":
+            request = room_policy.PolicyRequest("disable", slug, spoken_room)
+        elif action == "enable_motion":
+            request = room_policy.PolicyRequest("clear", slug, spoken_room, clear_capture=True)
+        elif action == "set_brightness_override":
+            level = _whole_number(brightness)
+            if level is None:
+                return "Please specify a brightness level, for example 'set motion brightness to 50 percent'."
+            request = room_policy.PolicyRequest("capture", slug, spoken_room, brightness=min(100, max(1, level)))
+        elif action == "keep_current_brightness":
+            try:
+                current = await self._current_room_brightness(key)
+            except Exception as e:
+                logger.error(f"Error getting current brightness: {e}")
+                return "I couldn't determine the current brightness. Please specify a level like 'set motion brightness to 50 percent'."
+            if current is None:
+                return f"The {spoken_room} lights are off. Please turn them on first or specify a brightness level."
+            level = min(100, max(1, current))
+            request = room_policy.PolicyRequest("capture", slug, spoken_room, brightness=level)
+        if request is None:
+            return "I didn't understand that motion control command. Try 'leave the lights on', 'disable motion', or 'reset motion settings'."
+        outcome = await room_policy.apply(
+            request, ha_client, equivalent_writes=equivalent_writes, policy_slugs=policy_slugs,
+        )
+        logger.info("motion_control_room_policy action=%s ok=%s reason=%s", action, outcome.ok, outcome.reason)
+        if request.kind == "capture" and outcome.ok and action == "keep_current_brightness":
+            return f"Brightness locked at {request.brightness}% in the {spoken_room}."
+        return outcome.speech
+
+    async def _good_night_via_room_policy(self, room: Optional[str], ha_client) -> Optional[str]:
+        """"Good night" in a room the policy engine runs: its good-night
+        script, authorized as the ``script.good_night`` activation it replaces
+        (so a degraded or guest session is refused, as before). None when the
+        room, or the script, isn't there: the scene path then runs as it was."""
+        key = room_key(room or "")
+        states = await self.entity_manager.get_entities()
+        slug = room_policy.resolve(key, states, self._registry_snapshot())
+        if slug is None or f"script.{room_policy.GOOD_NIGHT_SCRIPT}" not in states:
+            return None
+        outcome = await room_policy.apply(
+            room_policy.PolicyRequest("good_night", slug, self._spoken_room(key)), ha_client,
+            equivalent_writes=["script.good_night"], policy_slugs=room_policy.policy_slugs(states),
+        )
+        return outcome.speech
+
     async def _handle_motion_control_intent(self, action: str, parameters: Dict, ha_client, room: str = None, original_query: str = None) -> str:
         """
         Handle motion control commands by setting the room's motion-flow
@@ -7032,11 +7110,19 @@ Return ONLY the JSON, no other text."""
 
         motion_rooms = await self._motion_control_rooms()
         key = room_key(room or "")
-        normalized_room = motion_rooms.get(key)
+        states = await self.entity_manager.get_entities()
+        policy_slugs = room_policy.policy_slugs(states)
+        policy_slug = room_policy.resolve(key, states, self._registry_snapshot())
+        normalized_room = policy_slug or motion_rooms.get(key)
         if not normalized_room:
             logger.info("motion_control_room_unsupported room_given=%s rooms_with_helpers=%d", bool(room), len(motion_rooms))
             return await self._motion_rooms_reply(motion_rooms)
         spoken_room = self._spoken_room(key)
+        if normalized_room in policy_slugs and policy_slug is None:
+            # A policy room reached only by a name Home Assistant's area map
+            # doesn't know: the guard would refuse the direct writes, so say so.
+            logger.info("motion_control_policy_room_unmapped")
+            return f"Voice control isn't set up for the {spoken_room} yet."
 
         # Authorize the whole write set before saying anything about the
         # room's helpers, so a denied caller learns nothing about them.
@@ -7072,7 +7158,7 @@ Return ONLY the JSON, no other text."""
         leave_off_minutes = f"input_number.{normalized_room}_leave_lights_off_minutes"
         override_brightness = f"input_number.{normalized_room}_override_brightness"
 
-        duration = parameters.get("duration_minutes", 60)
+        duration = _whole_number(parameters.get("duration_minutes"))
         brightness = parameters.get("brightness_percent")
 
         # ATHENA-128 (K1): gated as one target (the room's motion override),
@@ -7084,6 +7170,17 @@ Return ONLY the JSON, no other text."""
         )
         if _motion_prompt:
             return _motion_prompt
+
+        if policy_slug:
+            equivalent_writes = list(dict.fromkeys(
+                self._motion_write_set(policy_slug, action) + [motion_disable_bool]
+            ))
+            return await self._motion_via_room_policy(
+                action, policy_slug, key, spoken_room, duration, brightness, ha_client, equivalent_writes, policy_slugs,
+            )
+
+        # Rooms the policy engine doesn't run keep today's default: an hour.
+        duration = 60 if duration is None else duration
 
         try:
             if action == "leave_lights_on":
