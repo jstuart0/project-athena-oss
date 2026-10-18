@@ -46,7 +46,7 @@ from shared import ha_auth, ha_link, household
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
-from orchestrator import identity_answer, room_choice, room_context, room_policy
+from orchestrator import identity_answer, light_effects, room_choice, room_context, room_policy
 from orchestrator.entity_repair import repair_for_routing
 from orchestrator.intent_arbitration import arbitrate_intent, is_team_contest_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -92,7 +92,7 @@ from orchestrator.complexity_detector import determine_complexity, get_complexit
 
 # Smart home control imports
 from orchestrator.ha_entity_manager import HAEntityManager
-from orchestrator.smart_home_controller import CLASSIFY_COLOR_NAMES, SmartHomeController
+from orchestrator.smart_home_controller import CLASSIFY_COLOR_NAMES, SmartHomeController, effect_word_claimed
 from orchestrator.sequence_executor import SequenceExecutor, detect_sequence_intent
 from orchestrator.automation_agent import AutomationAgent, should_use_automation_agent
 
@@ -2207,6 +2207,49 @@ _ANNOUNCE_TO_PEOPLE_RE = re.compile(
 )
 
 
+def _light_effect_request(query: str) -> Optional[light_effects.EffectRequest]:
+    """The light-effect request ``query`` makes, or None. Reads only the entity
+    manager's cached states (no I/O) and never raises: a failure here sends the
+    turn down the ordinary classification path.
+
+    The index covers every light, not the speaker's permitted ones: classify has
+    no per-caller scope, and the caller's CONTROL permission is checked first
+    thing in ``route_control_node``. What routing can reveal is one bit, that
+    some light in the house has an effect of that name (it shows only in which
+    path the turn takes). Replies and writes come from permitted lights only.
+    Nothing here is logged or returned except the request."""
+    try:
+        if not light_effects.has_effect_shape(query):
+            return None
+        if classify_utterance(query).kind == UtteranceKind.STATE_QUESTION:
+            return None
+        manager = _runtime.get_entity_manager()
+        states = manager.cached_entities() if manager is not None else None
+        index = light_effects.EffectIndex.for_states(states, manager.cache_generation()) if states is not None else None
+        lights: Optional[List[Tuple[str, Any]]] = None
+
+        def names_light(words: str) -> bool:
+            nonlocal lights
+            if lights is None:
+                lights = [
+                    (entity_id, (state.get("attributes") or {}).get("friendly_name"))
+                    for entity_id, state in (states or {}).items()
+                    if entity_id.startswith("light.") and isinstance(state, dict)
+                ]
+            return any(room_context.names_entity(entity_id, name, words) for entity_id, name in lights)
+
+        def names_target(words: str) -> bool:
+            return room_context.find_room_mention(words, current_directory()).kind != "none" or names_light(words)
+
+        return light_effects.recognise(
+            query, index, None,
+            claimed=effect_word_claimed, names_target=names_target, names_light=names_light,
+        )
+    except Exception as exc:
+        logger.warning("light_effect_route_failed", error=type(exc).__name__)
+        return None
+
+
 async def classify_node(state: OrchestratorState) -> OrchestratorState:
     """
     Classify user intent using LLM with Redis caching.
@@ -2761,6 +2804,19 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             # No previous context found - this is normal for first query in session
             if ref_info["has_context_ref"]:
                 logger.info(f"Context reference detected but no previous context for session {state.session_id[:8]}...")
+
+    # DETERMINISTIC ROUTE: a spoken light-effect request ("set the study prism
+    # to candlelight", "turn off the effect") is a control command. It sits
+    # before the intent-cache read because a stale cached general_info for the
+    # same words must not hide it, and it neither reads nor writes that cache.
+    effect_request = _light_effect_request(state.query)
+    if effect_request is not None:
+        logger.info("light_effect_route", query_len=len(state.query), clear=effect_request.clear)
+        state.intent = IntentCategory.CONTROL
+        state.confidence = 0.9
+        state.complexity = determine_complexity(state.query, "control", log_features=False)
+        state.node_timings["classify"] = time.time() - start
+        return state
 
     # OPTIMIZATION: Check cache first (but skip for problem-reporting queries)
     # Problem queries need fresh classification each time since device state changes
