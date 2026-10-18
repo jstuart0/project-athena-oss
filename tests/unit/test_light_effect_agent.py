@@ -1031,10 +1031,37 @@ GOOD_DELAYS = [
 ]
 
 
-@pytest.mark.parametrize("delay", BAD_DELAYS, ids=repr)
-def test_a_templated_or_oddly_shaped_delay_on_any_step_refuses_the_automation(delay):
+TEMPLATED_KEY_DELAY = {"{{ k }}": 1}
+
+
+@pytest.mark.parametrize("delay", [d for d in BAD_DELAYS if d != TEMPLATED_KEY_DELAY], ids=repr)
+def test_an_automation_with_no_effect_passes_through_whatever_its_delay_as_it_always_did(delay):
+    """F153: the delay check belongs to effect automations. Base accepted these."""
     rig = Rig()
     rig.schedule([{"service": "light.turn_on", "entity_id": PRISM, "data": {"brightness": 5}, "delay": delay}])
+    assert len(rig.registered) == 1
+
+
+def test_a_templated_key_beside_a_light_is_still_hidden_content_whatever_the_field():
+    """The one exception, from the light allowlist and not the delay check: a templated key
+    in a step that touches a light hides content from the effect checks."""
+    rig = Rig()
+    rig.schedule([{"service": "light.turn_on", "entity_id": PRISM, "data": {"brightness": 5}, "delay": TEMPLATED_KEY_DELAY}])
+    assert nothing_happened(rig)
+
+
+@pytest.mark.parametrize("delay", ["00:05", "5", "{{ 5 }}"])
+def test_a_non_effect_switch_automation_with_an_owners_odd_delay_still_registers(delay):
+    rig = Rig()
+    reply = rig.schedule([{"service": "switch.turn_on", "entity_id": "switch.example_plug", "delay": delay}])
+    assert reply.startswith("Created automation") and len(rig.registered) == 1
+    assert rig.manager.reads == 0, "no effect, so nothing was read"
+
+
+@pytest.mark.parametrize("delay", ["00:05", "5", "{{ 5 }}"])
+def test_the_same_delay_beside_an_effect_is_refused(delay):
+    rig = Rig()
+    rig.schedule([effect_step(), {"service": "switch.turn_on", "entity_id": "switch.example_plug", "delay": delay}])
     assert nothing_happened(rig)
 
 

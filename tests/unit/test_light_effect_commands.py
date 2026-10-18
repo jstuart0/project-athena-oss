@@ -392,8 +392,8 @@ def test_light_reply_with_no_effect_never_says_to_the_effect():
     assert shc.light_reply("set_effect", single_name="Lamp", effect="") == "Set the effect on the Lamp."
 
 
-def test_the_ambient_colour_fast_path_hands_out_copies():
-    rig = Rig(pytest.MonkeyPatch())
+def test_the_ambient_colour_fast_path_hands_out_copies(monkeypatch):
+    rig = Rig(monkeypatch)
     query = "set the study to sunset"
     first = asyncio.run(rig.controller._fast_path_intent(query, query, None, False, False, True, None))
     first["parameters"]["hs_colors"][0][0] = 999
@@ -1575,3 +1575,14 @@ def test_a_repeated_effect_word_names_no_light_in_the_controller_either(monkeypa
     say(rig, "make the galley twinkle twinkle", {"effect": "twinkle"})
     assert sorted(w[2]["entity_id"] for w in writes(rig)) == ["light.galley_bulb_1", "light.galley_bulb_2"]
     assert all(w[2]["entity_id"] != "light.north_lamp" for w in writes(rig))
+
+
+def test_no_light_effect_test_builds_a_monkeypatch_of_its_own():
+    """A MonkeyPatch made by hand is never undone: its patches (a mock admin client, the config) stay
+    for every later test in the process, which broke 26 tests in test_write_fanout_confirmation.py
+    whenever this file was collected before it."""
+    from pathlib import Path
+    hand_made = re.compile("Monkey" + r"Patch\(\)")
+    offenders = [p.name for p in sorted(Path(__file__).resolve().parent.glob("test_light_effect*.py"))
+                 if hand_made.search(p.read_text(encoding="utf-8"))]
+    assert offenders == []

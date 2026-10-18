@@ -233,8 +233,8 @@ def test_non_effect_queries_keep_their_routing(rig, monkeypatch):
 
 def test_classify_takes_the_effect_route_exactly_when_the_helper_finds_a_request(rig):
     """classify's decision is the helper's, over a corpus whose expected
-    answers are written out. This is not fast-path parity: Phase 3 adds that
-    comparison (``_fast_path_intent`` over PARITY_CORPUS) when the branch exists."""
+    answers are written out. The fast path is held to the same corpus in
+    test_light_effect_fast_path.py."""
     assert len(PARITY_CORPUS) >= 30 and ("set the study prism to candlelight", True) in PARITY_CORPUS
     for query, expected in PARITY_CORPUS:
         assert (main._light_effect_request(query) is not None) is expected, f"corpus expectation drifted for {query!r}"

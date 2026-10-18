@@ -119,7 +119,6 @@ GLOBS = (
     "tests/unit/test_room_lights_*.py",
     "tests/unit/test_room_settings_*.py",
     "tests/unit/test_light_effect*.py",
-    "tests/unit/test_automation_agent_effects.py",
     "tests/unit/test_gateway_speaker_rooms_*.py",
     "admin/backend/tests/test_room_settings_routes.py",
 )

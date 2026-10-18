@@ -1429,15 +1429,15 @@ class AutomationAgent:
             return EFFECT_NOT_ALLOWED_TEXT, None
         actions = args.get("actions")
         if isinstance(actions, (list, tuple)):
-            if any(isinstance(step, dict) and "delay" in step and not _plain_delay(step["delay"]) for step in actions):
-                return EFFECT_NOT_ALLOWED_TEXT, None
             if _scope_permissions().get("mode", "owner") != "owner" and _template_refused(actions):
                 return TEMPLATE_REFUSED_TEXT, None
         entries = light_effects.effect_carriers(actions, _walk_steps)
         if not entries:
-            return None, args
+            return None, args  # no effect: delays and everything else are as they always were
         if not isinstance(actions, (list, tuple)):
             return EFFECT_NOT_ALLOWED_TEXT, None
+        if any(isinstance(step, dict) and "delay" in step and not _plain_delay(step["delay"]) for step in actions):
+            return EFFECT_NOT_ALLOWED_TEXT, None  # beside an effect, a delay is one Home Assistant takes as written
         with_effect = {e[0][0] for e in entries if e[0][-1] == "effect"}
         for index in {e[0][0] for e in entries} - with_effect:
             step = actions[index]
