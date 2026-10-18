@@ -103,11 +103,17 @@ def _counted_noun(n: int, domains: Iterable[str]) -> str:
     return noun_for_domains(unique)
 
 
+def _effect_phrase(detail: str) -> str:
+    """The effect as a phrase: "candlelight effect", and just "rain effect" for a
+    name that already ends in the word."""
+    return detail if detail.split()[-1:] in (["effect"], ["effects"]) else f"{detail} effect"
+
+
 def _verb_for(service: str, domain: Optional[str] = None, detail: str = "") -> str:
     if domain in _ACTIVATED_DOMAINS:
         return "activate"
     if service == "set_effect" and detail:
-        return f"set the {detail} effect on"
+        return f"set the {_effect_phrase(detail)} on"
     # Anything else (set_temperature, a bed-warmer level, a motion
     # override) reads as a change to the device.
     return _VERB_FOR_SERVICE.get(service, "change")
@@ -214,8 +220,8 @@ def _command_text(write: PlannedWrite, room: Optional[str] = None) -> str:
         # Reads as "set <target> to <effect> effect", which the effect recogniser takes
         # even for a name an existing path owns ("sunset", "movie").
         if len(write.entity_ids) == 1 and "all" not in write.entity_ids:
-            return f"set the {where}{_counted_noun(1, [write.domain])} to {write.detail} effect"
-        return f"set all the {where}{noun_for_domains([write.domain])} to {write.detail} effect"
+            return f"set the {where}{_counted_noun(1, [write.domain])} to {_effect_phrase(write.detail)}"
+        return f"set all the {where}{noun_for_domains([write.domain])} to {_effect_phrase(write.detail)}"
     if len(write.entity_ids) == 1 and "all" not in write.entity_ids:
         return f"{verb} the {where}{_counted_noun(1, [write.domain])}"
     noun = noun_for_domains([write.domain])

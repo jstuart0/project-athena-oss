@@ -768,7 +768,13 @@ EFFECT_ACTIONS = frozenset({"set_effect", "clear_effect"})
 _EFFECT_WORDS = frozenset({"effect", "effects"})
 # The words that turn an effect off. "mode" also counts when the effect is named
 # ("candlelight mode off", "turn off candlelight mode").
-_CLEAR_WORDS = frozenset({"off", "stop", "clear", "cancel", "end", "remove", "disable", "kill", "no"})
+_CLEAR_WORDS = frozenset({"off", "stop", "clear", "cancel", "end", "remove", "disable", "kill"})
+# A named effect with neither "effect" nor "mode" said ("stop the twinkle"): bare
+# "off" is not enough, or "turn off the kitchen lights" would clear an effect
+# the model called "kitchen".
+_STOP_WORDS = _CLEAR_WORDS - {"off"}
+# "no more effects", the one clear that has no verb.
+_NO_EFFECTS_CLAUSES = frozenset({("no", "effects"), ("no", "more", "effects")})
 # Words that can't make an effect "named": an effect made only of these would
 # be backed by the on/off or filler words of any command.
 _EFFECT_FILLER = _LEADING_FILLER | _OBJECT_FILLER | _ON_OFF_WORDS | frozenset({"effect", "effects", "mode", "light", "lights"})
@@ -780,7 +786,7 @@ def _effect_name(effect: Any) -> Optional[Sequence[str]]:
     if not isinstance(effect, str):
         return None
     words = light_effects.tokens(effect)
-    if not words or light_effects.normalize(effect) in light_effects.CLEAR_ALIASES or all(w in _EFFECT_FILLER for w in words):
+    if not words or light_effects.is_clear_alias(effect) or all(w in _EFFECT_FILLER for w in words):
         return None
     return words
 
@@ -801,7 +807,9 @@ def _outside(toks: Sequence[str], span: Tuple[int, int], words: FrozenSet[str]) 
     return any(t in words for i, t in enumerate(toks) if not span[0] <= i < span[1])
 
 
-def _device_words_spoken(act: str, spoken: FrozenSet[str], clauses: Any, parameters: Any) -> FrozenSet[str]:
+def _device_words_spoken(
+    act: str, spoken: FrozenSet[str], clauses: Any, parameters: Any, effect_listed: bool = False,
+) -> FrozenSet[str]:
     """The spoken words that can name a device. For an effect, only the matched
     words of its own name ("tv simulator") are set aside, and only when the
     words also say "effect" or a light word (an effect called "Fan" doesn't turn
@@ -809,7 +817,9 @@ def _device_words_spoken(act: str, spoken: FrozenSet[str], clauses: Any, paramet
     request, only in a clause that says "effect"."""
     if act not in EFFECT_ACTIONS:
         return spoken
-    found = _effect_named(parameters, clauses) if spoken & (_EFFECT_WORDS | DEVICE_WORDS["light"]) else None
+    found = _effect_named(parameters, clauses) if (
+        effect_listed or spoken & (_EFFECT_WORDS | DEVICE_WORDS["light"])
+    ) else None
     remaining = set()
     for toks in clauses:
         drop = set()
@@ -825,22 +835,30 @@ def _effect_cue(act: str, clauses: Any, spoken: FrozenSet[str], parameters: Any)
     """None when the words themselves ask for the effect.
 
     Setting needs the effect named in the words (the model's guess counts only
-    through them), with no clear word beside it. Clearing needs the word
-    "effect" with a clear word ("turn off the effect"), or a named effect with a
-    clear or mode word outside the matched words ("candlelight mode off", "stop
-    the twinkle"). The word "effect" alone backs only a clear."""
+    through them), with no clear word beside it. Clearing needs, in ONE clause,
+    the word "effect" with a clear word ("turn off the effect"), or a named
+    effect with the word "mode" and a clear word ("candlelight mode off"), or a
+    named effect with a stop word ("stop the twinkle"; bare "off" is not
+    enough). The word "effect" alone backs only a clear, and "that had no
+    effect" backs nothing."""
     found = _effect_named(parameters, clauses)
     if act == "set_effect":
         return None if found is not None and not _outside(*found, _CLEAR_WORDS) else NO_CUE
-    if spoken & _EFFECT_WORDS:
-        return None if spoken & _CLEAR_WORDS else NO_CUE
-    return None if found is not None and _outside(*found, _CLEAR_WORDS | {"mode"}) else NO_CUE
+    for toks in clauses:
+        words = set(toks)
+        if tuple(toks) in _NO_EFFECTS_CLAUSES or (words & _EFFECT_WORDS and words & _CLEAR_WORDS):
+            return None
+    if found is not None:
+        toks, span = found
+        moded = _outside(toks, span, frozenset({"mode"}))
+        return None if _outside(toks, span, _CLEAR_WORDS if moded else _STOP_WORDS) else NO_CUE
+    return NO_CUE
 
 
 def write_cue_problem(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
     kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
-    assistant_names: Iterable[str] = (), allow_scheduled: bool = False,
+    assistant_names: Iterable[str] = (), allow_scheduled: bool = False, effect_listed: bool = False,
 ) -> Optional[str]:
     """None when a device-changing command is backed by the words; else
     ``NO_CUE`` (nothing in the words asks for a change) or ``WRONG_DEVICE``
@@ -864,15 +882,15 @@ def write_cue_problem(
     judged. A read is never a problem, a lock is judged elsewhere, a cover's
     opening by the door rules, and a command with no words (a sequence step,
     checked per clause) is not judged."""
-    if query is None:
-        return None
     act = action.strip().lower() if isinstance(action, str) else ""
-    if act in READ_ONLY_ACTIONS:
-        return None
     canonical = canonical_device_type(device_type)
     dtype = canonical.strip().lower() if isinstance(canonical, str) else None
-    if act in EFFECT_ACTIONS and dtype != "light":
-        return NO_CUE
+    if act in EFFECT_ACTIONS and (query is None or dtype != "light"):
+        return NO_CUE  # an effect is backed only by words, and only for a light
+    if query is None:
+        return None
+    if act in READ_ONLY_ACTIONS:
+        return None
     if dtype in _ROUTINE_TYPES:
         if kind_hint is None or kind_hint is UtteranceKind.IMPERATIVE or whole_scene_phrase:
             return None
@@ -899,7 +917,7 @@ def write_cue_problem(
     own_named = bool(spoken & DEVICE_WORDS.get(kind, _CUE_WORDS.get(kind, frozenset()))) or (
         kind == "light" and room_context.is_explicit_whole_house(" ".join(" ".join(t) for t in clauses))
     )
-    device_spoken = _device_words_spoken(act, spoken, clauses, parameters)
+    device_spoken = _device_words_spoken(act, spoken, clauses, parameters, effect_listed)
     if not own_named and any(
         device_spoken & (DEVICE_WORDS[k] - COLOR_WORDS - BRIGHTNESS_WORDS) for k in DEVICE_WORDS if k != kind
     ):
@@ -932,12 +950,13 @@ def write_cue_problem(
 def lacks_write_cue(
     device_type: Any, action: Any, query: Optional[str], parameters: Any = None, *, named_entity: bool = False,
     kind_hint: Optional[UtteranceKind] = None, whole_scene_phrase: bool = False,
-    assistant_names: Iterable[str] = (), allow_scheduled: bool = False,
+    assistant_names: Iterable[str] = (), allow_scheduled: bool = False, effect_listed: bool = False,
 ) -> bool:
     """``write_cue_problem`` as a yes/no."""
     return write_cue_problem(
         device_type, action, query, parameters, named_entity=named_entity, kind_hint=kind_hint,
         whole_scene_phrase=whole_scene_phrase, assistant_names=assistant_names, allow_scheduled=allow_scheduled,
+        effect_listed=effect_listed,
     ) is not None
 
 

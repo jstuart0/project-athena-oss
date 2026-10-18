@@ -903,7 +903,7 @@ class TestEffectCue:
 
     def test_the_stop_word_must_be_outside_the_matched_effect(self):
         assert self.cue("clear_effect", "set the prism to stop motion", "Stop Motion") == self.NO
-        assert self.cue("clear_effect", "turn off stop motion", "Stop Motion") is None
+        assert self.cue("clear_effect", "stop the stop motion", "Stop Motion") is None
         assert self.cue("set_effect", "set the prism to stop motion", "Stop Motion") is None
 
     def test_a_negated_or_narrated_effect_is_no_cue(self):
@@ -953,8 +953,45 @@ class TestEffectCue:
     def test_another_kind_of_device_is_never_backed_by_an_effect(self, device_type, action):
         assert self.cue(action, "set the thing to candlelight effect off", "candlelight", device_type) == self.NO
 
-    def test_no_words_is_not_judged_as_before(self):
-        assert access_target.write_cue_problem("light", "set_effect", None, {"effect": "x"}) is None
+    @pytest.mark.parametrize("action", ["set_effect", "clear_effect"])
+    @pytest.mark.parametrize("device_type", ["light", "fan", "scene", None])
+    def test_an_effect_with_no_words_is_never_backed(self, action, device_type):
+        """F120: a sequence step has no words, and an effect needs them."""
+        assert access_target.write_cue_problem(device_type, action, None, {"effect": "x"}) == self.NO
+        assert access_target.write_cue_problem("light", "turn_on", None, {}) is None
+
+    @pytest.mark.parametrize("query,effect", [
+        ("turn off the kitchen lights", "kitchen"), ("turn off candlelight", "candlelight"),
+        ("turn the twinkle off", "twinkle"),
+    ])
+    def test_a_named_clear_without_effect_or_mode_needs_a_stop_word_not_bare_off(self, query, effect):
+        """F118: "turn off the kitchen lights" must not clear an effect the model called "kitchen"."""
+        assert self.cue("clear_effect", query, effect) == self.NO
+
+    @pytest.mark.parametrize("query,effect", [
+        ("stop the twinkle", "twinkle"), ("cancel candlelight", "candlelight"), ("end the twinkle", "twinkle"),
+        ("remove candlelight", "candlelight"), ("disable the twinkle", "twinkle"), ("kill the twinkle", "twinkle"),
+        ("clear candlelight", "candlelight"), ("turn off candlelight mode", "candlelight"), ("twinkle mode off", "twinkle"),
+    ])
+    def test_a_named_clear_with_a_stop_word_or_mode_and_off_is_backed(self, query, effect):
+        assert self.cue("clear_effect", query, effect) is None
+
+    @pytest.mark.parametrize("query", [
+        "that had no effect", "it had no effect on me", "turn off the lamp, and play the rain effect",
+        "turn off the lamp. the effect was nice", "no effect",
+    ])
+    def test_clear_words_must_share_a_clause_with_the_word_effect(self, query):
+        assert self.cue("clear_effect", query) == self.NO
+
+    def test_an_effect_in_a_permitted_lights_own_list_clears_the_device_word_collision(self):
+        """F120: "turn on the tv simulator" names no device once the effect is a listed one."""
+        query = "turn on the tv simulator on the study prism"
+        assert self.cue("set_effect", query, "TV Simulator") == access_target.WRONG_DEVICE
+        assert access_target.write_cue_problem(
+            "light", "set_effect", query, {"effect": "TV Simulator"}, effect_listed=True) is None
+        assert access_target.write_cue_problem(
+            "light", "set_effect", "turn on the tv", {"effect": "TV Simulator"}, effect_listed=True) == access_target.WRONG_DEVICE
+        assert access_target.lacks_write_cue("light", "set_effect", query, {"effect": "TV Simulator"}, effect_listed=True) is False
 
     @pytest.mark.parametrize("query,effect", [
         ("turn off the effect", None), ("stop the effects", None), ("turn the effect off", None),
@@ -972,6 +1009,13 @@ class TestEffectCue:
     ])
     def test_clearing_without_t4_words_is_no_cue(self, query, effect):
         assert self.cue("clear_effect", query, effect) == self.NO
+
+    @pytest.mark.parametrize("spaced", ["o f f", "n o n e", "s o l i d", "O-F-F", "so lid"])
+    def test_a_spaced_clear_alias_is_never_a_named_effect(self, spaced):
+        """F125: said or sent with spaces it is still the clear value, so it can't back a set."""
+        assert self.cue("set_effect", f"set the prism to {spaced}", spaced) == self.NO
+        assert self.cue("clear_effect", "turn off the lights", spaced) == self.NO
+        assert self.cue("clear_effect", f"stop the {spaced}", spaced) == self.NO
 
     def test_lacks_write_cue_agrees(self):
         assert access_target.lacks_write_cue("light", "set_effect", "turn on the lights", {"effect": "twinkle"}) is True

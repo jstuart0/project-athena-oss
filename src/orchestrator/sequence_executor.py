@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 UNGROUNDED_ENTITY_STEP_REFUSAL = "I didn't run that step because I couldn't tell which device you meant."
 UNGROUNDED_ROOM_STEP_REFUSAL = "I didn't run that step because I couldn't tell which room you meant."
+EFFECT_STEP_REFUSAL = "I can't set a light effect in a sequence yet."
 ONE_DOOR_STEP_REFUSAL = "I can unlock or open one door at a time. Name the door, for example 'unlock the front door'."
 
 # ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
@@ -434,6 +435,11 @@ class SequenceExecutor:
     async def _execute_direct_action(self, entity_id: str, action: str, parameters: Dict):
         """Execute action directly on an entity."""
         domain = entity_id.split('.')[0]
+
+        if action in ('set_effect', 'clear_effect'):
+            # An effect is backed by the user's own words, which a step lacks; no
+            # service is called and no fan-out block is recorded.
+            return EFFECT_STEP_REFUSAL
 
         # Map common actions to HA services
         service_map = {

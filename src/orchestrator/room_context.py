@@ -151,8 +151,6 @@ def unprocessable_text(intent: object) -> Optional[str]:
 
 
 _REFUSALS: set = set()
-# Fixed answers that name a target or an effect: whole-string patterns.
-_REFUSAL_PATTERNS: list = []
 NO_WRITE_CUE_MARK: str = ""  # set by the controller to its no-cue phrase
 
 
@@ -162,24 +160,12 @@ def register_refusals(*texts: str) -> None:
     _REFUSALS.update(t for t in texts if isinstance(t, str))
 
 
-# A template field: one to 200 characters, no sentence break, so the fixed words
-# can't be reached from a longer answer ("Sure. The lamp doesn't have effects.").
-_TEMPLATE_FIELD = r"(?:[^.!?\n]|\.(?!\s)){1,200}"
+class RefusedText(str):
+    """An answer that changed nothing and is not a command to remember, though
+    its words are built from a target or an effect. The writer returns it typed,
+    so ``is_refusal_text`` recognises it without matching its text."""
 
-
-def register_refusal_templates(*templates: str) -> None:
-    """Register answers built from a template with ``{placeholder}`` fields
-    ("There's no effect running on {target}."). A formatted answer is a refusal
-    when the WHOLE text fits the template: the fixed words exactly, each field
-    some text of one to 200 characters with no sentence break. Never a substring match."""
-    for template in templates:
-        if not isinstance(template, str):
-            continue
-        parts = re.split(r"\{[a-z_]+\}", template)
-        pattern = _TEMPLATE_FIELD.join(re.escape(p) for p in parts)
-        compiled = re.compile(pattern)
-        if compiled.pattern not in {p.pattern for p in _REFUSAL_PATTERNS}:
-            _REFUSAL_PATTERNS.append(compiled)
+    __slots__ = ()
 
 
 def set_no_write_cue_text(text: str) -> None:
@@ -190,7 +176,7 @@ def set_no_write_cue_text(text: str) -> None:
 def is_refusal_text(text: object) -> bool:
     """Whether an answer is one of the registered fixed refusals. Matched
     exactly, never by a word in the text."""
-    return isinstance(text, str) and (text in _REFUSALS or any(p.fullmatch(text) for p in _REFUSAL_PATTERNS))
+    return isinstance(text, RefusedText) or (isinstance(text, str) and text in _REFUSALS)
 
 
 def strip_server_keys(obj: object) -> Optional[dict]:
@@ -710,16 +696,23 @@ def find_room_mention(query: Optional[str], directory: Optional[RoomDirectory]) 
     return NO_MENTION
 
 
+def distinguishing_tokens(entity_id: str, friendly_name: Optional[str]) -> frozenset:
+    """The words of an entity's friendly name (else its object id) that tell it
+    from its neighbours: device nouns, quantifiers, filler and bare numbers
+    never do."""
+    name = friendly_name if isinstance(friendly_name, str) and friendly_name.strip() else (
+        entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
+    )
+    return frozenset(t for t in tokens(name) if t not in _NON_ROOM_TOKENS and t not in _DEVICE_NOUNS and not t.isdigit())
+
+
 def names_entity(entity_id: str, friendly_name: Optional[str], text: Optional[str]) -> bool:
     """Whether the words call an entity by its name: every distinguishing word
     of its friendly name (else its object id) is in ``text``, and there is at
     least one. Device nouns, quantifiers, filler and bare numbers ("light",
     "all", "room", "2") never distinguish: "the office light" may be any of
     "Office Light 1..3", and the room it names is what the words settle."""
-    name = friendly_name if isinstance(friendly_name, str) and friendly_name.strip() else (
-        entity_id.split(".", 1)[-1] if isinstance(entity_id, str) else ""
-    )
-    wanted = {t for t in tokens(name) if t not in _NON_ROOM_TOKENS and t not in _DEVICE_NOUNS and not t.isdigit()}
+    wanted = distinguishing_tokens(entity_id, friendly_name)
     return bool(wanted) and wanted <= set(tokens(text or ""))
 
 

@@ -737,6 +737,29 @@ def test_spoken_span_is_the_first_matched_token_range(effect, spoken, expected):
     assert le.spoken_in(effect, spoken) is (expected is not None)
 
 
+@pytest.mark.parametrize("effect,expected", [
+    ("Sparkle+", "sparkle"), ("Fire 2012", "fire 2012"), ("Chase 2 (Rnd)", "chase 2 rnd"), ("Rock'n'Roll", "rock'n'roll"),
+    ("Half-Time!", "half-time"), ("Wipe_Random", "wipe random"), ("A/B: test", "a b test"), ("  ", ""),
+])
+def test_spoken_name_is_a_speech_form_of_letters_digits_spaces_apostrophes_and_hyphens(effect, expected):
+    assert le.spoken_name(effect) == expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("off", True), ("O F F", True), ("n o n e", True), ("None", True), ("s o l i d", True), ("Solid", True), ("So-lid", True),
+    ("Solid Glitter", False), ("offset", False), ("Fire", False), ("", False), (None, False), (5, False),
+])
+def test_is_clear_alias_compares_the_name_run_together(name, expected):
+    assert le.is_clear_alias(name) is expected
+
+
+def test_clear_value_finds_a_member_spelled_with_spaces_and_active_effect_ignores_one():
+    assert le.clear_value(["Fire", "N O N E"]) == "N O N E"
+    assert le.clear_value(["Fire", "Solid", "o f f"]) == "o f f", "off outranks solid"
+    assert le.active_effect({"state": "on", "attributes": {"effect": "S o l i d"}}) is None
+    assert le.active_effect({"state": "on", "attributes": {"effect": "Solid Glitter"}}) == "Solid Glitter"
+
+
 def test_spoken_name_is_short_lower_case_and_clean():
     assert le.spoken_name("Fire  2012") == "fire 2012"
     long_name = "Chase Flash Rnd " * 4

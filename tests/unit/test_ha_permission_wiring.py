@@ -243,7 +243,7 @@ _EXPECTED_HA_CLIENT_METHODS = {
     "_handle_bed_warmer_intent", "_handle_light_status_query", "_handle_lock_intent",
     "_handle_fan_intent", "_handle_cover_intent", "_handle_scene_intent",
     "_execute_whole_house_command", "_execute_multi_room_command",
-    "_execute_room_group_command", "_handle_motion_control_intent",
+    "_execute_room_group_command", "_handle_motion_control_intent", "_handle_effect_intent",
 }
 
 

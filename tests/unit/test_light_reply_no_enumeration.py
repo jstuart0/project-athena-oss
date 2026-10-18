@@ -26,7 +26,7 @@ from shared import ha_registry as hr  # noqa: E402
 ENTITY_ID = re.compile(r"\b(?:light|switch|fan|group)\.[a-z0-9_]+")
 _isolated = base._isolated
 
-ACTIONS = ("turn_on", "turn_off", "set_color", "set_brightness", "increase", "decrease")
+ACTIONS = ("turn_on", "turn_off", "set_color", "set_brightness", "increase", "decrease", "set_effect")
 PATHS = ("single_light_room", "room", "multi_room", "room_group", "whole_house", "whole_house_except")
 GROUP = {"display_name": "Upper", "name": "upper", "members": [{"room_name": "study"}, {"room_name": "hall"}]}
 
@@ -41,6 +41,8 @@ def intent_for(path, action):
         params = {"brightness": 128}
     if action in ("increase", "decrease"):
         params = {"brightness_step": 50}
+    if action == "set_effect":
+        params = {"effect": "twinkle"}
     room = {"single_light_room": "study", "room": "galley", "multi_room": "multi_room",
             "room_group": "upper", "whole_house": "whole_house", "whole_house_except": "whole_house"}[path]
     intent = light(room, action, parameters=params, **extra)
@@ -54,7 +56,13 @@ def intent_for(path, action):
 QUERY = {
     "turn_on": "turn on the lights", "turn_off": "turn off the lights", "set_color": "make the lights blue",
     "set_brightness": "set the lights to 50 percent", "increase": "make the lights brighter",
-    "decrease": "make the lights dimmer",
+    "decrease": "make the lights dimmer", "set_effect": "make the galley twinkle",
+}
+# What an effect request says on each path: the effect writer reads the words, so each path's words name its scope.
+EFFECT_QUERY = {
+    "single_light_room": "make the study twinkle", "room": "make the galley twinkle",
+    "multi_room": "make the galley and the study twinkle", "room_group": "make the study twinkle",
+    "whole_house": "set all the lights to twinkle", "whole_house_except": "set all the lights except the galley to twinkle",
 }
 
 
@@ -88,13 +96,20 @@ def test_the_matrix_floor():
 
 @pytest.mark.parametrize("path,action", CASES, ids=[f"{p}-{a}" for p, a in CASES])
 def test_a_command_reply_never_lists_lights(monkeypatch, path, action):
-    rig = Rig(monkeypatch, attic_state="on", resolve_group=GROUP if path == "room_group" else None,
+    states = None
+    if action == "set_effect":
+        from .test_light_effect_commands import effect_states
+        states = effect_states()
+        states["light.attic_a"]["state"] = states["light.attic_b"]["state"] = "on"
+    rig = Rig(monkeypatch, attic_state="on", resolve_group=GROUP if path == "room_group" else None, states=states,
               exclude='["(?:^|[._])(?:led_ring|status_led)(?:_|$)", "^light\\\\.galley_relay_1$"]')
     query = QUERY[action]
     if path == "whole_house":
         query += " in the whole house"
     if path == "whole_house_except":
         query += " in the whole house except the galley"
+    if action == "set_effect":
+        query = EFFECT_QUERY[path]
     reply = rig.run(intent_for(path, action), query)
     if action in SUPPORTED.get(path, ACTIONS):
         assert rig.written, (path, action, reply)

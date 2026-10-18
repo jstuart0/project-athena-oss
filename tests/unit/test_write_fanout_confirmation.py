@@ -58,6 +58,7 @@ def _fake_config(threshold=6, hard_limit=18):
 
 GATED = {
     "_dispatch_light_or_room_command",
+    "_handle_effect_intent",
     "_handle_media_intent",
     "_handle_lock_intent",
     "_handle_fan_intent",

@@ -185,13 +185,24 @@ def match(phrase: Any, effects: Sequence[str], *, fuzzy: bool = False) -> Option
     return None
 
 
+_CLEAR_COMPACT = frozenset("".join(tokens(alias)) for alias in CLEAR_ALIASES)
+
+
+def is_clear_alias(name: Any) -> bool:
+    """Whether a name means "no effect" in any spelling that is said or reported the
+    same way: compared run together, so "off", "O F F" and "Of-f" are one. A set that
+    resolves to such a member is a clear, and is never written as a set."""
+    return isinstance(name, str) and compact(name) in _CLEAR_COMPACT
+
+
 def clear_value(effects: Sequence[str]) -> Optional[str]:
     """The member of ``effects`` that means "no effect": the first of
     ``CLEAR_ALIASES`` (in that order) the list holds, spelled as the list has it."""
-    by_norm = _table(_list_key(effects))[0]
+    by_norm, by_compact, _ = _table(_list_key(effects))
     for alias in CLEAR_ALIASES:
-        if alias in by_norm:
-            return by_norm[alias]
+        hit = by_norm.get(alias) or by_compact.get(alias)
+        if hit is not None:
+            return hit
     return None
 
 
@@ -208,8 +219,7 @@ def active_effect(state: Any) -> Optional[str]:
     current = _attributes(state).get("effect")
     if not isinstance(current, str) or not 1 <= len(current) <= MAX_EFFECT_NAME_CHARS:
         return None
-    norm = _forms(current)[0]
-    return current if norm and norm not in CLEAR_ALIASES else None
+    return current if _forms(current)[0] and not is_clear_alias(current) else None
 
 
 def suggestions(phrase: Any, effect_lists: Iterable[Sequence[str]], k: int = 3) -> List[str]:
@@ -276,12 +286,17 @@ def spoken_in(effect: Any, spoken_tokens: Sequence[str]) -> bool:
 MAX_SPOKEN_NAME_CHARS = 32
 
 
+_NOT_SPEECH = re.compile(r"[^\w '\-]|_")
+
+
 def spoken_name(effect: Any) -> str:
-    """An effect name as a reply says it: lower case, single spaces, at most 32
-    characters (cut at a word where it can be)."""
+    """An effect name as a reply says it: lower case, only letters, digits,
+    spaces, apostrophes and hyphens (anything else, such as the "+" in a name,
+    becomes a space), single spaces, at most 32 characters (cut at a word
+    where it can be)."""
     if not isinstance(effect, str):
         return ""
-    text = " ".join(effect.split()).casefold()
+    text = " ".join(_NOT_SPEECH.sub(" ", effect.casefold()).split())
     if len(text) <= MAX_SPOKEN_NAME_CHARS:
         return text
     cut = text[:MAX_SPOKEN_NAME_CHARS]
