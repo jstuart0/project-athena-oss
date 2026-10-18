@@ -1,0 +1,29 @@
+{
+  "_source": "synthetic: the light entity state shape from https://github.com/home-assistant/core/blob/2026.10.2/homeassistant/components/light/__init__.py (LightEntityFeature, ATTR_EFFECT_LIST) at tag 2026.10.2",
+  "entity_id": "light.example_null_list",
+  "state": "on",
+  "attributes": {
+    "supported_color_modes": [
+      "rgb"
+    ],
+    "color_mode": "rgb",
+    "brightness": 200,
+    "rgb_color": [
+      10,
+      20,
+      30
+    ],
+    "effect": null,
+    "effect_list": null,
+    "friendly_name": "Example Null List",
+    "supported_features": 4
+  },
+  "last_changed": "2026-01-01T12:00:00.000000+00:00",
+  "last_reported": "2026-01-01T12:00:00.000000+00:00",
+  "last_updated": "2026-01-01T12:00:00.000000+00:00",
+  "context": {
+    "id": "01FIXTUREFIXTUREFIXTUREFIX",
+    "parent_id": null,
+    "user_id": null
+  }
+}

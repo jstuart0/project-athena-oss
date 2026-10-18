@@ -61,6 +61,7 @@ ROOM_SCOPE = (
     "src/orchestrator/write_fanout.py", "src/orchestrator/nodes/route_control.py",
     "src/gateway/main.py", "src/gateway/speaker_room.py", "src/shared/ha_registry.py",
     "src/orchestrator/access_target.py", "src/orchestrator/automation_agent.py",
+    "src/orchestrator/light_effects.py",
     "src/shared/household.py", "src/shared/household_settings.py", "admin/backend/app/routes/room_settings.py",
 )
 # In those files a door decision (which lock or cover a command acted on) is a
@@ -72,6 +73,14 @@ ORCHESTRATOR_PREFIX = "src/orchestrator/"
 # Calls through which a whole object stays whole (``str(intent)``).
 _TRANSPARENT_CALLS = frozenset({"str", "repr", "dict", "list", "format", "dumps"})
 _ROOM_TOKENS = tuple(tuple(k.split("_")) for k in ROOM_KEYS)
+# What a person asked a light to do, and the effect names a light reports, are
+# house data too (a name can be a room, a person or a place). Applied to the
+# same room-resolving files. Log counts and enums.
+EFFECT_KEYS = (
+    "effect", "effects", "effect_list", "effect_name", "effect_value", "effect_text", "phrase", "spoken",
+    "spoken_tokens", "target_text", "suggestions", "names", "vocab",
+)
+_EFFECT_TOKENS = tuple(tuple(k.split("_")) for k in EFFECT_KEYS)
 # A Home Assistant device id names a physical speaker in a house. The gateway
 # handles them on every voice request, so none may reach one of its logs
 # (log ``has_device_id=`` instead).
@@ -417,6 +426,11 @@ def _is_room_name(identifier: str) -> bool:
     return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _ROOM_TOKENS)
 
 
+def _is_effect_name(identifier: str) -> bool:
+    tokens = tuple(t for t in identifier.lower().split("_") if t)
+    return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _EFFECT_TOKENS)
+
+
 def _is_device_id_name(identifier: str) -> bool:
     tokens = tuple(t for t in identifier.lower().split("_") if t)
     return any(len(tokens) >= len(k) and tokens[-len(k):] == k for k in _DEVICE_ID_TOKENS)
@@ -447,8 +461,8 @@ def _whole_objects(node: ast.AST):
 
 
 def _matches(identifier: str, filename: str = "") -> bool:
-    if filename in ROOM_SCOPE and (_is_room_name(identifier) or identifier.startswith(DOOR_DECISION_PREFIX)
-                                   or identifier.startswith("whole:")):
+    if filename in ROOM_SCOPE and (_is_room_name(identifier) or _is_effect_name(identifier)
+                                   or identifier.startswith(DOOR_DECISION_PREFIX) or identifier.startswith("whole:")):
         return True
     if filename.startswith(DEVICE_ID_SCOPE_PREFIX) and _is_device_id_name(identifier):
         return True
@@ -995,6 +1009,52 @@ def test_room_and_area_values_are_flagged_in_room_resolving_files():
         assert not found, call
     found, _ = find_pii_logs('logger.info(f"lights in {room}")', "src/gateway/livekit_routes.py")
     assert not found
+
+
+def test_effect_names_and_spoken_phrases_are_flagged_in_room_resolving_files():
+    scoped = "src/orchestrator/light_effects.py"
+    assert scoped in ROOM_SCOPE
+    for call in (
+        'logger.info("x", effect=effect)',
+        'logger.info("x", effects=names)',
+        'logger.info("x", effect_list=attrs["effect_list"])',
+        'logger.info("x", effect_name=name)',
+        'logger.info(f"set {phrase}")',
+        'logger.info("x", spoken=spoken)',
+        'logger.info("x", target_text=req.target_text)',
+        'logger.info("x", requested_effect=e)',
+        'logger.info("x", spoken_tokens=toks)',
+        'logger.info("x", effect_value=v)',
+        'logger.info("x", effect_text=t)',
+        'logger.info("x", suggestions=offered)',
+        'logger.info("x", friendly_names=names)',
+        'logger.info(f"vocab {vocab}")',
+    ):
+        found, _ = find_pii_logs(call, scoped)
+        assert found, call
+    for call in (
+        'logger.info("x", effect_count=len(effects))',
+        'logger.info("x", has_effect=bool(effect))',
+        'logger.info("x", outcome="applied", written=n)',
+    ):
+        found, _ = find_pii_logs(call, scoped)
+        assert not found, call
+    found, _ = find_pii_logs('logger.info("x", effect=effect)', "src/orchestrator/helpers.py")
+    assert not found, "scoped to the files that resolve rooms"
+
+
+def test_light_effects_is_scanned_and_has_no_logger_at_all():
+    path = "src/orchestrator/light_effects.py"
+    assert path in ROOM_SCOPE
+    tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] + [getattr(node, "module", None) or ""]
+            assert not any(n.split(".")[0] in ("logging", "structlog") for n in names)
+        if isinstance(node, ast.Name):
+            assert node.id not in ("logger", "log"), "the effect resolver logs nothing"
+    planted, _ = find_pii_logs('import logging\nlogger = logging.getLogger(__name__)\nlogger.info("x", effect=effect)', path)
+    assert planted, "a logger planted in the effect resolver is caught"
 
 
 def test_a_door_decision_or_a_whole_intent_in_an_orchestrator_log_is_flagged():

@@ -1,0 +1,22 @@
+{
+  "_source": "synthetic: the light entity state shape from https://github.com/home-assistant/core/blob/2026.10.2/homeassistant/components/light/__init__.py (LightEntityFeature, ATTR_EFFECT_LIST) at tag 2026.10.2",
+  "entity_id": "light.example_plain_bulb",
+  "state": "on",
+  "attributes": {
+    "supported_color_modes": [
+      "brightness"
+    ],
+    "color_mode": "brightness",
+    "brightness": 200,
+    "friendly_name": "Example Plain Bulb",
+    "supported_features": 0
+  },
+  "last_changed": "2026-01-01T12:00:00.000000+00:00",
+  "last_reported": "2026-01-01T12:00:00.000000+00:00",
+  "last_updated": "2026-01-01T12:00:00.000000+00:00",
+  "context": {
+    "id": "01FIXTUREFIXTUREFIXTUREFIX",
+    "parent_id": null,
+    "user_id": null
+  }
+}

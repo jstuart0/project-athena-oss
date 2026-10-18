@@ -378,6 +378,10 @@ class HAEntityManager:
         # it and reuse its result instead of each asking Home Assistant.
         self._refresh_lock = asyncio.Lock()
         self._bulk_generation = 0  # counts finished bulk fetches
+        # Counts every change to the cached states, bulk or single: a memo built
+        # from the cache stays valid only while this is unchanged.
+        # _bulk_generation counts finished bulk fetches only.
+        self._generation = 0
         self._bulk_done_at = float("-inf")  # monotonic end of the last bulk fetch
         self._entity_read_at: Dict[str, float] = {}  # monotonic time of each id's last single read
         self._stale_ids: set = set()
@@ -396,6 +400,7 @@ class HAEntityManager:
         self._entity_read_at = {}
         self._stale_ids -= stale_before  # an id marked while this ran stays marked
         self._entities_cache = {e['entity_id']: e for e in entities}
+        self._generation += 1
         self._cache_time = datetime.now()
         
         # Build indexes
@@ -448,6 +453,11 @@ class HAEntityManager:
         nothing has been fetched yet. For callers that can't await (the policy
         guard): freshness comes from the awaiting reads earlier in a request."""
         return self._entities_cache
+
+    def cache_generation(self) -> int:
+        """A number that changes whenever the cached states do, including a
+        single entity patched in place. For memos built from ``cached_entities()``."""
+        return self._generation
 
     def entities_fetched_at(self) -> datetime:
         """When the cached states were read from Home Assistant, as an aware UTC time."""
@@ -514,6 +524,7 @@ class HAEntityManager:
         the refresh lock."""
         state = await self._ha.get_state(entity_id)
         self._entities_cache[entity_id] = state
+        self._generation += 1
         self._entity_read_at[entity_id] = time.monotonic()
         self._stale_ids.discard(entity_id)
         self._build_indexes()
