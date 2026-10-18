@@ -116,6 +116,15 @@ class Rig:
         return self.admin.stored if self.admin else []
 
 
+ROOMS_OF = {}  # leaf -> room keys; a leaf not listed is in the study, where the speaker is
+
+
+@pytest.fixture(autouse=True)
+def _rooms(monkeypatch):
+    ROOMS_OF.clear()
+    monkeypatch.setattr(AutomationAgent, "_leaf_room_keys", lambda self, leaf: set(ROOMS_OF.get(leaf, {"study"})))
+
+
 @pytest.fixture(autouse=True)
 def _no_assistant_names(monkeypatch):
     async def none():
@@ -563,18 +572,27 @@ def plain_calls(steps):
 
 @pytest.mark.parametrize("form", sorted(STORED_EQUALS_REGISTERED_FORMS))
 def test_stored_actions_equal_registered_actions_for_effect_steps(form):
+    """The record is the registered action list, exactly: no normalising either side."""
     rig = Rig()
     reply = rig.schedule([STORED_EQUALS_REGISTERED_FORMS[form]()], query=SCHEDULED + " at 40 percent")
     assert reply.startswith("Created automation"), reply
     stored, registered = rig.stored[0]["actions_config"], rig.registered[0]["action"]
-    stored_calls = [(sv, ids, data) for sv, ids, data, _ in plain_calls(stored)]
-    registered_calls = [(sv, ids, data) for sv, ids, data, _ in plain_calls([r for r in registered if "delay" not in r or "service" in r])]
-    assert stored_calls == registered_calls and stored_calls, "the full data dicts agree, every field"
-    for service, ids, data in registered_calls:
-        assert service == "light.turn_on" and data["effect"] in ("candlelight", "Candlelight")
-    assert not any("action" in s for s in stored)
-    expected_brightness = 40 if form == "with other data" else None
-    assert all(d.get("brightness") == expected_brightness for _, _, d in registered_calls)
+    assert stored == registered and stored
+    assert not any("action" in step for step in stored)
+    calls = [step for step in registered if "service" in step]
+    assert all(step["service"] == "light.turn_on" and "target" in step and "entity_id" not in step for step in calls)
+    assert all(step["data"]["effect"] in ("candlelight", "Candlelight") for step in calls)
+    assert all(step["data"].get("brightness") == (40 if form == "with other data" else None) for step in calls)
+    if form == "with delay":
+        assert registered[-1] == {"delay": "00:05:00"} and stored[-1] == registered[-1]
+
+
+def test_an_automation_with_no_effect_is_stored_as_it_always_was():
+    rig = Rig()
+    step = {"service": "light.turn_on", "entity_id": PRISM, "data": {"brightness": 50}, "delay": "00:01:00"}
+    rig.schedule([step])
+    assert rig.stored[0]["actions_config"] == [step], "the pre-image, unchanged"
+    assert rig.registered[0]["action"] != [step]
 
 
 def test_a_delay_is_kept_after_the_last_step_it_belongs_to():
@@ -654,8 +672,9 @@ def test_the_validator_runs_once_and_feeds_both_the_build_and_the_store(monkeypa
 
     monkeypatch.setattr(rig.agent, "_store_automation_record", store)
     rig.schedule([effect_step(entity=GROUP)])
-    assert built and stored and built[0] is stored[0]
-    assert built[0]["actions"][0]["entity_id"] == [PRISM, STRIP]
+    assert built and stored
+    assert built[0]["actions"][0]["entity_id"] == [PRISM, STRIP], "the build gets the validated list"
+    assert stored[0]["actions"] == rig.registered[0]["action"], "the store gets what was registered"
 
 
 # ----- logs ------------------------------------------------------------------------------------
@@ -986,10 +1005,10 @@ def test_a_set_that_lands_on_a_clear_member_is_refused():
 BAD_DELAYS = [
     "{{ 5 }}", "{% if x %}00:00:05{% endif %}", True, ["1"], None, "5", "00:00", "1:2:3", "00:00:05.1234", "00:00:05 ",
     {"hours": "{{ 1 }}"}, {"hours": True}, {"hours": -1}, {"hours": float("nan")}, {"weeks": 1}, {"{{ k }}": 1}, {"hours": [1]},
-    -5, float("inf"),
+    -5, float("inf"), {}, {"seconds": None},
 ]
 GOOD_DELAYS = [
-    {"hours": 0, "minutes": 5, "seconds": 0, "milliseconds": 0}, {"days": 1}, {"seconds": 2.5}, {},
+    {"hours": 0, "minutes": 5, "seconds": 0, "milliseconds": 0}, {"days": 1}, {"seconds": 2.5},
     "00:05:00", "01:30:15.250", 90, 2.5, 0,
 ]
 
@@ -1006,7 +1025,7 @@ def test_every_delay_home_assistant_takes_registers_on_an_ordinary_step(delay):
     rig = Rig()
     rig.schedule([{"service": "light.turn_on", "entity_id": PRISM, "data": {"brightness": 5}, "delay": delay}])
     assert len(rig.registered) == 1
-    assert ({"delay": delay} in rig.registered[0]["action"]) is bool(delay), "the builder drops an empty delay, as it always did"
+    assert ({"delay": delay} in rig.registered[0]["action"]) is bool(delay), "the builder drops a zero delay: no wait"
 
 
 @pytest.mark.parametrize("delay", GOOD_DELAYS, ids=repr)
@@ -1159,3 +1178,167 @@ def test_the_leaf_resolver_checks_the_ids_before_it_reads_anything_even_when_cal
     with mp.ha_permission_scope(GUEST_WITHOUT_PRISM, mode="guest"):
         refusal, leaves, _ = asyncio.run(rig.agent._effect_leaves([PRISM]))
     assert refusal and leaves == [] and rig.manager.reads == 0
+
+
+# ----- F150: a delay is Home Assistant's, or it is refused -------------------------------------------
+
+def test_an_empty_delay_map_is_refused_not_silently_dropped():
+    rig = Rig()
+    reply = rig.schedule([{**effect_step(), "delay": {}}])
+    assert reply == aa.EFFECT_NOT_ALLOWED_TEXT and nothing_happened(rig)
+    assert not aa._plain_delay({}) and not aa._plain_delay({"seconds": None})
+
+
+@pytest.mark.parametrize("zero", [0, 0.0])
+def test_a_zero_delay_means_no_wait_and_registers_without_a_delay_step(zero):
+    rig = Rig()
+    rig.schedule([{**effect_step(), "delay": zero}])
+    assert len(rig.registered) == 1 and not any("delay" in step for step in rig.registered[0]["action"])
+    assert aa._plain_delay(zero) and aa._plain_delay({"seconds": 0})
+
+
+# ----- F147: the lights must be the ones the words call for ---------------------------------------------
+
+BEDROOM_LAMP = "light.example_bedroom_lamp"
+
+
+def two_room_house():
+    states = house()
+    states[BEDROOM_LAMP] = light(BEDROOM_LAMP)
+    ROOMS_OF.update({PRISM: {"study"}, STRIP: {"study"}, GROUP: {"study"}, LAMP: {"study"}, BEDROOM_LAMP: {"bedroom"}})
+    return states
+
+
+def test_a_model_chosen_light_in_another_room_is_refused_now_and_scheduled():
+    rig = Rig(two_room_house())
+    assert rig.say("set the prism to candlelight", entity_id=BEDROOM_LAMP, data={"effect": "candlelight"}) == shc_no_device()
+    assert rig.schedule([effect_step(entity=BEDROOM_LAMP)]) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_the_speakers_room_grounds_a_light_when_no_room_is_named():
+    rig = Rig(two_room_house())
+    rig.say("set the lights to candlelight", entity_id=PRISM, data={"effect": "candlelight"})
+    assert rig.writes == [("light", "turn_on", {"entity_id": [PRISM], "effect": "candlelight"})]
+
+
+def test_a_room_the_words_name_grounds_its_lights_and_not_the_speakers():
+    rig = Rig(two_room_house())
+    rig.say("set the bedroom lights to candlelight", entity_id=BEDROOM_LAMP, data={"effect": "candlelight"})
+    assert [w[2]["entity_id"] for w in rig.writes] == [[BEDROOM_LAMP]]
+    rig2 = Rig(two_room_house())
+    assert rig2.say("set the bedroom lights to candlelight", entity_id=PRISM, data={"effect": "candlelight"}) == shc_no_device()
+    assert nothing_happened(rig2)
+
+
+def test_a_named_light_is_grounded_wherever_it_is():
+    states = two_room_house()
+    states[BEDROOM_LAMP]["attributes"]["friendly_name"] = "Nightstand Hexagon"
+    rig = Rig(states)
+    rig.say("set the nightstand hexagon to candlelight", entity_id=BEDROOM_LAMP, data={"effect": "candlelight"})
+    assert [w[2]["entity_id"] for w in rig.writes] == [[BEDROOM_LAMP]]
+    scheduled = Rig(states)
+    scheduled.schedule([effect_step(entity=BEDROOM_LAMP)], query="at 8pm set the nightstand hexagon to candlelight")
+    assert len(scheduled.registered) == 1
+
+
+def test_one_ungrounded_leaf_refuses_the_whole_call():
+    states = two_room_house()
+    rig = Rig(states)
+    assert rig.say("set the prism to candlelight", entity_id=f"{PRISM}, {BEDROOM_LAMP}", data={"effect": "candlelight"}) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_group_whose_leaves_are_in_another_room_is_refused():
+    states = two_room_house()
+    ROOMS_OF.update({PRISM: {"bedroom"}, STRIP: {"bedroom"}})
+    rig = Rig(states)
+    assert rig.say("set the study lights to candlelight", entity_id=GROUP, data={"effect": "candlelight"}) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_clear_is_grounded_too():
+    states = two_room_house()
+    states[BEDROOM_LAMP] = light(BEDROOM_LAMP, effect="candlelight")
+    rig = Rig(states)
+    assert rig.say("turn off the effect", entity_id=BEDROOM_LAMP, data={"effect": "off"}) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_light_call_without_an_effect_keeps_its_old_exemption():
+    """Pre-existing and out of scope: ordinary light calls are not grounded here."""
+    rig = Rig(two_room_house())
+    rig.say("turn on the prism", entity_id=BEDROOM_LAMP, data={"brightness": 50})
+    assert rig.writes and rig.writes[0][2]["entity_id"] == BEDROOM_LAMP
+
+
+def test_the_registry_and_configured_rooms_decide_which_room_a_light_is_in(monkeypatch):
+    monkeypatch.undo()  # the autouse stub off: the real lookup
+    from orchestrator import smart_home_controller as shc
+    snapshot = MagicMock()
+    snapshot.area_for = lambda leaf: type("Area", (), {"name": "Nightstand Room"})() if leaf == PRISM else None
+    monkeypatch.setattr(shc.SmartHomeController, "_registry_snapshot", staticmethod(lambda: snapshot))
+    monkeypatch.setattr(shc, "_room_lights_value", lambda: type("V", (), {"mapping": {"kitchen": (LAMP,)}})())
+    agent = AutomationAgent(MagicMock(), MagicMock())
+    assert agent._leaf_room_keys(PRISM) == {"nightstand_room"}
+    assert agent._leaf_room_keys(LAMP) == {"kitchen"}
+    assert agent._leaf_room_keys(STRIP) == set()
+
+
+def shc_no_device():
+    from orchestrator.smart_home_controller import NO_DEVICE_TEXT
+    return NO_DEVICE_TEXT
+
+
+# ----- F148: no template a non-owner can carry, in any part of the built config -------------------------
+
+TEMPLATE_TRIGGER = {"platform": "template", "value_template": "{{ states('sensor.secret') | float > 5 }}"}
+
+
+def test_a_guest_template_trigger_beside_a_valid_effect_action_is_refused():
+    rig = Rig()
+    reply = rig.schedule([effect_step()], perms=GUEST_ALL_LIGHTS, trigger={}, triggers=[TEMPLATE_TRIGGER])
+    assert reply == aa.TEMPLATE_REFUSED_TEXT and nothing_happened(rig)
+
+
+def test_the_same_config_registers_for_the_owner():
+    rig = Rig()
+    reply = rig.schedule([effect_step()], trigger={}, triggers=[TEMPLATE_TRIGGER])
+    assert reply.startswith("Created automation") and rig.registered[0]["trigger"] == [TEMPLATE_TRIGGER]
+
+
+@pytest.mark.parametrize("extra", [
+    {"conditions": [{"type": "state", "entity_id": "sensor.x", "state": "{{ states('sensor.y') }}"}]},
+    {"triggers": [{"platform": "state", "entity_id": "sensor.x", "to": "{{ 'on' }}"}], "trigger": {}},
+    {"triggers": [{"platform": "numeric_state", "entity_id": "sensor.x", "value_template": "{{ 1 }}"}], "trigger": {}},
+], ids=["condition", "state trigger", "numeric trigger"])
+def test_a_guest_template_anywhere_in_the_built_config_is_refused(extra):
+    rig = Rig()
+    assert rig.schedule([effect_step()], perms=GUEST_ALL_LIGHTS, **extra) == aa.TEMPLATE_REFUSED_TEXT
+    assert nothing_happened(rig)
+
+
+def test_a_guest_notification_text_stays_the_one_exception():
+    rig = Rig()
+    step = {"service": "notify.mobile", "data": {"message": "lights are on"}}
+    reply = rig.schedule([effect_step(), step], perms=GUEST_ALL_LIGHTS)
+    assert reply.startswith("Created automation")
+
+
+GUEST_ALL_LIGHTS = {**mp.apply_guest_baseline({"mode": "guest"})}
+
+
+def test_the_effects_own_words_do_not_name_a_light():
+    """A light that happens to be called "Twinkle" is not named by asking for the twinkle effect."""
+    states = two_room_house()
+    states[BEDROOM_LAMP]["attributes"]["friendly_name"] = "Twinkle"
+    rig = Rig(states)
+    assert rig.say("set the study lights to twinkle", entity_id=BEDROOM_LAMP, data={"effect": "twinkle"}) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_call_with_no_words_is_never_grounded():
+    rig = Rig(two_room_house())
+    leaves = [PRISM]
+    assert asyncio.run(rig.agent._effect_ungrounded(leaves, rig.manager.states, "candlelight", {})) == shc_no_device()
+    assert asyncio.run(rig.agent._effect_ungrounded(leaves, rig.manager.states, "candlelight", {"query": 5})) == shc_no_device()

@@ -207,9 +207,11 @@ def _delay_number(value: Any) -> bool:
 def _plain_delay(delay: Any) -> bool:
     """A delay Home Assistant takes with nothing to evaluate: seconds as a
     number, "HH:MM:SS" (optionally ".fff"), or a dict of day, hour, minute,
-    second and millisecond amounts. A template or any other shape is not."""
+    second and millisecond amounts (at least one, as Home Assistant requires). A
+    template or any other shape is not. A zero delay is plain: it means no wait,
+    and the builder leaves it out."""
     if isinstance(delay, dict):
-        return all(k in _DELAY_UNITS and _delay_number(v) for k, v in delay.items())
+        return bool(delay) and all(k in _DELAY_UNITS and _delay_number(v) for k, v in delay.items())
     if isinstance(delay, str):
         return _DELAY_CLOCK.fullmatch(delay) is not None
     return _delay_number(delay)
@@ -1127,6 +1129,51 @@ class AutomationAgent:
             scope,
         )
 
+    def _leaf_room_keys(self, leaf: str) -> set:
+        """The rooms a light is in: its registry area, and any room whose configured
+        lights hold it."""
+        from orchestrator.smart_home_controller import SmartHomeController, _room_lights_value  # lazy, like mode_permission (see above)
+        from shared.ha_registry import room_key
+        keys = set()
+        snapshot = SmartHomeController._registry_snapshot()
+        area = snapshot.area_for(leaf) if snapshot is not None else None
+        if area is not None:
+            keys.add(room_key(area.name))
+        keys.update(key for key, ids in _room_lights_value().mapping.items() if leaf in ids)
+        return keys
+
+    async def _effect_ungrounded(
+        self, leaves: List[str], entities: Mapping[str, Any], effect: Any, context: Dict,
+    ) -> Optional[str]:
+        """The refusal for an effect aimed at a light the user's words don't call
+        for, or None. Every light must be named in the words (the controller's own
+        name test, over the lights the caller may use) or be in a room the words
+        name; with no room named, the speaker's room counts. The model's choice of
+        ids is never enough: a request about one room must not write another."""
+        from orchestrator import room_context  # lazy, like mode_permission (see above)
+        from orchestrator.room_directory import current_directory
+        from orchestrator.smart_home_controller import NO_DEVICE_TEXT, SmartHomeController, _EffectNames, _plain_speaker_room
+        from shared.ha_registry import room_key
+        query = context.get("query")
+        if not isinstance(query, str):
+            return NO_DEVICE_TEXT
+        toks = light_effects.tokens(query)
+        span = light_effects.spoken_span(effect, toks) if isinstance(effect, str) else None
+        spoken = " ".join(toks[:span[0]] + toks[span[1]:]) if span else " ".join(toks)
+        directory = current_directory()
+        named = set(_EffectNames(entities, SmartHomeController._permitted_light_ids_now(entities), directory).named_lights(spoken))
+        rooms = {
+            candidate.key for mention in room_context.find_room_mentions(spoken, directory)
+            if not mention.in_exclusion for candidate in mention.candidates
+        }
+        if not rooms:
+            speaker = _plain_speaker_room(context.get("room"))
+            rooms = {room_key(speaker)} if speaker else set()
+        for leaf in leaves:
+            if leaf not in named and not (self._leaf_room_keys(leaf) & rooms):
+                return NO_DEVICE_TEXT
+        return None
+
     async def _effect_leaves(
         self, ids: List[str], *, ceiling: int = MAX_EFFECT_LEAVES,
     ) -> Tuple[Optional[str], List[str], Mapping[str, Any]]:
@@ -1205,6 +1252,9 @@ class AutomationAgent:
             return EFFECT_NOT_ALLOWED_TEXT, None, 0
         threshold = get_athena_config().ha_write_fanout_confirm_threshold
         refusal, leaves, entities = await self._effect_leaves(ids, ceiling=threshold or MAX_EFFECT_LEAVES)
+        if refusal:
+            return refusal, None, 0
+        refusal = await self._effect_ungrounded(leaves, entities, data["effect"], context)
         if refusal:
             return refusal, None, 0
         rest = _backed_params(
@@ -1336,15 +1386,23 @@ class AutomationAgent:
             refusal = self._built_effect_problem(ha_config, validated_args)
             if refusal:
                 return refusal
+            if _scope_permissions().get("mode", "owner") != "owner" and _template_refused(
+                {k: v for k, v in ha_config.items() if k not in ("id", "alias", "description")}
+            ):
+                return TEMPLATE_REFUSED_TEXT  # the whole built config: triggers, conditions, variables and actions
 
             # Register with Home Assistant
             await self._register_ha_automation(automation_id, ha_config)
 
             # Store in admin backend if available
             if self.admin:
-                await self._store_automation_record(
-                    automation_id, validated_args, context
+                # An automation that carries an effect is stored as registered: the built
+                # action list, not the arguments it was built from.
+                stored_args = (
+                    {**validated_args, "actions": ha_config["action"]}
+                    if _effect_entries(ha_config.get("action")) else validated_args
                 )
+                await self._store_automation_record(automation_id, stored_args, context)
 
             name = args.get("name", "Automation")
             trigger = args.get("trigger", {})
@@ -1433,6 +1491,9 @@ class AutomationAgent:
         if ids is None:
             return EFFECT_NOT_ALLOWED_TEXT, []
         refusal, leaves, entities = await self._effect_leaves(ids)
+        if refusal:
+            return refusal, []
+        refusal = await self._effect_ungrounded(leaves, entities, effect, context)
         if refusal:
             return refusal, []
         groups = self._spell_for_leaves(effect, leaves, entities)
