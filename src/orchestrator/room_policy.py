@@ -609,6 +609,15 @@ async def _boundary_cases(m: _Matrix) -> None:
                    call("homeassistant", "turn_on", {"entity_id": "scene.selftest_bad"}))
     await m.denied("scene_not_in_the_cache", "policy_protected_unverifiable",
                    call("scene", "turn_on", {"entity_id": "scene.selftest_unknown"}))
+    await m.denied("scene_apply_lists_a_bad_group", "policy_protected",
+                   call("scene", "apply", {"entities": {"group.selftest_bad": {}}}))
+    await m.denied("scene_create_snapshots_a_bad_scene", "policy_protected",
+                   call("scene", "create", {"scene_id": "x", "snapshot_entities": ["scene.selftest_bad"]}))
+    await m.denied("group_set_adds_a_bad_group", "policy_protected",
+                   call("group", "set", {"object_id": "x", "add_entities": ["group.selftest_bad"]}))
+    await m.denied("reload_lookalike_is_not_exempt", "policy_protected_unverifiable",
+                   call("input_boolean", "reload_all_the_things", {}))
+    await m.allowed("input_boolean_reload", call("input_boolean", "reload", {}))
     await m.allowed("scene_turn_on_plain", call("scene", "turn_on", {"entity_id": "scene.selftest_ok"}))
     await m.allowed("scene_turn_on_integration_scene", call("scene", "turn_on", {"entity_id": "scene.selftest_integration"}))
     await m.allowed("group_target_plain", call("homeassistant", "turn_off", {"entity_id": "group.selftest_ok"}))

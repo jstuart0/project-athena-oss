@@ -988,3 +988,56 @@ def test_an_oss_install_without_booleans_is_never_policy_active(fresh_engine_fla
                  service("input_boolean", "turn_on", {"entity_id": "input_boolean.coffee_leave_lights_on"})):
         reason, inner = attempt(call)
         assert reason is None and reached(inner) == 1
+
+
+# ---------------------------------------------------------------------------
+# last review round
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,call", [
+    ("scene_apply_lists_a_bad_group", service("scene", "apply", {"entities": {"group.bad": {"state": "on"}}})),
+    ("scene_apply_lists_a_bad_scene", service("scene", "apply", {"entities": ["scene.bad"]})),
+    ("scene_create_snapshots_a_bad_group", service("scene", "create", {"scene_id": "x", "snapshot_entities": ["group.bad"]})),
+    ("scene_create_snapshots_a_bad_scene", service("scene", "create", {"scene_id": "x", "snapshot_entities": "scene.bad"})),
+    ("scene_create_lists_a_nested_group", service("scene", "create", {"scene_id": "x", "entities": {"group.nested": {}}})),
+    ("group_set_adds_a_bad_group", service("group", "set", {"object_id": "g", "add_entities": ["group.bad"]})),
+    ("group_set_lists_a_bad_scene", service("group", "set", {"object_id": "g", "entities": "scene.bad"})),
+])
+def test_listed_groups_and_scenes_are_expanded_too(name, call):
+    reason, inner = attempt(call)
+    assert reason == mp.POLICY_PROTECTED and reached(inner) == 0, name
+
+
+def test_listed_groups_and_scenes_that_hold_nothing_protected_pass():
+    for call in (service("scene", "apply", {"entities": {"group.ok": {}}}),
+                 service("scene", "create", {"scene_id": "x", "snapshot_entities": ["scene.movie"]}),
+                 service("group", "set", {"object_id": "g", "add_entities": ["group.ok"]})):
+        reason, inner = attempt(call)
+        assert reason is None and reached(inner) == 1
+    reason, _ = attempt(service("group", "set", {"object_id": "g", "entities": ["group.unknown"]}))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE, "a listed group that can't be read"
+
+
+def test_only_the_named_reload_services_are_exempt_from_the_all_rule(monkeypatch):
+    set_extras(monkeypatch, "switch.engine_*")
+    for name in ("reload", "reload_all", "reload_core_config", "reload_config_entry"):
+        reason, inner = attempt(service("switch", name, {}))
+        assert reason is None and reached(inner) == 1, name
+    for name in ("reload_something_else", "reloader", "reload_"):
+        reason, _ = attempt(service("switch", name, {}))
+        assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE, name
+
+
+def test_a_non_ascii_alias_is_refused_while_an_extra_names_automations(monkeypatch):
+    config = {"alias": "Nacht\u00fcberwachung", "trigger": [], "action": []}
+    reason, inner = attempt(lambda g: g.create_automation("x", config))
+    assert reason is None and reached(inner) == 1, "no extra names automations: left alone"
+    set_extras(monkeypatch, EIGHT)
+    reason, inner = attempt(lambda g: g.create_automation("x", config))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE and reached(inner) == 0
+    reason, _ = attempt(lambda g: g.create_automation("x", {"alias": "Plain ascii", "trigger": [], "action": []}))
+    assert reason is None
+
+
+def test_the_docs_record_the_cold_start_limit():
+    assert "before the first entity fetch" in (ROOT / "docs" / "ROOM_POLICY.md").read_text()

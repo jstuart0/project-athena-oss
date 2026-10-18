@@ -145,6 +145,10 @@ loses its `input_boolean` entities after the engine was seen.
 - An existing script or automation that someone wrote in Home Assistant and
   that writes a protected helper can still be run: running owner-authored
   content is not policed (A-D12).
+- At startup, before the first entity fetch, the cache is cold: group, scene and
+  `input_*` calls are refused until that fetch completes.
+- While an extra names `automation.*`, an automation with a non-ASCII alias is
+  refused, since its entity id can't be worked out here.
 - Protection survives a script reload or restart once the process has seen the
   engine, but a process that starts while the scripts are missing protects
   nothing until they first appear (M1 residual).

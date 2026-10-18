@@ -784,3 +784,57 @@ def test_clear_and_disable_need_a_good_answer_too():
     for kind in ("clear", "disable"):
         assert answer_with({}, rp.PolicyRequest(kind, "study", "study")).reason == "bad_response"
         assert answer_with(GOOD, rp.PolicyRequest(kind, "study", "study")).ok
+
+
+# ---------------------------------------------------------------------------
+# slow and no-op script answers; the routing marker
+# ---------------------------------------------------------------------------
+
+def test_a_script_that_waits_for_the_engine_has_room_to_answer():
+    """room_policy_set and _clear can block about 3 s, 6 s queued behind another
+    call. The orchestrator's HA channel gives a request 30 s per phase, and
+    call_service_response sets no shorter timeout of its own."""
+    import inspect
+    from shared import ha_client, ha_http
+
+    assert ha_http.DEFAULT_TIMEOUT >= 15.0
+    main_source = (ROOT / "src" / "orchestrator" / "main.py").read_text()
+    channel_line = next(line for line in main_source.splitlines() if "HAChannel(resolver, latch" in line)
+    assert "timeout=" not in channel_line, "the orchestrator keeps the channel default"
+    body = inspect.getsource(ha_client.HomeAssistantClient.call_service_response)
+    request_call = next(line for line in body.splitlines() if "self._channel.request(" in line)
+    assert "timeout" not in request_call
+
+
+@pytest.mark.parametrize("kind", ["hold_on", "hold_off"])
+def test_a_stale_noop_answer_is_a_success_spoken_from_what_was_asked(kind):
+    """A repeated identical hold returns stale:true; it is confirmed, not an error."""
+    stale = FakePolicyHA(until="", stale=True)
+    outcome, ha, scope = apply_through_guard(rp.PolicyRequest(kind, "study", "study", duration_minutes=25), ha=stale)
+    assert outcome.ok and outcome.reason is None
+    assert outcome.speech.endswith("for 25 minutes.")
+    assert not scope.denials and len(ha.calls) == 1
+    outcome, _, _ = apply_through_guard(rp.PolicyRequest(kind, "study", "study"), ha=FakePolicyHA(until="", stale=True))
+    assert outcome.ok and NO_END in outcome.speech
+
+
+def test_a_stale_clear_and_disable_are_successes_too():
+    for kind in ("clear", "disable"):
+        outcome, _, _ = apply_through_guard(rp.PolicyRequest(kind, "study", "study"), ha=FakePolicyHA(stale=True))
+        assert outcome.ok, kind
+
+
+def test_a_room_is_a_policy_room_only_while_the_set_script_exists():
+    """After a rollback the ha_area attribute can linger on the state until the
+    next write; with the script gone the room is not routed."""
+    states = policy_states("suite", "primary_suite")
+    snapshot = registry([("primary_suite", "Primary Suite", [])])
+    assert rp.resolve("primary_suite", states, snapshot) == "suite"
+    del states["script.room_policy_set"]
+    assert states["input_text.suite_policy"]["attributes"]["ha_area"] == "primary_suite"
+    assert rp.policy_slugs(states) == frozenset() and dict(rp.policy_map(states)) == {}
+    assert rp.resolve("primary_suite", states, snapshot) is None
+    # the other two scripts do not stand in for it
+    states["script.room_policy_clear"] = _state("script.room_policy_clear")
+    states["script.room_policy_good_night"] = _state("script.room_policy_good_night")
+    assert rp.resolve("primary_suite", states, snapshot) is None

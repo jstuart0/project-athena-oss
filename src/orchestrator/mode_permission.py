@@ -1116,6 +1116,8 @@ _LISTED_MEMBER_KEYS = {
 # condition or the variables passed to a script say nothing about its targets.
 _TARGET_KEYS = ("entity_id", "target", "data", "service_data", "device_id", "area_id", "floor_id", "label_id")
 _EXPANDED_DOMAINS = ("group.", "scene.")
+# Services that take no target and reload configuration; the all/area rule leaves them alone.
+_RELOAD_SERVICES = frozenset({"reload", "reload_all", "reload_core_config", "reload_config_entry"})
 _MAX_EXPANSION_DEPTH, _MAX_EXPANDED_IDS = 3, 400
 
 # ``() -> the cached entity states``, or None when none are cached. Used to
@@ -1237,7 +1239,8 @@ def policy_protection(
         return None
     targets = [t.strip().lower() for t in _extract_targets(domain, service_data)]
     listed = _listed_member_ids(domain, service, service_data)
-    members, complete = _expand_members(targets, states)
+    members, complete = _expand_members(
+        targets + [i for i in listed if i.startswith(_EXPANDED_DOMAINS)], states)
     if (
         domain == "script" and service not in _SCRIPT_UNPROTECTED_SERVICES
         and is_policy_protected(f"script.{service}", policy_slugs, extras)
@@ -1250,7 +1253,7 @@ def policy_protection(
     all_target = f"{domain}.all" in targets
     if all_target and (
         domain.startswith("input_") or _extras_name_domain(extras, domain)
-    ) and not service.startswith("reload"):
+    ) and service not in _RELOAD_SERVICES:
         return POLICY_PROTECTED_UNVERIFIABLE
     if domain == "homeassistant" and service in _HOMEASSISTANT_TARGETING_SERVICES and all_target:
         return POLICY_PROTECTED_UNVERIFIABLE
@@ -1880,6 +1883,10 @@ def authorize_automation_config(
     # Writing a protected automation (an extra may name one) is a write to it,
     # whether by its id or by the entity id its alias would give.
     alias = config.get("alias") if isinstance(config, dict) else None
+    if isinstance(alias, str) and not alias.isascii() and _extras_name_domain(policy_extras(), "automation"):
+        # Home Assistant transliterates an alias into its entity id; this code
+        # can't do that, so it can't say which automation such an alias would be.
+        return HAWriteDecision(allowed=False, denied_targets=(), reason=POLICY_PROTECTED_UNVERIFIABLE)
     slug = re.sub(r"[^a-z0-9]+", "_", alias.lower()).strip("_") if isinstance(alias, str) else ""
     for own_id in dict.fromkeys([automation_id, slug] if slug else [automation_id]):
         own = _policy_denial("automation", "create", {"entity_id": f"automation.{own_id}"})
