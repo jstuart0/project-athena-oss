@@ -746,9 +746,23 @@ def test_an_empty_answer_does_not_read_as_no_end_time():
 
 
 def test_a_good_answer_with_a_dated_or_null_until_passes():
-    for until in ("", None, "2026-01-01T10:00:00-05:00", "2026-01-01T10:00:00+00:00"):
+    for until in ("", "2026-01-01T10:00:00-05:00", "2026-01-01T10:00:00+00:00", "2026-01-01T10:00:00Z"):
         outcome = answer_with({**GOOD, "until": until, "until_spoken": "10:00 AM" if until else ""})
         assert outcome.ok, until
+
+
+@pytest.mark.parametrize("until", [None, "2026-01-01T10:00:00", "2026-01-01", "10:00", "tomorrow", 0])
+def test_until_must_be_empty_or_a_timestamp_with_an_offset(until):
+    outcome = answer_with({**GOOD, "until": until})
+    assert outcome.reason == "bad_response", until
+
+
+@pytest.mark.parametrize("key", ["brightness_hold", "set_by"])
+def test_a_set_or_clear_answer_needs_brightness_hold_and_set_by(key):
+    assert answer_with({k: v for k, v in GOOD.items() if k != key}).reason == "bad_response"
+    assert answer_with({**GOOD, key: 5}).reason == "bad_response"
+    for kind in ("clear", "disable"):
+        assert answer_with({k: v for k, v in GOOD.items() if k != key}, rp.PolicyRequest(kind, "study", "study")).reason == "bad_response"
 
 
 @pytest.mark.parametrize("response", [

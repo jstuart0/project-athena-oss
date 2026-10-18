@@ -49,8 +49,28 @@ def _policy_world(monkeypatch):
     monkeypatch.delenv("HA_POLICY_PROTECTED_EXTRA", raising=False)
     shared.config._clear_cache_for_tests()
     mp.set_policy_room_source(lambda: frozenset({DEN}))
+    mp.set_policy_states_source(lambda: STATES)
     yield
+    mp.set_policy_states_source(None)
     shared.config._clear_cache_for_tests()
+
+
+def _members(entity_id, members):
+    return {entity_id: {"entity_id": entity_id, "state": "on", "attributes": {"entity_id": members}}}
+
+
+# The entity cache the guard reads group and scene members from.
+STATES = {
+    **_members("scene.movie", ["light.den"]),
+    **_members("scene.bad", [f"input_boolean.{DEN}_leave_lights_on"]),
+    **_members("group.bad", ["light.den", f"input_boolean.{DEN}_motion_disable"]),
+    **_members("group.nested", ["group.bad"]),
+    **_members("group.ok", ["light.den"]),
+    **_members("group.loop_a", ["group.loop_b"]), **_members("group.loop_b", ["group.loop_a", "light.den"]),
+    **_members("group.deep", ["group.d1"]), **_members("group.d1", ["group.d2"]), **_members("group.d2", ["group.d3"]),
+    **_members("group.d3", ["group.d4"]), **_members("group.d4", [f"input_boolean.{DEN}_leave_lights_on"]),
+    "scene.integration": {"entity_id": "scene.integration", "state": "on", "attributes": {"friendly_name": "x"}},
+}
 
 
 def set_extras(monkeypatch, value=EXTRAS):
@@ -179,9 +199,20 @@ CASES = [
     ("automation_data_template", lambda g: g.create_automation("x", {"action": [
         {"service": "input_boolean.turn_on", "data_template": {"entity_id": f"input_boolean.{DEN}_leave_lights_on"}}]}),
      mp.POLICY_PROTECTED_UNVERIFIABLE),
-    ("automation_template_deep_in_data", lambda g: g.create_automation("x", {"action": [
-        {"service": "script.turn_on", "data": {"variables": {"a": [{"b": "{% if x %}y{% endif %}"}]}, "entity_id": "script.good_night"}}]}),
+    ("automation_template_deep_in_data_entity", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "data": {"a": [{"entity_id": "{% if x %}script.y{% endif %}"}]}}]}),
      mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_script_variables_template_is_fine", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "target": {"entity_id": "script.good_night"},
+         "data": {"variables": {"a": [{"b": "{% if x %}y{% endif %}"}]}}}]}), None),
+    ("automation_alias_template_is_fine", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "alias": "{{ now() }}", "target": {"entity_id": "script.good_night"}}]}), None),
+    ("automation_wait_with_timeout", lambda g: g.create_automation("x", {"action": [
+        {"wait_template": "{{ is_state('light.a','on') }}", "timeout": 30, "continue_on_timeout": True}]}), None),
+    ("automation_inline_condition", lambda g: g.create_automation("x", {"action": [
+        {"condition": "state", "entity_id": "light.a", "state": "on"}]}), None),
+    ("automation_stop_with_error", lambda g: g.create_automation("x", {"action": [{"stop": "why", "error": True}]}), None),
+    ("automation_overwrites_nothing_protected_by_alias", lambda g: g.create_automation("x", {"alias": "Evening", "action": []}), None),
     ("automation_string_target", lambda g: g.create_automation("x", {"action": [
         {"service": "script.turn_on", "target": "{{ t }}"}]}), mp.POLICY_PROTECTED_UNVERIFIABLE),
     ("automation_string_data", lambda g: g.create_automation("x", {"action": [
@@ -664,8 +695,19 @@ def test_the_shape_rules_wait_for_a_policy_room_or_an_extra(name, call):
     assert reason is None and reached(inner) == 1, name
 
 
-def test_the_script_by_name_is_protected_even_with_no_policy_room():
+def test_nothing_is_refused_until_the_boundary_is_active():
+    """Parity with the build before the engine existed: no policy room and no
+    extra means no policy refusal, not even of the scripts by name or of
+    script.turn_on aimed at nothing."""
     mp.set_policy_room_source(lambda: frozenset())
+    for call in (service("script", "room_policy_set", {}), service("script", "turn_on", {"entity_id": "script.room_policy_set"}),
+                 service("script", "turn_on", {"area_id": "x"}), service("script", "turn_on", {}),
+                 service("scene", "turn_on", {"entity_id": "scene.not_in_the_cache"})):
+        reason, inner = attempt(call)
+        assert reason is None and reached(inner) == 1
+
+
+def test_the_scripts_by_name_are_protected_once_a_policy_room_exists():
     reason, _ = attempt(service("script", "room_policy_set", {}))
     assert reason == mp.POLICY_PROTECTED
 
@@ -759,7 +801,10 @@ def test_the_selftest_covers_every_class_this_file_pins(capsys):
     names = {name for name, _ in matrix.results}
     assert {"homeassistant_all", "protected_id_with_dummy_area", "registry_id_target", "scene_apply_entities",
             "scene_create_snapshot", "automation_data_template", "automation_device_action", "automation_scene_step",
-            "automation_event_step", "protection_survives_the_script_going_missing", "a_cache_without_input_booleans_is_cold",
+            "automation_event_step", "protection_survives_the_script_going_missing", "a_cache_that_lost_its_booleans_after_the_engine_is_cold", "an_empty_or_missing_cache_is_cold",
+            "no_booleans_and_no_engine_is_inactive", "the_engine_is_seen_before_the_cold_check", "group_set_adds_a_protected_id",
+            "nested_group_target", "scene_turn_on_with_a_protected_member", "scene_not_in_the_cache", "answer_until_null_is_not_confirmed",
+            "answer_without_brightness_hold_is_not_confirmed", "automation_wait_with_timeout",
             "area_not_a_policy_room", "field_until", "field_caller_area", "restricted_motion_disable"} <= names
     assert all(passed for _, passed in matrix.results)
 
@@ -804,3 +849,142 @@ def test_an_extra_naming_one_automation_protects_it_on_every_path(monkeypatch, c
         assert reason == mp.POLICY_PROTECTED and reached(inner) == 0, name
     reason, _ = attempt(service("automation", "turn_off", {"entity_id": "automation.other"}))
     assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# review round: domains an extra names, groups, scenes, parity, sticky
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("service_name", ["turn_on", "turn_off", "toggle", "trigger"])
+@pytest.mark.parametrize("data", [
+    {"entity_id": "all"}, {"area_id": "a"}, {"device_id": "d"}, {"label_id": "l"}, {"floor_id": "f"}, {},
+    {"target": {"area_id": "a"}}, {"data": {"label_id": "l"}},
+])
+def test_an_automation_call_aimed_at_all_or_an_area_is_refused_when_an_extra_names_automations(monkeypatch, service_name, data):
+    set_extras(monkeypatch, EIGHT)
+    reason, inner = attempt(service("automation", service_name, data))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE and reached(inner) == 0
+
+
+def test_the_same_call_is_left_alone_when_no_extra_names_the_domain(monkeypatch):
+    set_extras(monkeypatch, EXTRAS)
+    for domain in ("automation", "switch", "light"):
+        reason, inner = attempt(service(domain, "turn_off", {"entity_id": "all"}))
+        assert reason is None and reached(inner) == 1, domain
+
+
+def test_any_domain_an_extra_names_gets_the_all_and_area_rule(monkeypatch):
+    set_extras(monkeypatch, "switch.engine_*,climate.engine_*")
+    for domain in ("switch", "climate"):
+        for data in ({"entity_id": "all"}, {"area_id": "a"}):
+            reason, inner = attempt(service(domain, "turn_off", data))
+            assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE and reached(inner) == 0, (domain, data)
+    reason, _ = attempt(service("switch", "reload", {}))
+    assert reason is None
+    reason, _ = attempt(service("fan", "turn_off", {"entity_id": "all"}))
+    assert reason is None
+
+
+def test_the_kill_switch_button_stays_pressable_but_its_automation_is_protected(monkeypatch):
+    """A-D11: pressing the button is the emergency revert to the old behaviour."""
+    set_extras(monkeypatch, EIGHT)
+    reason, inner = attempt(service("input_button", "press", {"entity_id": "input_button.engine_kill_switch"}))
+    assert reason is None and reached(inner) == 1
+    for name in ("turn_off", "toggle", "trigger", "turn_on"):
+        reason, _ = attempt(service("automation", name, {"entity_id": "automation.engine_kill_switch"}))
+        assert reason == mp.POLICY_PROTECTED, name
+    reason, _ = attempt(lambda g: g.create_automation("anything", {"alias": "Engine Kill Switch", "action": []}))
+    assert reason == mp.POLICY_PROTECTED, "an alias that would give the protected entity id"
+    reason, _ = attempt(lambda g: g.create_automation("engine_kill_switch", {"alias": "x", "action": []}))
+    assert reason == mp.POLICY_PROTECTED
+
+
+@pytest.mark.parametrize("name,call,expected", [
+    ("group_set_entities", service("group", "set", {"object_id": "g", "entities": ["light.den", f"input_boolean.{DEN}_leave_lights_on"]}),
+     mp.POLICY_PROTECTED),
+    ("group_set_add_entities_string", service("group", "set", {"object_id": "g", "add_entities": f"light.a,input_boolean.{DEN}_policy"}),
+     mp.POLICY_PROTECTED),
+    ("group_set_entities_under_data", service("group", "set", {"data": {"entities": ["script.room_policy_set"]}}), mp.POLICY_PROTECTED),
+    ("group_set_templated", service("group", "set", {"object_id": "g", "entities": "{{ x }}"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("turn_off_a_group_with_a_protected_member", service("homeassistant", "turn_off", {"entity_id": "group.bad"}), mp.POLICY_PROTECTED),
+    ("turn_off_a_nested_group", service("homeassistant", "turn_off", {"entity_id": "group.nested"}), mp.POLICY_PROTECTED),
+    ("turn_off_a_group_through_input_boolean", service("input_boolean", "turn_off", {"entity_id": "group.bad"}), mp.POLICY_PROTECTED),
+    ("group_not_in_the_cache", service("homeassistant", "turn_off", {"entity_id": "group.unknown"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("group_nested_past_the_bound", service("homeassistant", "turn_off", {"entity_id": "group.deep"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("scene_turn_on_with_a_protected_member", service("scene", "turn_on", {"entity_id": "scene.bad"}), mp.POLICY_PROTECTED),
+    ("ha_turn_on_a_scene_with_a_protected_member", service("homeassistant", "turn_on", {"entity_id": "scene.bad"}), mp.POLICY_PROTECTED),
+    ("scene_not_in_the_cache", service("scene", "turn_on", {"entity_id": "scene.unknown"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("scene_among_other_targets", service("homeassistant", "turn_on", {"entity_id": ["light.den", "scene.bad"]}), mp.POLICY_PROTECTED),
+    ("a_plain_group", service("homeassistant", "turn_off", {"entity_id": "group.ok"}), None),
+    ("a_looping_group_that_holds_nothing_protected", service("homeassistant", "turn_off", {"entity_id": "group.loop_a"}), None),
+    ("a_plain_scene", service("scene", "turn_on", {"entity_id": "scene.movie"}), None),
+    ("an_integration_scene_with_no_member_list", service("scene", "turn_on", {"entity_id": "scene.integration"}), None),
+    ("group_set_plain", service("group", "set", {"object_id": "g", "entities": ["light.den"]}), None),
+])
+def test_groups_and_scenes_are_looked_into(name, call, expected):
+    reason, inner = attempt(call)
+    assert reason == expected, name
+    assert reached(inner) == (1 if expected is None else 0), name
+
+
+def test_without_an_entity_cache_a_scene_or_group_cannot_be_verified():
+    mp.set_policy_states_source(None)
+    for entity in ("scene.movie", "group.ok"):
+        reason, _ = attempt(service("homeassistant", "turn_on", {"entity_id": entity}))
+        assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE, entity
+    mp.set_policy_states_source(lambda: None)
+    reason, _ = attempt(service("scene", "turn_on", {"entity_id": "scene.movie"}))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE
+
+
+def test_groups_and_scenes_are_left_alone_until_the_boundary_is_active():
+    mp.set_policy_room_source(lambda: frozenset())
+    mp.set_policy_states_source(None)
+    for entity in ("scene.movie", "group.bad"):
+        reason, inner = attempt(service("homeassistant", "turn_on", {"entity_id": entity}))
+        assert reason is None and reached(inner) == 1, entity
+
+
+def test_the_main_registers_the_states_source():
+    text = (ROOT / "src" / "orchestrator" / "main.py").read_text()
+    assert text.count("set_policy_states_source(") == 1 and "cached_entities" in text
+
+
+# the sticky engine flag and the cold cache
+
+def booleans(*slugs):
+    return {f"input_boolean.{s}_motion_disable": {} for s in slugs}
+
+
+def test_the_engine_is_seen_in_a_snapshot_before_any_cold_check(fresh_engine_flag):
+    assert rp.protected_slugs({"script.room_policy_set": {}}) is None, "no booleans after seeing the engine: cold"
+    assert rp._engine_seen is True
+    snapshot = {**booleans(DEN), f"input_text.{DEN}_policy": {}}
+    assert rp.protected_slugs(snapshot) == {DEN}, "no script in this snapshot, still protected"
+
+
+def test_the_transition_script_seen_then_markers_without_the_script(fresh_engine_flag):
+    with_script = {**booleans(DEN), f"input_text.{DEN}_policy": {}, "script.room_policy_set": {}}
+    without = {k: v for k, v in with_script.items() if not k.startswith("script.")}
+    assert rp.protected_slugs(with_script) == {DEN}
+    assert rp.protected_slugs(without) == {DEN}
+    mp.set_policy_room_source(lambda: rp.protected_slugs(without))
+    reason, _ = attempt(service("input_boolean", "turn_on", {"entity_id": f"input_boolean.{DEN}_leave_lights_on"}))
+    assert reason == mp.POLICY_PROTECTED
+
+
+def test_the_distinctions_between_not_loaded_empty_and_loaded_without_booleans(fresh_engine_flag):
+    assert rp.protected_slugs(None) is None, "not loaded"
+    assert rp.protected_slugs({}) is None, "loaded but empty, right after start"
+    assert rp.protected_slugs({"light.a": {}}) == frozenset(), "loaded, no booleans, no engine ever seen: inactive"
+    assert not mp.policy_active(rp.protected_slugs({"light.a": {}}), ())
+    rp.protected_slugs({"script.room_policy_set": {}})
+    assert rp.protected_slugs({"light.a": {}}) is None, "the engine was seen: a cache that lost its booleans is cold"
+
+
+def test_an_oss_install_without_booleans_is_never_policy_active(fresh_engine_flag):
+    mp.set_policy_room_source(lambda: rp.protected_slugs({"light.a": {}, "switch.b": {}}))
+    for call in (service("homeassistant", "turn_off", {"entity_id": "all"}), service("script", "turn_on", {"area_id": "a"}),
+                 service("input_boolean", "turn_on", {"entity_id": "input_boolean.coffee_leave_lights_on"})):
+        reason, inner = attempt(call)
+        assert reason is None and reached(inner) == 1

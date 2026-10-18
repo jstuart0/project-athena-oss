@@ -43,8 +43,11 @@ Only these, only as `POST /api/services/script/<name>?return_response`:
 | `room_policy_good_night` | `area`, `caller_role` |
 
 `room_policy_set` answers with
-`{area, policy, brightness_hold, until, until_spoken, set_by, stale}`:
-`until` is an ISO-8601 string with an offset, or empty for no end;
+`{area, policy, brightness_hold, until, until_spoken, set_by, stale}`, every key
+required (`area` must be the room asked about, `brightness_hold` and `stale`
+booleans, the rest strings):
+`until` is an ISO-8601 timestamp with an offset, or `''` (never null, never a
+bare date or a time without an offset) for no end;
 `until_spoken` is a clock time (`7:30 AM`) or empty; `stale` is true when the
 state read back hasn't caught up. `room_policy_clear` answers the same way.
 `room_policy_good_night` answers `{area, until, until_spoken}`.
@@ -71,9 +74,9 @@ checks every field against the table above (no other key; `until` and
 hold, 5..480; a level only for a capture, 1..100; `set_by` is `voice`;
 `apply_now` is false), that `area` is one of its own policy rooms, and derives
 the writes the call stands for from the script and `kind`. Athena also checks
-the answer: `area` must be the room asked about, and `until`, `until_spoken`
-and `stale` (and `policy` for set and clear) must be present and well formed;
-otherwise nothing is confirmed aloud.
+the answer against the contract above (all keys present with the right types,
+`area` equal to the room asked about, `until` empty or a timestamp with an
+offset); otherwise nothing is confirmed aloud.
 
 ## Who may do it
 
@@ -99,8 +102,13 @@ other path to them:
 - a write whose targets can't be checked: `script.turn_on|turn_off|toggle`, an
   `input_*` service or `homeassistant.turn_on|turn_off|toggle|update_entity`
   aimed at an area, device, label, `all` or nothing; an entity-registry id; a
-  templated id. Ids listed beside an area still count, and so do the `entities`
-  and `snapshot_entities` of `scene.apply` and `scene.create`.
+  templated id; a service of any domain an extra names (an `automation.*` glob
+  covers `automation.turn_off` at `all`) aimed at all, an area or nothing; a
+  group or scene whose members can't be read. Ids listed beside an area still
+  count, and so do the `entities` and `snapshot_entities` of `scene.apply` and
+  `scene.create` and the members `group.set` adds. A group or scene a call
+  targets is looked into through the cached `attributes.entity_id`, nested up to
+  three levels; an integration's own scene with no member list is not.
 
 The same checks run on the steps of automations the agent creates and on
 scheduled sequence steps. While a policy room or an extra exists, a step that
@@ -118,6 +126,28 @@ filled, counts as cold: every helper of the policy shape is treated as protected
 `HA_POLICY_PROTECTED_EXTRA` is for the entities of the engine itself that
 Athena should never write, such as its scripts, enable switches and schedule
 helpers.
+
+### When the boundary is active
+
+All of the above is inert until a policy room or an extra exists (or the
+slugs can't be known), so an install without the engine behaves as it always
+did. It turns on when `protected_slugs` finds a room, or `HA_POLICY_PROTECTED_EXTRA`
+is non-empty. A cache that is loaded but holds no `input_boolean` and has never
+shown a `room_policy_*` script counts as inactive; a cache that was never
+loaded, or is empty, counts as cold and fails closed, as does a cache that
+loses its `input_boolean` entities after the engine was seen.
+
+### Accepted limits
+
+- Pressing the engine's kill-switch button stays allowed (it reverts a room to
+  the older behaviour, the safe direction); the automation behind it is the
+  thing to protect, with an extra.
+- An existing script or automation that someone wrote in Home Assistant and
+  that writes a protected helper can still be run: running owner-authored
+  content is not policed (A-D12).
+- Protection survives a script reload or restart once the process has seen the
+  engine, but a process that starts while the scripts are missing protects
+  nothing until they first appear (M1 residual).
 
 ## Checking a deployment
 

@@ -130,19 +130,26 @@ def protected_slugs(states: Optional[Mapping[str, Any]]) -> Optional[FrozenSet[s
     Wider than ``policy_slugs`` on purpose: a room's helpers stay protected
     while ``script.room_policy_set`` is briefly missing (a script reload, a
     Home Assistant restart) or its ``ha_area`` is blank, which would only stop
-    the *routing*. Protection needs ``input_text.<slug>_policy`` and
-    ``input_boolean.<slug>_motion_disable`` and that some ``room_policy_*``
-    script has been seen in this process (sticky). Until one has, nothing is
-    protected and every helper write goes through as it did before the engine
-    was published. A cache with no ``input_boolean`` at all is cold: None
-    (every helper of the policy shape is then protected)."""
+    the *routing*. Whether a ``room_policy_*`` script has been seen is
+    recorded from every snapshot first, before any other check, and once it
+    has (sticky, for the life of the process) the set comes from the helper
+    markers alone: ``input_text.<slug>_policy`` with
+    ``input_boolean.<slug>_motion_disable``. Until one has, nothing is
+    protected and helper writes go through as before the engine was
+    published, including in a house with no ``input_boolean`` at all.
+
+    Cold (None, every helper of the policy shape protected): nothing cached,
+    an empty cache, or a cache that lost its ``input_boolean`` entities after
+    the engine was seen."""
     global _engine_seen
-    if not isinstance(states, Mapping) or not any(
-        isinstance(i, str) and i.startswith(_MOTION_DISABLE_PREFIX) for i in states
-    ):
+    if not isinstance(states, Mapping):
         return None
     if not _engine_seen and any(isinstance(i, str) and i.startswith(_ENGINE_PREFIX) for i in states):
         _engine_seen = True
+    if not states:
+        return None
+    if not any(isinstance(i, str) and i.startswith(_MOTION_DISABLE_PREFIX) for i in states):
+        return None if _engine_seen else frozenset()
     if not _engine_seen:
         return frozenset()
     return frozenset(
@@ -291,16 +298,16 @@ def _refusal_message(exc: httpx.HTTPStatusError) -> str:
 
 
 def _valid_until(value: Any) -> bool:
-    """F4: empty (or null) for no end, else an ISO-8601 time."""
-    if value is None or value == "":
+    """F4: empty for no end, else an ISO-8601 timestamp with an offset (not
+    null, not naive, not a bare date)."""
+    if value == "":
         return True
     if not isinstance(value, str):
         return False
     try:
-        datetime.fromisoformat(value)
+        return datetime.fromisoformat(value).tzinfo is not None and "T" in value.upper()
     except ValueError:
         return False
-    return True
 
 
 def _response_problem(req: PolicyRequest, response: Mapping[str, Any]) -> Optional[str]:
@@ -308,7 +315,7 @@ def _response_problem(req: PolicyRequest, response: Mapping[str, Any]) -> Option
     confirmed aloud from an answer that fails: an empty answer must not read as
     "no end time"."""
     keys = ("area", "until", "until_spoken") if req.kind == "good_night" else (
-        "area", "policy", "until", "until_spoken", "stale")
+        "area", "policy", "brightness_hold", "until", "until_spoken", "set_by", "stale")
     missing = [key for key in keys if key not in response]
     if missing:
         return f"missing {missing[0]}"
@@ -318,8 +325,11 @@ def _response_problem(req: PolicyRequest, response: Mapping[str, Any]) -> Option
         return "until"
     if not isinstance(response["until_spoken"], str):
         return "until_spoken"
-    if req.kind != "good_night" and (not isinstance(response["policy"], str) or not isinstance(response["stale"], bool)):
-        return "policy or stale"
+    if req.kind != "good_night" and not (
+        isinstance(response["policy"], str) and isinstance(response["set_by"], str)
+        and isinstance(response["brightness_hold"], bool) and isinstance(response["stale"], bool)
+    ):
+        return "policy, set_by, brightness_hold or stale"
     return None
 
 
@@ -397,6 +407,23 @@ _SELFTEST_OTHER = "selftest_attic"
 _SELFTEST_RESPONSE = {
     "area": _SELFTEST_ROOM, "policy": "hold_on", "brightness_hold": False, "until": "", "until_spoken": "",
     "set_by": SET_BY, "stale": False,
+}
+_PROTECTED_HELPER = f"input_boolean.{_SELFTEST_ROOM}_leave_lights_on"
+
+
+def _member_state(entity_id: str, members: Optional[List[str]]) -> Dict[str, Any]:
+    attributes: Dict[str, Any] = {} if members is None else {"entity_id": members}
+    return {"entity_id": entity_id, "state": "on", "attributes": attributes}
+
+
+# What the guard reads group and scene members from during the self-test.
+_SELFTEST_STATES: Dict[str, Any] = {
+    "group.selftest_bad": _member_state("group.selftest_bad", ["light.selftest_lamp", _PROTECTED_HELPER]),
+    "group.selftest_nested": _member_state("group.selftest_nested", ["group.selftest_bad"]),
+    "group.selftest_ok": _member_state("group.selftest_ok", ["light.selftest_lamp"]),
+    "scene.selftest_bad": _member_state("scene.selftest_bad", [_PROTECTED_HELPER]),
+    "scene.selftest_ok": _member_state("scene.selftest_ok", ["light.selftest_lamp"]),
+    "scene.selftest_integration": _member_state("scene.selftest_integration", None),
 }
 
 
@@ -567,11 +594,49 @@ async def _boundary_cases(m: _Matrix) -> None:
                    config({"service": "homeassistant.turn_off", "target": {"entity_id": "all"}}))
     await m.allowed("automation_plain_light", config({"service": "light.turn_on", "target": {"entity_id": "light.x"}}))
 
+    await m.denied("group_set_adds_a_protected_id", "policy_protected",
+                   call("group", "set", {"object_id": "x", "entities": ["light.selftest_lamp", _PROTECTED_HELPER]}))
+    await m.denied("group_set_add_entities", "policy_protected",
+                   call("group", "set", {"object_id": "x", "add_entities": _PROTECTED_HELPER}))
+    await m.denied("group_target_with_a_protected_member", "policy_protected",
+                   call("homeassistant", "turn_off", {"entity_id": "group.selftest_bad"}))
+    await m.denied("nested_group_target", "policy_protected", call("homeassistant", "turn_off", {"entity_id": "group.selftest_nested"}))
+    await m.denied("group_target_not_in_the_cache", "policy_protected_unverifiable",
+                   call("homeassistant", "turn_off", {"entity_id": "group.selftest_unknown"}))
+    await m.denied("scene_turn_on_with_a_protected_member", "policy_protected",
+                   call("scene", "turn_on", {"entity_id": "scene.selftest_bad"}))
+    await m.denied("homeassistant_turn_on_a_protected_scene", "policy_protected",
+                   call("homeassistant", "turn_on", {"entity_id": "scene.selftest_bad"}))
+    await m.denied("scene_not_in_the_cache", "policy_protected_unverifiable",
+                   call("scene", "turn_on", {"entity_id": "scene.selftest_unknown"}))
+    await m.allowed("scene_turn_on_plain", call("scene", "turn_on", {"entity_id": "scene.selftest_ok"}))
+    await m.allowed("scene_turn_on_integration_scene", call("scene", "turn_on", {"entity_id": "scene.selftest_integration"}))
+    await m.allowed("group_target_plain", call("homeassistant", "turn_off", {"entity_id": "group.selftest_ok"}))
+    await m.allowed("automation_wait_with_timeout", config(
+        {"wait_template": "{{ is_state('light.x', 'on') }}", "timeout": 30, "continue_on_timeout": True},
+        {"condition": "state", "entity_id": "light.x", "state": "on"},
+        {"stop": "done", "error": False},
+        {"service": "light.turn_on", "alias": "{{ now() }}", "target": {"entity_id": "light.x"}}))
+    await m.allowed("automation_script_variables_template", config(
+        {"service": "script.turn_on", "target": {"entity_id": "script.good_night"},
+         "data": {"variables": {"when": "{{ now() }}"}}}))
+    await m.denied("automation_rewrites_a_protected_automation_by_alias", "policy_protected",
+                   lambda guard: guard.create_automation("fresh_id", {"alias": "Selftest Kill Switch", "trigger": [], "action": []}))        if _alias_extra() else m.record("automation_rewrites_a_protected_automation_by_alias", True)
+    if _extras_name("automation"):
+        for verb in ("turn_off", "turn_on", "toggle", "trigger"):
+            await m.denied(f"automation_{verb}_all", "policy_protected_unverifiable",
+                           call("automation", verb, {"entity_id": "all"}))
+        await m.denied("automation_area_target", "policy_protected_unverifiable",
+                       call("automation", "turn_off", {"area_id": "x"}))
+        await m.denied("automation_device_target", "policy_protected_unverifiable",
+                       call("automation", "turn_off", {"device_id": "x"}))
+        await m.denied("automation_label_target", "policy_protected_unverifiable",
+                       call("automation", "turn_off", {"label_id": "x"}))
+        await m.allowed("automation_reload", call("automation", "reload", {}))
     await m.allowed("other_room_helper", call(
         "input_boolean", "turn_on", {"entity_id": f"input_boolean.{_SELFTEST_OTHER}_leave_lights_on"}))
     await m.allowed("light", call("light", "turn_on", {"entity_id": "light.selftest_lamp"}))
     await m.allowed("unprotected_script", call("script", "turn_on", {"entity_id": "script.good_night"}))
-    await m.allowed("scene", call("scene", "turn_on", {"entity_id": "scene.selftest"}))
 
     for glob in mp.policy_extras():
         sample = _sample_for(glob)
@@ -585,6 +650,15 @@ async def _boundary_cases(m: _Matrix) -> None:
                                i, {"alias": "x", "trigger": [], "action": []}))
             await m.denied(f"extra_{glob}_delete", "policy_protected",
                            lambda guard, i=object_id: guard.delete_automation(i))
+
+
+def _extras_name(domain: str) -> bool:
+    return mp._extras_name_domain(mp.policy_extras(), domain)
+
+
+def _alias_extra() -> bool:
+    """Whether an extra names exactly the automation the self-test's alias would give."""
+    return "automation.selftest_kill_switch" in mp.policy_extras()
 
 
 async def _router_cases(m: _Matrix) -> None:
@@ -674,6 +748,10 @@ async def _router_cases(m: _Matrix) -> None:
     m.record("answer_wrong_area_is_not_confirmed", await bad_answer({**good, "area": _SELFTEST_OTHER}))
     m.record("answer_until_not_text_is_not_confirmed", await bad_answer({**good, "until": 5}))
     m.record("answer_missing_key_is_not_confirmed", await bad_answer({k: v for k, v in good.items() if k != "stale"}))
+    for key in ("brightness_hold", "set_by", "policy"):
+        m.record(f"answer_without_{key}_is_not_confirmed", await bad_answer({k: v for k, v in good.items() if k != key}))
+    for label, until in (("null", None), ("naive", "2026-01-01T10:00:00"), ("date_only", "2026-01-01")):
+        m.record(f"answer_until_{label}_is_not_confirmed", await bad_answer({**good, "until": until}))
 
     sent: Dict[str, Any] = {}
     m.record("apply_no_duration_no_end", await through_apply(sent) and "duration_minutes" not in sent
@@ -699,8 +777,14 @@ def _protection_cases(m: _Matrix) -> None:
         m.record("protection_ignores_a_blank_area", protected_slugs(no_area) == {den})
         m.record("routing_needs_the_script_and_the_area",
                  policy_slugs(no_script) == frozenset() and policy_slugs(no_area) == frozenset())
-        m.record("a_cache_without_input_booleans_is_cold",
-                 protected_slugs({_SET_ENTITY: {}}) is None and protected_slugs(None) is None)
+        m.record("a_cache_that_lost_its_booleans_after_the_engine_is_cold", protected_slugs({_SET_ENTITY: {}}) is None)
+        m.record("an_empty_or_missing_cache_is_cold", protected_slugs({}) is None and protected_slugs(None) is None)
+        _engine_seen = False
+        m.record("no_booleans_and_no_engine_is_inactive", protected_slugs({"light.x": {}}) == frozenset())
+        m.record("the_engine_is_seen_before_the_cold_check", protected_slugs({_SET_ENTITY: {}}) is None and _engine_seen)
+        m.record("protection_comes_from_the_markers_alone_once_seen", protected_slugs(no_script) == {den})
+        _engine_seen = False
+        m.record("a_boolean_less_cache_pre_engine_leaves_writes_alone", not mp.policy_active(protected_slugs({"light.x": {}}), ()))
     finally:
         _engine_seen = saved
 
@@ -709,12 +793,15 @@ async def _run_matrix() -> _Matrix:
     matrix = _Matrix()
     previous = mp._policy_room_source
     mp.set_policy_room_source(lambda: frozenset({_SELFTEST_ROOM}))
+    previous_states = mp._policy_states_source
+    mp.set_policy_states_source(lambda: _SELFTEST_STATES)
     try:
         await _boundary_cases(matrix)
         await _router_cases(matrix)
         _protection_cases(matrix)
     finally:
         mp.set_policy_room_source(previous)
+        mp.set_policy_states_source(previous_states)
     return matrix
 
 

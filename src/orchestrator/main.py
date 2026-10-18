@@ -211,6 +211,7 @@ from orchestrator.mode_permission import (
     PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
     set_policy_room_source,
+    set_policy_states_source,
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
@@ -1273,6 +1274,7 @@ async def lifespan(app: FastAPI):
     ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
     set_policy_room_source(_policy_slugs_from_cache(entity_manager))
+    set_policy_states_source(entity_manager.cached_entities if entity_manager is not None else lambda: None)
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="Home Assistant is not configured")
     if not degraded_permissions()["restricted_entities"]:
