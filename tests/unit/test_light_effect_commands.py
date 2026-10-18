@@ -550,7 +550,7 @@ def test_light_effects_is_a_first_import_in_the_cycle_check():
 
 import copy  # noqa: E402
 import json  # noqa: E402
-from unittest.mock import AsyncMock  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 from . import test_room_light_area_tier as tat  # noqa: E402
 from orchestrator.room_choice import storable_intent  # noqa: E402
@@ -1257,3 +1257,45 @@ def test_a_house_mode_phrase_writes_nothing_through_the_controller(monkeypatch, 
     word = text.replace("turn off ", "").replace(" off", "").replace(" mode", "")
     assert say(rig, text, {"effect": word}, action="clear_effect") in (shc.NO_WRITE_CUE_TEXT, shc.NO_DEVICE_TEXT)
     assert writes(rig) == []
+
+
+# -- the fast path feeding the writer (Phase 3) ------------------------------------------
+
+def _through_the_fast_path(rig, query, device_room="study"):
+    """extract_intent (no model: it fails if called) then execute_intent, under one scope."""
+    rig.controller.llm_router = MagicMock()
+    rig.controller.llm_router.generate = AsyncMock(side_effect=AssertionError("the model was called"))
+
+    async def go():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(query), trusted_voice=True):
+            body = await rig.controller.extract_intent(query, device_room=device_room)
+            return body, await rig.controller.execute_intent(body, rig.raw, query, device_room)
+
+    return asyncio.run(go())
+
+
+def test_the_reported_shape_sets_the_effect_with_no_model_call_and_one_write(monkeypatch):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", GOVEE_LIST)
+    rig = effect_rig(monkeypatch, states)
+    body, answer = _through_the_fast_path(rig, "set the study prism to candlelight")
+    assert body["action"] == "set_effect" and writes(rig) == [turn_on("light.study_lamp", "candlelight")]
+    assert answer == "Set the Study Prism to candlelight."
+
+
+def test_turn_off_the_effect_through_the_fast_path_clears_a_running_effect_and_leaves_lights_on(monkeypatch):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST, effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    body, answer = _through_the_fast_path(rig, "turn off the effect")
+    assert body["action"] == "clear_effect"
+    assert writes(rig) == [turn_on("light.study_lamp", "Solid")] and all(w[1] == "turn_on" for w in writes(rig))
+    assert answer == "Turned off the effect on the Study Prism."
+
+
+def test_turn_off_the_effect_through_the_fast_path_does_not_touch_an_off_light(monkeypatch):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST, state="off", effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    _, answer = _through_the_fast_path(rig, "turn off the effect")
+    assert writes(rig) == [] and answer == "There's no effect running on the Study Prism."

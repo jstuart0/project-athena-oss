@@ -175,7 +175,7 @@ Best for: Home Assistant integration, custom applications, automation scripts.
 
 Deep Home Assistant integration (4,500+ lines) with:
 
-- **Lights** — on/off, dimming, color (including sports team colors), room-specific and whole-house
+- **Lights** — on/off, dimming, color (including sports team colors), room-specific and whole-house, and light effects ("set the study prism to candlelight", "turn off the effect")
 - **Locks and garage doors** — lock, close and status ("lock it down for the night", "did I lock the front door?"). An unlock or an opening acts on one door you name ("unlock the front door") and asks "Which door?" otherwise
 - **Climate** — thermostat adjustments, fan control
 - **Occupancy** — "Is anyone home?", "Who's in the kitchen?"

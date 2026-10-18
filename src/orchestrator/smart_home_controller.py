@@ -515,6 +515,39 @@ def _build_effect_claimed_phrases() -> frozenset:
 _EFFECT_CLAIMED_PHRASES = _build_effect_claimed_phrases()
 
 
+class _EffectNames:
+    """What the words can call a light, over the lights a request may use.
+
+    ``names`` maps each leaf light (a group is no name) to the words that tell
+    it from its neighbours. ``named_lights(words)`` are the lights the words
+    call by name: every distinguishing word said, at least one beyond the
+    mentioned room's own words, the most specific only. The recogniser's two
+    questions, ``names_light`` and ``names_target`` (a room, the whole house or
+    a light), are answered from it."""
+
+    def __init__(self, states: Mapping[str, Any], permitted: Sequence[str], directory) -> None:
+        self._directory = directory
+        self.names = {
+            eid: room_context.distinguishing_tokens(eid, ((states.get(eid) or {}).get("attributes") or {}).get("friendly_name"))
+            for eid in permitted
+            if not isinstance((((states.get(eid) or {}).get("attributes") or {}).get("entity_id")), list)
+        }
+
+    def named_lights(self, spoken: str) -> List[str]:
+        have = set(light_effects.tokens(spoken))
+        mention = room_context.find_room_mention(spoken, self._directory)
+        room_words = set(light_effects.tokens(mention.phrase)) if mention.kind != "none" else set()
+        hits = {eid: want for eid, want in self.names.items() if want and want <= have and want - room_words}
+        return [eid for eid, want in hits.items() if not any(want < other for other in hits.values())]
+
+    def names_light(self, spoken: str) -> bool:
+        return bool(self.named_lights(spoken))
+
+    def names_target(self, spoken: str) -> bool:
+        return (room_context.find_room_mention(spoken, self._directory).kind != "none"
+                or room_context.is_explicit_whole_house(spoken) or self.names_light(spoken))
+
+
 def _same_effect(active: str, phrase: str) -> bool:
     """Whether a running effect is the one a clear names (any spelling); an empty
     phrase names none, so any running effect counts."""
@@ -1146,6 +1179,14 @@ class SmartHomeController:
                 "parameters": {"sensor_type": "window"},
                 "color_description": None
             }
+
+        # FAST PATH: light effects ("set the study prism to candlelight", "turn off the effect").
+        # Before the colour, scene and on/off paths so "put the study on fade" is not read as a
+        # colour; the recogniser leaves everything an existing path owns to that path.
+        effect_intent = self._effect_fast_intent(query, utterance)
+        if effect_intent is not None:
+            logger.info(f"Fast path light effect: action={effect_intent['action']}")
+            return effect_intent
 
         # FAST PATH: TV/Media Player commands
         # Detect "turn off the TV", "turn on the TV", etc.
@@ -4092,6 +4133,10 @@ Return ONLY valid JSON."""
 
     async def _permitted_light_ids(self, states: Mapping[str, Any]) -> List[str]:
         """The ``light.*`` ids in the states the request's permissions allow."""
+        return self._permitted_light_ids_now(states)
+
+    @staticmethod
+    def _permitted_light_ids_now(states: Mapping[str, Any]) -> List[str]:
         from orchestrator.mode_permission import check_entity_permission, current_ha_scope
         scope = current_ha_scope()
         return [
@@ -4099,6 +4144,51 @@ Return ONLY valid JSON."""
             if isinstance(eid, str) and eid.startswith("light.")
             and (scope is None or check_entity_permission(eid, scope.permissions))
         ]
+
+    def _effect_fast_intent(self, query: str, utterance: Optional[UtteranceClassification]) -> Optional[Dict]:
+        """The intent for a spoken light-effect request, or None.
+
+        No model and no I/O: the shape gate (tokens only) runs first, then the
+        utterance's own verdict (a question is never a request), and only then
+        the effect index, built from the entity manager's cached states and
+        reused until they change. A cold cache judges only the forms that need no
+        vocabulary. The request is re-derived from the words by the writer, so
+        this carries only what the cue and the writer's entry need: the action
+        (a clear is ``clear_effect``) and the phrase, which the cue checks against
+        the words. The room is left to the writer, which decides it."""
+        if not light_effects.has_effect_shape(query):
+            return None
+        kind = utterance.kind if utterance is not None else classify_utterance(query).kind
+        if kind == UtteranceKind.STATE_QUESTION:
+            return None
+        text = access_target.cue_text(query)
+        if not text:
+            return None
+        try:
+            states = self.entity_manager.cached_entities()
+            states = states if isinstance(states, dict) and states else None
+            index = light_effects.EffectIndex.for_states(states, self.entity_manager.cache_generation()) if states else None
+            permitted = self._permitted_light_ids_now(states) if states else []
+            tests = _EffectNames(states or {}, permitted, self._directory())
+            request = light_effects.recognise(
+                text, index, permitted, claimed=effect_word_claimed,
+                names_target=tests.names_target, names_light=tests.names_light,
+            )
+        except Exception as exc:
+            # A fast path never fails the turn: the ordinary path answers it.
+            import structlog
+            structlog.get_logger(__name__).warning("light_effect_fast_path_failed", error_class=type(exc).__name__)
+            return None
+        if request is None or (not request.clear and light_effects.is_clear_alias(request.phrase)):
+            return None
+        return {
+            "device_type": "light",
+            "room": None,
+            "action": "clear_effect" if request.clear else "set_effect",
+            "target_scope": "all_individual",
+            "parameters": {"effect": request.phrase, "clear": request.clear},
+            "color_description": None,
+        }
 
     async def _effect_is_listed(self, parameters: Any) -> bool:
         """Whether the effect a model named is in the effect list of a light the
@@ -4157,27 +4247,9 @@ Return ONLY valid JSON."""
         directory = self._directory()
         states = await self.entity_manager.get_entities()
         permitted = await self._permitted_light_ids(states)
-        names = {
-            eid: room_context.distinguishing_tokens(eid, ((states.get(eid) or {}).get("attributes") or {}).get("friendly_name"))
-            for eid in permitted
-            if not isinstance((((states.get(eid) or {}).get("attributes") or {}).get("entity_id")), list)
-        }
-
-        def named_lights(spoken: str) -> List[str]:
-            """Lights the words call by name: every distinguishing word said, at
-            least one beyond the mentioned room's words, the most specific only."""
-            have = set(light_effects.tokens(spoken))
-            mention = room_context.find_room_mention(spoken, directory)
-            room_words = set(light_effects.tokens(mention.phrase)) if mention.kind != "none" else set()
-            hits = {eid: want for eid, want in names.items() if want and want <= have and want - room_words}
-            return [eid for eid, want in hits.items() if not any(want < other for other in hits.values())]
-
-        def names_light(spoken: str) -> bool:
-            return bool(named_lights(spoken))
-
-        def names_target(spoken: str) -> bool:
-            return (room_context.find_room_mention(spoken, directory).kind != "none"
-                    or room_context.is_explicit_whole_house(spoken) or names_light(spoken))
+        tests = _EffectNames(states, permitted, directory)
+        names, named_lights = tests.names, tests.named_lights
+        names_light, names_target = tests.names_light, tests.names_target
 
         index = light_effects.EffectIndex.for_states(states, self.entity_manager.cache_generation())
         request = light_effects.recognise(
