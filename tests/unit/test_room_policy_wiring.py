@@ -95,3 +95,29 @@ def test_the_guard_gets_its_policy_rooms_right_after_it_is_built():
     built = main.index("ha_client = ensure_permission_enforcing(ha_client_raw)")
     registered = main.index("set_policy_room_source(_policy_slugs_from_cache(entity_manager))")
     assert built < registered < main.index("_runtime.set_ha_client(ha_client)") + 200
+
+
+def test_only_the_orchestrator_builds_or_imports_the_ha_guard():
+    """Every process that wraps an HA client in the guard registers the policy
+    source in orchestrator.main; none of the other services (gateway, jarvis-web,
+    admin, mode service, jetson) imports or constructs it."""
+    apps = SRC.parents[0] / "apps"
+    admin = SRC.parents[0] / "admin" / "backend" / "app"
+    outside = []
+    for root in (SRC, apps, admin):
+        for path in sorted(root.rglob("*.py")):
+            if "tests" in path.parts or (root == SRC and path.relative_to(SRC).parts[0] == "orchestrator"):
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                modules = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                    [node.module or ""] + [a.name for a in node.names] if isinstance(node, ast.ImportFrom) else [])
+                if any("mode_permission" in m for m in modules):
+                    outside.append(f"{path}:{node.lineno}")
+                if isinstance(node, ast.Call) and call_name(node) in ("PermissionEnforcingHAClient", "ensure_permission_enforcing"):
+                    outside.append(f"{path}:{node.lineno}")
+    assert outside == []
+    assert len(calls_of("ensure_permission_enforcing")) >= 5, "the orchestrator wraps its holders"

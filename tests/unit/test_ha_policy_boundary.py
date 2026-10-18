@@ -141,6 +141,74 @@ CASES = [
     ("automation_writes_helper", automation_calling(f"input_boolean.turn_on"), mp.POLICY_PROTECTED_UNVERIFIABLE),
     ("sequence_step_on_helper", sequence_step(f"input_boolean.{DEN}_motion_disable"), mp.POLICY_PROTECTED),
     ("sequence_step_on_script", sequence_step("script.room_policy_set"), mp.POLICY_PROTECTED),
+    # generic dispatchers and the explicit ids beside an area
+    ("ha_turn_off_all", service("homeassistant", "turn_off", {"entity_id": "all"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("ha_toggle_area", service("homeassistant", "toggle", {"area_id": "x"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("ha_turn_on_no_target", service("homeassistant", "turn_on", {}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("ha_update_entity_no_target", service("homeassistant", "update_entity", {}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("ha_all_in_target_block", service("homeassistant", "turn_off", {"target": {"entity_id": "all"}}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("helper_with_dummy_area", service("input_boolean", "turn_on", {"entity_id": f"input_boolean.{DEN}_leave_lights_on", "area_id": "x"}),
+     mp.POLICY_PROTECTED),
+    ("helper_with_dummy_device_in_target", service("homeassistant", "turn_on", {
+        "target": {"entity_id": f"input_boolean.{DEN}_leave_lights_on", "device_id": "d"}}), mp.POLICY_PROTECTED),
+    ("script_with_dummy_label", service("script", "turn_on", {"entity_id": "script.room_policy_set", "label_id": "l"}),
+     mp.POLICY_PROTECTED),
+    ("script_with_dummy_floor_in_data", service("script", "turn_on", {"data": {"entity_id": "script.room_policy_set", "floor_id": "f"}}),
+     mp.POLICY_PROTECTED),
+    ("registry_id_for_ha", service("homeassistant", "turn_on", {"entity_id": "0123456789abcdef0123456789abcdef"}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("registry_id_with_domain", service("homeassistant", "turn_on", {"entity_id": "input_boolean.0123456789abcdef0123456789abcdef"}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("registry_id_in_a_light_call", service("light", "turn_on", {"entity_id": "0123456789ABCDEF0123456789abcdef"}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("scene_apply_entities_dict", service("scene", "apply", {"entities": {f"input_boolean.{DEN}_leave_lights_on": {"state": "on"}}}),
+     mp.POLICY_PROTECTED),
+    ("scene_apply_entities_list", service("scene", "apply", {"entities": ["light.den", "script.room_policy_set"]}),
+     mp.POLICY_PROTECTED),
+    ("scene_apply_entities_under_data", service("scene", "apply", {"data": {"entities": {"script.room_policy_clear": "on"}}}),
+     mp.POLICY_PROTECTED),
+    ("scene_create_snapshot", service("scene", "create", {"scene_id": "x", "snapshot_entities": [f"input_text.{DEN}_policy"]}),
+     mp.POLICY_PROTECTED),
+    ("scene_create_snapshot_string", service("scene", "create", {"scene_id": "x", "snapshot_entities": f"light.a,input_boolean.{DEN}_motion_disable"}),
+     mp.POLICY_PROTECTED),
+    ("scene_apply_templated", service("scene", "apply", {"entities": "{{ states }}"}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("scene_apply_registry_id", service("scene", "apply", {"entities": {"0123456789abcdef0123456789abcdef": "on"}}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    # automation configs: the shape of a leaf step
+    ("automation_data_template", lambda g: g.create_automation("x", {"action": [
+        {"service": "input_boolean.turn_on", "data_template": {"entity_id": f"input_boolean.{DEN}_leave_lights_on"}}]}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_template_deep_in_data", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "data": {"variables": {"a": [{"b": "{% if x %}y{% endif %}"}]}, "entity_id": "script.good_night"}}]}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_string_target", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "target": "{{ t }}"}]}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_string_data", lambda g: g.create_automation("x", {"action": [
+        {"service": "input_boolean.turn_on", "data": "{{ d }}"}]}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_device_action_on_helper", lambda g: g.create_automation("x", {"action": [
+        {"domain": "input_boolean", "type": "turn_on", "device_id": "d", "entity_id": "e"}]}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_scene_step", lambda g: g.create_automation("x", {"action": [{"scene": "scene.movie"}]}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_event_step", lambda g: g.create_automation("x", {"action": [{"event": "anything"}]}),
+     mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_ha_all", lambda g: g.create_automation("x", {"action": [
+        {"service": "homeassistant.turn_off", "target": {"entity_id": "all"}}]}), mp.POLICY_PROTECTED_UNVERIFIABLE),
+    ("automation_helper_with_dummy_area", lambda g: g.create_automation("x", {"action": [
+        {"service": "input_boolean.turn_on", "target": {"entity_id": f"input_boolean.{DEN}_leave_lights_on", "area_id": "a"}}]}),
+     mp.POLICY_PROTECTED),
+    ("automation_scene_apply_protected", lambda g: g.create_automation("x", {"action": [
+        {"service": "scene.apply", "data": {"entities": {"script.room_policy_set": "on"}}}]}), mp.POLICY_PROTECTED),
+    ("ha_turn_on_explicit_light", service("homeassistant", "turn_on", {"entity_id": "light.den"}), None),
+    ("scene_apply_lights", service("scene", "apply", {"entities": {"light.den": {"state": "on"}}}), None),
+    ("scene_create_lights", service("scene", "create", {"scene_id": "x", "snapshot_entities": ["light.den"]}), None),
+    ("light_with_area", service("light", "turn_on", {"area_id": "den"}), None),
+    ("automation_plain_light", lambda g: g.create_automation("x", {"action": [
+        {"service": "light.turn_on", "target": {"entity_id": "light.den"}}, {"delay": "00:00:05"}]}), None),
+    ("automation_literal_unprotected_script", lambda g: g.create_automation("x", {"action": [
+        {"service": "script.turn_on", "target": {"entity_id": "script.good_night"}}]}), None),
+    ("automation_device_action_on_a_light", lambda g: g.create_automation("x", {"action": [
+        {"domain": "light", "type": "turn_on", "device_id": "d", "entity_id": "e"}]}), None),
     ("other_room_helper", service("input_boolean", "turn_on", {"entity_id": "input_boolean.attic_leave_lights_on"}), None),
     ("light", service("light", "turn_on", {"entity_id": "light.den"}), None),
     ("script_good_night", service("script", "turn_on", {"entity_id": "script.good_night"}), None),
@@ -151,7 +219,7 @@ CASES = [
 
 
 def test_the_matrix_has_its_floor():
-    assert len(CASES) >= 20
+    assert len(CASES) >= 60
     assert any(expected is None for *_, expected in CASES) and any(expected for *_, expected in CASES)
 
 
@@ -279,11 +347,10 @@ def test_the_policy_check_is_not_folded_into_authorize_ha_write():
 # run_policy_script
 # ---------------------------------------------------------------------------
 
-def run_script(*, script="room_policy_set", grant=None, equivalent=tuple(WRITES), fields=None, permissions=OWNER,
-               mode="owner", **scope):
+def run_script(*, script="room_policy_set", grant=None, fields=None, permissions=OWNER, mode="owner", **scope):
     def call(guard):
         return guard.run_policy_script(
-            script, dict(fields or FIELDS), grant=rp._GRANT if grant is None else grant, equivalent_writes=equivalent)
+            script, dict(FIELDS if fields is None else fields), grant=rp._GRANT if grant is None else grant)
     return attempt(call, permissions=permissions, mode=mode, **scope)
 
 
@@ -308,13 +375,14 @@ def test_degraded_allowed_as_today():
 def test_no_scope_is_allowed_as_today():
     guard, inner = make_guard()
     assert mp.current_ha_scope() is None
-    run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT, equivalent_writes=WRITES))
+    run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT))
     assert inner.call_service_response.await_count == 1
 
 
 @pytest.mark.parametrize("script", sorted(rp.POLICY_SCRIPTS))
 def test_each_of_the_three_scripts_can_run(script):
-    reason, inner = run_script(script=script)
+    fields = {"room_policy_set": FIELDS, "room_policy_clear": CLEAR, "room_policy_good_night": GOOD_NIGHT}[script]
+    reason, inner = run_script(script=script, fields=fields)
     assert reason is None and inner.call_service_response.await_args.args[:2] == ("script", script)
 
 
@@ -341,7 +409,7 @@ def test_read_only_halted_and_guest_are_refused():
     with mp.ha_permission_scope(OWNER, mode="owner") as scope:
         scope.halted = True
         with pytest.raises(mp.HAWritePermissionDenied) as caught:
-            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT, equivalent_writes=WRITES))
+            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT))
     assert caught.value.reason == "halted_after_denial" and reached(inner) == 0
 
 
@@ -351,9 +419,73 @@ def test_a_caller_role_other_than_owner_is_refused():
         assert reason == "policy_caller_role" and reached(inner) == 0, role
 
 
-def test_no_equivalent_writes_is_refused():
-    reason, inner = run_script(equivalent=())
-    assert reason == "entity_or_domain_denied" and reached(inner) == 0
+GOOD_NIGHT = {"area": DEN, "caller_role": "owner"}
+CLEAR = {"area": DEN, "caller_role": "owner", "clear_capture": True}
+
+
+@pytest.mark.parametrize("name,fields,script", [
+    ("until", {**FIELDS, "until": "2099-01-01T00:00:00+00:00"}, "room_policy_set"),
+    ("caller_area", {**FIELDS, "caller_area": "attic"}, "room_policy_set"),
+    ("unknown_key", {**FIELDS, "entity_id": "light.x"}, "room_policy_set"),
+    ("kind_not_sent_by_athena", {**FIELDS, "kind": "max_brightness"}, "room_policy_set"),
+    ("kind_missing", {k: v for k, v in FIELDS.items() if k != "kind"}, "room_policy_set"),
+    ("set_by", {**FIELDS, "set_by": "button"}, "room_policy_set"),
+    ("apply_now", {**FIELDS, "apply_now": True}, "room_policy_set"),
+    ("apply_now_missing", {k: v for k, v in FIELDS.items() if k != "apply_now"}, "room_policy_set"),
+    ("duration_low", {**FIELDS, "duration_minutes": 4}, "room_policy_set"),
+    ("duration_high", {**FIELDS, "duration_minutes": 481}, "room_policy_set"),
+    ("duration_text", {**FIELDS, "duration_minutes": "30"}, "room_policy_set"),
+    ("duration_bool", {**FIELDS, "duration_minutes": True}, "room_policy_set"),
+    ("duration_on_capture", {**FIELDS, "kind": "capture", "brightness": 40, "duration_minutes": 30}, "room_policy_set"),
+    ("brightness_on_hold", {**FIELDS, "brightness": 40}, "room_policy_set"),
+    ("capture_without_level", {**FIELDS, "kind": "capture"}, "room_policy_set"),
+    ("capture_level_zero", {**FIELDS, "kind": "capture", "brightness": 0}, "room_policy_set"),
+    ("capture_level_101", {**FIELDS, "kind": "capture", "brightness": 101}, "room_policy_set"),
+    ("area_missing", {k: v for k, v in FIELDS.items() if k != "area"}, "room_policy_set"),
+    ("area_not_a_slug", {**FIELDS, "area": "Den Room"}, "room_policy_set"),
+    ("area_not_text", {**FIELDS, "area": ["den"]}, "room_policy_set"),
+    ("clear_with_kind", {**CLEAR, "kind": "hold_on"}, "room_policy_clear"),
+    ("clear_capture_text", {**CLEAR, "clear_capture": "yes"}, "room_policy_clear"),
+    ("good_night_with_duration", {**GOOD_NIGHT, "duration_minutes": 30}, "room_policy_good_night"),
+    ("good_night_with_caller_area", {**GOOD_NIGHT, "caller_area": "attic"}, "room_policy_good_night"),
+])
+def test_fields_outside_the_contract_are_refused_before_any_call(name, fields, script):
+    reason, inner = run_script(script=script, fields=fields)
+    assert reason == "policy_fields" and reached(inner) == 0, name
+
+
+@pytest.mark.parametrize("script,fields", [
+    ("room_policy_set", {**FIELDS, "kind": "hold_off", "duration_minutes": 480}),
+    ("room_policy_set", {**FIELDS, "kind": "disable"}),
+    ("room_policy_set", {**FIELDS, "kind": "capture", "brightness": 1}),
+    ("room_policy_set", {**FIELDS, "duration_minutes": 5}),
+    ("room_policy_clear", CLEAR), ("room_policy_clear", {"area": DEN, "caller_role": "owner"}),
+    ("room_policy_good_night", GOOD_NIGHT),
+])
+def test_fields_inside_the_contract_pass(script, fields):
+    reason, inner = run_script(script=script, fields=fields)
+    assert reason is None and reached(inner) == 1
+
+
+def test_the_area_must_be_one_of_the_guards_own_policy_rooms():
+    reason, inner = run_script(fields={**FIELDS, "area": "attic"})
+    assert reason == "policy_area" and reached(inner) == 0
+    mp.set_policy_room_source(lambda: None)
+    reason, inner = run_script()
+    assert reason == "policy_area" and reached(inner) == 0, "a cold cache fails closed"
+    mp.set_policy_room_source(None)
+    reason, inner = run_script()
+    assert reason == mp.POLICY_SOURCE_MISSING and reached(inner) == 0
+
+
+def test_the_guard_does_not_take_the_callers_word_for_the_writes():
+    """run_policy_script has no parameter for them any more."""
+    assert "equivalent_writes" not in inspect.signature(mp.PermissionEnforcingHAClient.run_policy_script).parameters
+    restricted = {"mode": "degraded", "restricted_entities": [r".*_motion_disable$"], "allowed_domains": []}
+    for kind in ("hold_on", "hold_off", "disable", "capture"):
+        extra = {"brightness": 30} if kind == "capture" else {}
+        reason, inner = run_script(fields={**FIELDS, "kind": kind, **extra}, permissions=restricted, mode="owner")
+        assert reason == "entity_or_domain_denied" and reached(inner) == 0, kind
 
 
 def test_a_restricted_helper_is_refused_with_no_call():
@@ -362,12 +494,10 @@ def test_a_restricted_helper_is_refused_with_no_call():
 
 
 def test_good_night_is_authorized_as_the_script_it_replaces():
-    good_night = dict(area=DEN, caller_role="owner")
-    reason, inner = run_script(script="room_policy_good_night", equivalent=("script.good_night",), fields=good_night)
+    reason, inner = run_script(script="room_policy_good_night", fields=GOOD_NIGHT)
     assert reason is None and inner.call_service_response.await_count == 1
     reason, inner = run_script(
-        script="room_policy_good_night", equivalent=("script.good_night",), fields=good_night,
-        permissions=mp.degraded_permissions(), mode="owner")
+        script="room_policy_good_night", fields=GOOD_NIGHT, permissions=mp.degraded_permissions(), mode="owner")
     assert reason == "entity_or_domain_denied" and reached(inner) == 0, "the degraded floor refuses scripts, as today"
 
 
@@ -379,18 +509,18 @@ def test_the_inner_error_and_shape_error_reach_the_caller():
     inner.call_service_response.side_effect = HAResponseShapeError("x")
     with mp.ha_permission_scope(OWNER, mode="owner"):
         with pytest.raises(HAResponseShapeError):
-            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT, equivalent_writes=WRITES))
+            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT))
     request = httpx.Request("POST", "http://ha/x")
     inner.call_service_response.side_effect = httpx.HTTPStatusError("x", request=request, response=httpx.Response(400, request=request))
     with mp.ha_permission_scope(OWNER, mode="owner"):
         with pytest.raises(httpx.HTTPStatusError):
-            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT, equivalent_writes=WRITES))
+            run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT))
 
 
 def test_an_allowed_run_counts_as_a_write():
     guard, _ = make_guard()
     with mp.ha_permission_scope(OWNER, mode="owner") as scope:
-        run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT, equivalent_writes=WRITES))
+        run(guard.run_policy_script("room_policy_set", dict(FIELDS), grant=rp._GRANT))
         assert scope.allowed_writes == 1 and not scope.denials
 
 
@@ -511,3 +641,134 @@ def test_the_config_field_is_documented():
         text = (ROOT / relative).read_text()
         for name in names:
             assert name in text, (relative, name)
+
+
+# ---------------------------------------------------------------------------
+# nothing changes until a policy room or an extra exists
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,call", [
+    ("ha_all", service("homeassistant", "turn_off", {"entity_id": "all"})),
+    ("ha_area", service("homeassistant", "update_entity", {"area_id": "x"})),
+    ("registry_id", service("homeassistant", "update_entity", {"entity_id": "0123456789abcdef0123456789abcdef"})),
+    ("scene_apply_helper", service("scene", "apply", {"entities": {"input_boolean.attic_leave_lights_on": "on"}})),
+    ("helper_with_area", service("input_boolean", "turn_on", {"entity_id": f"input_boolean.{DEN}_leave_lights_on", "area_id": "a"})),
+    ("automation_event", lambda g: g.create_automation("x", {"action": [{"event": "anything"}]})),
+    ("automation_scene", lambda g: g.create_automation("x", {"action": [{"scene": "scene.movie"}]})),
+    ("automation_data_template", lambda g: g.create_automation("x", {"action": [
+        {"service": "input_boolean.turn_on", "data_template": {"entity_id": "input_boolean.attic_leave_lights_on"}}]})),
+])
+def test_the_shape_rules_wait_for_a_policy_room_or_an_extra(name, call):
+    mp.set_policy_room_source(lambda: frozenset())
+    reason, inner = attempt(call)
+    assert reason is None and reached(inner) == 1, name
+
+
+def test_the_script_by_name_is_protected_even_with_no_policy_room():
+    mp.set_policy_room_source(lambda: frozenset())
+    reason, _ = attempt(service("script", "room_policy_set", {}))
+    assert reason == mp.POLICY_PROTECTED
+
+
+def test_an_extra_alone_switches_the_shape_rules_on(monkeypatch):
+    mp.set_policy_room_source(lambda: frozenset())
+    set_extras(monkeypatch)
+    reason, _ = attempt(service("homeassistant", "turn_off", {"entity_id": "all"}))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE
+
+
+def test_a_cold_cache_switches_the_shape_rules_on():
+    mp.set_policy_room_source(lambda: None)
+    reason, _ = attempt(service("homeassistant", "turn_off", {"entity_id": "all"}))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE
+
+
+def test_extract_targets_keeps_the_listed_ids_beside_the_pseudo_target():
+    assert mp._extract_targets("homeassistant", {"entity_id": "script.a", "area_id": "x"}) == [
+        "homeassistant.all", "script.a"]
+    assert mp._extract_targets("homeassistant", {"target": {"entity_id": ["a.b", "all"], "device_id": "d"}}) == [
+        "homeassistant.all", "a.b"]
+    assert mp._extract_targets("light", {"area_id": "x"}) == ["light.all"]
+
+
+# ---------------------------------------------------------------------------
+# which slugs are protected (M1): wider than which are routed
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fresh_engine_flag():
+    rp._reset_engine_seen_for_tests()
+    yield
+    rp._reset_engine_seen_for_tests()
+
+
+def test_before_the_engine_is_published_nothing_is_protected(fresh_engine_flag):
+    states = house_states(set_script=False)
+    assert rp.protected_slugs(states) == frozenset()
+    mp.set_policy_room_source(lambda: rp.protected_slugs(states))
+    reason, inner = attempt(service("input_boolean", "turn_on", {"entity_id": f"input_boolean.{DEN}_leave_lights_on"}))
+    assert reason is None and reached(inner) == 1, "direct writes work exactly as before the engine"
+
+
+def test_protection_survives_the_script_going_missing(fresh_engine_flag):
+    assert rp.protected_slugs(house_states()) == {"den"}
+    gone = house_states(set_script=False)
+    assert rp.protected_slugs(gone) == {"den"}, "a script reload or a restart of Home Assistant"
+    assert rp.policy_slugs(gone) == frozenset(), "routing stops; protection does not"
+    mp.set_policy_room_source(lambda: rp.protected_slugs(gone))
+    reason, _ = attempt(service("input_boolean", "turn_on", {"entity_id": f"input_boolean.{DEN}_leave_lights_on"}))
+    assert reason == mp.POLICY_PROTECTED
+
+
+def test_any_room_policy_script_marks_the_engine_seen(fresh_engine_flag):
+    states = house_states(set_script=False)
+    states["script.room_policy_get"] = state("script.room_policy_get")
+    assert rp.protected_slugs(states) == {"den"}
+
+
+@pytest.mark.parametrize("area", [None, "", "  ", "Not An Area!"])
+def test_a_bad_ha_area_stops_routing_only(fresh_engine_flag, area):
+    states = house_states((("den", area),))
+    assert rp.protected_slugs(states) == {"den"}
+    assert area not in (None, "", "  ") or rp.policy_slugs(states) == frozenset()
+
+
+def test_the_markers_protection_needs(fresh_engine_flag):
+    assert rp.protected_slugs(house_states(boolean=False) | {"input_boolean.other": state("input_boolean.other")}) == frozenset()
+    states = house_states()
+    del states["input_text.den_policy"]
+    assert rp.protected_slugs(states) == frozenset()
+
+
+def test_a_cache_with_no_input_booleans_is_cold(fresh_engine_flag):
+    assert rp.protected_slugs({"light.a": {}, "script.room_policy_set": {}}) is None
+    assert rp.protected_slugs({}) is None and rp.protected_slugs(None) is None
+    mp.set_policy_room_source(lambda: rp.protected_slugs({"light.a": {}}))
+    reason, _ = attempt(service("input_boolean", "turn_on", {"entity_id": "input_boolean.attic_leave_lights_on"}))
+    assert reason == mp.POLICY_PROTECTED, "fail closed for a helper of the policy shape"
+
+
+def test_the_main_source_reads_the_protected_set():
+    text = (ROOT / "src" / "orchestrator" / "main.py").read_text()
+    assert "room_policy.protected_slugs(states)" in text
+
+
+def test_the_selftest_covers_every_class_this_file_pins(capsys):
+    """Names the matrix must contain (a new bypass class goes into both)."""
+    matrix = asyncio.run(rp._run_matrix())
+    names = {name for name, _ in matrix.results}
+    assert {"homeassistant_all", "protected_id_with_dummy_area", "registry_id_target", "scene_apply_entities",
+            "scene_create_snapshot", "automation_data_template", "automation_device_action", "automation_scene_step",
+            "automation_event_step", "protection_survives_the_script_going_missing", "a_cache_without_input_booleans_is_cold",
+            "area_not_a_policy_room", "field_until", "field_caller_area", "restricted_motion_disable"} <= names
+    assert all(passed for _, passed in matrix.results)
+
+
+@pytest.mark.parametrize("service_name", ["turn_on", "turn_off", "toggle"])
+@pytest.mark.parametrize("data", [
+    {"entity_id": "all"}, {"entity_id": "ALL"}, {"target": {"entity_id": "all"}}, {"data": {"entity_id": "all"}},
+    {"entity_id": ["all"]}, {"entity_id": "all, light.den"}, {},
+])
+def test_homeassistant_turn_on_off_toggle_with_all_is_refused(service_name, data):
+    reason, inner = attempt(service("homeassistant", service_name, data))
+    assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE and reached(inner) == 0

@@ -32,8 +32,10 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import AbstractSet, Any, Awaitable, Callable, Dict, FrozenSet, List, Literal, Mapping, Optional, Sequence, Tuple
 
 import httpx
@@ -108,8 +110,48 @@ def _slug_areas(states: Mapping[str, Any]) -> Dict[str, str]:
 
 
 def policy_slugs(states: Mapping[str, Any]) -> FrozenSet[str]:
-    """The slugs of the rooms whose lighting Home Assistant's policy engine runs."""
+    """The slugs of the rooms Athena routes to the policy scripts: the rooms
+    whose lighting Home Assistant's policy engine runs, with their area."""
     return frozenset(_slug_areas(states))
+
+
+_ENGINE_PREFIX = "script.room_policy_"
+_engine_seen = False
+
+
+def _reset_engine_seen_for_tests() -> None:
+    global _engine_seen
+    _engine_seen = False
+
+
+def protected_slugs(states: Optional[Mapping[str, Any]]) -> Optional[FrozenSet[str]]:
+    """The slugs whose helpers the guard protects; None when that can't be known.
+
+    Wider than ``policy_slugs`` on purpose: a room's helpers stay protected
+    while ``script.room_policy_set`` is briefly missing (a script reload, a
+    Home Assistant restart) or its ``ha_area`` is blank, which would only stop
+    the *routing*. Protection needs ``input_text.<slug>_policy`` and
+    ``input_boolean.<slug>_motion_disable`` and that some ``room_policy_*``
+    script has been seen in this process (sticky). Until one has, nothing is
+    protected and every helper write goes through as it did before the engine
+    was published. A cache with no ``input_boolean`` at all is cold: None
+    (every helper of the policy shape is then protected)."""
+    global _engine_seen
+    if not isinstance(states, Mapping) or not any(
+        isinstance(i, str) and i.startswith(_MOTION_DISABLE_PREFIX) for i in states
+    ):
+        return None
+    if not _engine_seen and any(isinstance(i, str) and i.startswith(_ENGINE_PREFIX) for i in states):
+        _engine_seen = True
+    if not _engine_seen:
+        return frozenset()
+    return frozenset(
+        entity_id[len(_POLICY_PREFIX):-len(_POLICY_SUFFIX)]
+        for entity_id in states
+        if isinstance(entity_id, str) and entity_id.startswith(_POLICY_PREFIX) and entity_id.endswith(_POLICY_SUFFIX)
+        and len(entity_id) > len(_POLICY_PREFIX) + len(_POLICY_SUFFIX)
+        and f"{_MOTION_DISABLE_PREFIX}{entity_id[len(_POLICY_PREFIX):-len(_POLICY_SUFFIX)]}{_MOTION_DISABLE_SUFFIX}" in states
+    )
 
 
 def policy_map(states: Mapping[str, Any]) -> Mapping[str, str]:
@@ -229,6 +271,10 @@ def _speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
     return f"Good night! The {room} lights are off and set for the night.{tail}"
 
 
+# Entity ids (including registry ids) and URLs never reach the speaker.
+_ENTITY_OR_URL = re.compile(r"https?://\S+|\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b|\b[0-9a-f]{32}\b", re.IGNORECASE)
+
+
 def _refusal_message(exc: httpx.HTTPStatusError) -> str:
     """What the script said when it refused, capped, never the entity ids it
     doesn't contain and never the raw body."""
@@ -239,8 +285,42 @@ def _refusal_message(exc: httpx.HTTPStatusError) -> str:
             message = body["message"]
     except ValueError:
         pass
+    message = _ENTITY_OR_URL.sub("that", message)
     message = " ".join((message or "that wasn't allowed").split())
     return message[:MAX_REFUSAL_CHARS]
+
+
+def _valid_until(value: Any) -> bool:
+    """F4: empty (or null) for no end, else an ISO-8601 time."""
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _response_problem(req: PolicyRequest, response: Mapping[str, Any]) -> Optional[str]:
+    """What is wrong with a script's answer against F4, else None. Nothing is
+    confirmed aloud from an answer that fails: an empty answer must not read as
+    "no end time"."""
+    keys = ("area", "until", "until_spoken") if req.kind == "good_night" else (
+        "area", "policy", "until", "until_spoken", "stale")
+    missing = [key for key in keys if key not in response]
+    if missing:
+        return f"missing {missing[0]}"
+    if response["area"] != req.slug:
+        return "area"
+    if not _valid_until(response["until"]):
+        return "until"
+    if not isinstance(response["until_spoken"], str):
+        return "until_spoken"
+    if req.kind != "good_night" and (not isinstance(response["policy"], str) or not isinstance(response["stale"], bool)):
+        return "policy or stale"
+    return None
 
 
 def _refused(reason: Reason, speech: str) -> PolicyOutcome:
@@ -270,15 +350,13 @@ async def apply(
     req: PolicyRequest,
     ha: Any,
     *,
-    equivalent_writes: Sequence[str],
     policy_slugs: AbstractSet[str],
 ) -> PolicyOutcome:
     """Carry out one request through the room's policy script.
 
-    ``ha`` is the permission-enforcing HA client. ``equivalent_writes`` are the
-    ids the direct writes this replaces would have touched; the guard
-    authorizes the caller against them (docs/ROOM_POLICY.md). ``policy_slugs``
-    is the set from the snapshot the room was resolved in."""
+    ``ha`` is the permission-enforcing HA client; it checks the fields, the
+    room and the caller itself (docs/ROOM_POLICY.md). ``policy_slugs`` is the
+    set from the snapshot the room was resolved in."""
     room = req.spoken_room
     if req.slug in WHOLE_HOUSE_WORDS or (req.spoken_room or "").strip().lower().replace(" ", "_") in WHOLE_HOUSE_WORDS:
         return _refused("whole_house", "Tell me which room to change.")
@@ -288,9 +366,7 @@ async def apply(
     failure: Optional[PolicyOutcome] = None
     response: Any = None
     try:
-        response = await ha.run_policy_script(
-            script, fields, grant=_GRANT, equivalent_writes=tuple(equivalent_writes),
-        )
+        response = await ha.run_policy_script(script, fields, grant=_GRANT)
     except mp.HAWritePermissionDenied as exc:
         failure = _denied(exc)
     except httpx.HTTPStatusError as exc:
@@ -303,7 +379,8 @@ async def apply(
         failure = _refused("ha_unavailable", "I couldn't reach Home Assistant just now.")
     if failure is not None:
         return failure
-    if not isinstance(response, Mapping):
+    if not isinstance(response, Mapping) or _response_problem(req, response):
+        logger.warning("room_policy_bad_response", script=script)
         return _refused("bad_response", _UNCONFIRMED)
     logger.info("room_policy_applied", script=script, kind=req.kind)
     return PolicyOutcome(ok=True, speech=_speech(req, response), response=response)
@@ -326,8 +403,9 @@ _SELFTEST_RESPONSE = {
 class _RecordingInner:
     """Stands in for the HA client: records every call, talks to nothing."""
 
-    def __init__(self) -> None:
+    def __init__(self, response: Optional[Mapping[str, Any]] = None) -> None:
         self.calls: List[Tuple[str, str, Any]] = []
+        self.response = dict(_SELFTEST_RESPONSE) if response is None else dict(response)
 
     async def call_service(self, domain: str, service: str, service_data: Any = None) -> Dict[str, Any]:
         self.calls.append((domain, service, service_data))
@@ -335,7 +413,7 @@ class _RecordingInner:
 
     async def call_service_response(self, domain: str, service: str, service_data: Any = None) -> Dict[str, Any]:
         self.calls.append((domain, service, service_data))
-        return dict(_SELFTEST_RESPONSE)
+        return dict(self.response)
 
     async def create_automation(self, automation_id: str, config: Any) -> bool:
         self.calls.append(("automation", "create", automation_id))
@@ -447,6 +525,48 @@ async def _boundary_cases(m: _Matrix) -> None:
     finally:
         mp.set_policy_room_source(previous)
 
+    protected_helper = f"input_boolean.{den}_leave_lights_on"
+    await m.denied("homeassistant_all", "policy_protected_unverifiable",
+                   call("homeassistant", "turn_off", {"entity_id": "all"}))
+    for verb in ("turn_on", "turn_off", "toggle"):
+        await m.denied(f"homeassistant_{verb}_all", "policy_protected_unverifiable",
+                       call("homeassistant", verb, {"entity_id": "all"}))
+    await m.denied("homeassistant_area_only", "policy_protected_unverifiable",
+                   call("homeassistant", "toggle", {"area_id": "x"}))
+    await m.denied("protected_id_with_dummy_area", "policy_protected",
+                   call("homeassistant", "turn_on", {"entity_id": protected_helper, "area_id": "x"}))
+    await m.denied("protected_script_with_dummy_device", "policy_protected",
+                   call("script", "turn_on", {"entity_id": _SET_ENTITY, "device_id": "x"}))
+    await m.denied("registry_id_target", "policy_protected_unverifiable",
+                   call("homeassistant", "turn_on", {"entity_id": "0123456789abcdef0123456789abcdef"}))
+    await m.denied("scene_apply_entities", "policy_protected",
+                   call("scene", "apply", {"entities": {protected_helper: {"state": "on"}}}))
+    await m.denied("scene_create_snapshot", "policy_protected",
+                   call("scene", "create", {"scene_id": "x", "snapshot_entities": [protected_helper]}))
+    await m.denied("scene_apply_templated", "policy_protected_unverifiable",
+                   call("scene", "apply", {"entities": "{{ states }}"}))
+
+    def config(*steps: Dict[str, Any]):
+        async def body(guard: Any) -> Any:
+            return await guard.create_automation("selftest", {"alias": "x", "trigger": [], "action": list(steps)})
+        return body
+
+    await m.denied("automation_data_template", "policy_protected_unverifiable",
+                   config({"service": "input_boolean.turn_on", "data_template": {"entity_id": protected_helper}}))
+    await m.denied("automation_templated_data", "templated_service",
+                   config({"service": "homeassistant.turn_on", "data": {"entity_id": "{{ x }}"}}))
+    await m.denied("automation_templated_script_data", "policy_protected_unverifiable",
+                   config({"service": "script.turn_on", "data": {"entity_id": "{{ x }}"}}))
+    await m.denied("automation_string_target", "policy_protected_unverifiable",
+                   config({"service": "script.turn_on", "target": "{{ t }}"}))
+    await m.denied("automation_device_action", "policy_protected_unverifiable",
+                   config({"domain": "input_boolean", "type": "turn_on", "device_id": "x", "entity_id": "y"}))
+    await m.denied("automation_scene_step", "policy_protected_unverifiable", config({"scene": "scene.selftest"}))
+    await m.denied("automation_event_step", "policy_protected_unverifiable", config({"event": "x"}))
+    await m.denied("automation_all_with_area", "policy_protected_unverifiable",
+                   config({"service": "homeassistant.turn_off", "target": {"entity_id": "all"}}))
+    await m.allowed("automation_plain_light", config({"service": "light.turn_on", "target": {"entity_id": "light.x"}}))
+
     await m.allowed("other_room_helper", call(
         "input_boolean", "turn_on", {"entity_id": f"input_boolean.{_SELFTEST_OTHER}_leave_lights_on"}))
     await m.allowed("light", call("light", "turn_on", {"entity_id": "light.selftest_lamp"}))
@@ -464,26 +584,21 @@ async def _boundary_cases(m: _Matrix) -> None:
 async def _router_cases(m: _Matrix) -> None:
     m.router_ran = True
     den = _SELFTEST_ROOM
-    writes = [f"input_boolean.{den}_leave_lights_on", f"input_boolean.{den}_motion_disable"]
     fields = {"area": den, "caller_role": CALLER_ROLE, "kind": "hold_on", "set_by": SET_BY, "apply_now": False}
 
-    def run(script: str = SET_SCRIPT, grant: Any = None, equivalent: Sequence[str] = tuple(writes),
-            body: Optional[Mapping[str, Any]] = None):
+    def run(script: str = SET_SCRIPT, grant: Any = None, body: Optional[Mapping[str, Any]] = None):
         async def go(guard: Any) -> Any:
             return await guard.run_policy_script(
-                script, dict(body or fields), grant=_GRANT if grant is None else grant, equivalent_writes=equivalent)
+                script, dict(fields if body is None else body), grant=_GRANT if grant is None else grant)
         return go
 
     await m.allowed("owner_trusted", run(), trusted_voice=True)
     await m.allowed("owner_untrusted", run(), trusted_voice=False)
     await m.allowed("degraded_as_today", run(), permissions=mp.degraded_permissions(), mode="owner")
 
-    async def no_scope(guard: Any) -> bool:
-        await guard.run_policy_script(SET_SCRIPT, dict(fields), grant=_GRANT, equivalent_writes=tuple(writes))
-        return True
     inner = _RecordingInner()
     try:
-        await no_scope(mp.PermissionEnforcingHAClient(inner))
+        await mp.PermissionEnforcingHAClient(inner).run_policy_script(SET_SCRIPT, dict(fields), grant=_GRANT)
         m.record("no_scope_as_today", len(inner.calls) == 1)
     except mp.HAWritePermissionDenied:
         m.record("no_scope_as_today", False)
@@ -493,22 +608,48 @@ async def _router_cases(m: _Matrix) -> None:
     await m.denied("read_only", "read_only_scope", run(), read_only=True)
     await m.denied("guest", "guest", run(), permissions={"mode": "guest"}, mode="guest")
     await m.denied("guest_role", "policy_caller_role", run(body={**fields, "caller_role": "guest"}))
-    await m.denied("empty_equivalent_writes", "entity_or_domain_denied", run(equivalent=()))
-    await m.denied(
-        "restricted_helper", "entity_or_domain_denied", run(),
-        permissions={"mode": "owner_restricted", "restricted_entities": [r".*_leave_lights_on$"], "allowed_domains": []},
-    )
+    await m.denied("restricted_helper", "entity_or_domain_denied", run(), permissions={
+        "mode": "owner_restricted", "restricted_entities": [r".*_leave_lights_on$"], "allowed_domains": []})
+    await m.denied("restricted_motion_disable", "entity_or_domain_denied", run(body={**fields, "kind": "disable"}), permissions={
+        "mode": "owner_restricted", "restricted_entities": [r".*_motion_disable$"], "allowed_domains": []})
+    await m.denied("area_not_a_policy_room", "policy_area", run(body={**fields, "area": _SELFTEST_OTHER}))
+    await m.denied("area_not_a_slug", "policy_fields", run(body={**fields, "area": "den room"}))
+    await m.denied("field_until", "policy_fields", run(body={**fields, "until": "2099-01-01T00:00:00+00:00"}))
+    await m.denied("field_caller_area", "policy_fields", run(body={**fields, "caller_area": _SELFTEST_OTHER}))
+    await m.denied("field_unknown", "policy_fields", run(body={**fields, "entity_id": "light.x"}))
+    await m.denied("kind_unlisted", "policy_fields", run(body={**fields, "kind": "max_brightness"}))
+    await m.denied("set_by_other", "policy_fields", run(body={**fields, "set_by": "button"}))
+    await m.denied("apply_now_true", "policy_fields", run(body={**fields, "apply_now": True}))
+    await m.denied("duration_out_of_range", "policy_fields", run(body={**fields, "duration_minutes": 481}))
+    await m.denied("duration_on_disable", "policy_fields", run(body={**fields, "kind": "disable", "duration_minutes": 30}))
+    await m.denied("capture_without_level", "policy_fields", run(body={**fields, "kind": "capture"}))
+    await m.denied("clear_extra_field", "policy_fields", run(
+        script=CLEAR_SCRIPT, body={"area": den, "caller_role": CALLER_ROLE, "kind": "hold_on"}))
+    await m.allowed("clear_capture", run(
+        script=CLEAR_SCRIPT, body={"area": den, "caller_role": CALLER_ROLE, "clear_capture": True}))
+    await m.denied("good_night_degraded", "entity_or_domain_denied", run(
+        script=GOOD_NIGHT_SCRIPT, body={"area": den, "caller_role": CALLER_ROLE}),
+        permissions=mp.degraded_permissions(), mode="owner")
+
+    previous = mp._policy_room_source
+    mp.set_policy_room_source(None)
+    try:
+        await m.denied("run_without_source", "policy_source_missing", run())
+    finally:
+        mp.set_policy_room_source(previous)
+    mp.set_policy_room_source(lambda: None)
+    try:
+        await m.denied("run_with_cold_cache", "policy_area", run())
+    finally:
+        mp.set_policy_room_source(previous)
 
     async def through_apply(fields_out: Dict[str, Any]) -> bool:
         inner = _RecordingInner()
         guard = mp.PermissionEnforcingHAClient(inner)
         with _scope_for({"mode": "owner"}, "owner"):
-            outcome = await apply(
-                PolicyRequest("hold_on", den, "den"), guard, equivalent_writes=writes, policy_slugs={den})
-            refused = await apply(
-                PolicyRequest("hold_on", "whole_house", "house"), guard, equivalent_writes=writes, policy_slugs={den})
-            unknown = await apply(
-                PolicyRequest("hold_on", "elsewhere", "elsewhere"), guard, equivalent_writes=writes, policy_slugs={den})
+            outcome = await apply(PolicyRequest("hold_on", den, "den"), guard, policy_slugs={den})
+            refused = await apply(PolicyRequest("hold_on", "whole_house", "house"), guard, policy_slugs={den})
+            unknown = await apply(PolicyRequest("hold_on", "elsewhere", "elsewhere"), guard, policy_slugs={den})
         sent = inner.calls[0][2] if inner.calls else {}
         fields_out.update(sent)
         return (
@@ -516,9 +657,46 @@ async def _router_cases(m: _Matrix) -> None:
             and refused.reason == "whole_house" and unknown.reason == "unknown_area"
         )
 
+    async def bad_answer(response: Mapping[str, Any]) -> bool:
+        guard = mp.PermissionEnforcingHAClient(_RecordingInner(response))
+        with _scope_for({"mode": "owner"}, "owner"):
+            outcome = await apply(PolicyRequest("hold_on", den, "den"), guard, policy_slugs={den})
+        return outcome.reason == "bad_response" and not outcome.ok and NO_END_PHRASE not in outcome.speech
+
+    good = dict(_SELFTEST_RESPONSE)
+    m.record("answer_empty_is_not_confirmed", await bad_answer({}))
+    m.record("answer_wrong_area_is_not_confirmed", await bad_answer({**good, "area": _SELFTEST_OTHER}))
+    m.record("answer_until_not_text_is_not_confirmed", await bad_answer({**good, "until": 5}))
+    m.record("answer_missing_key_is_not_confirmed", await bad_answer({k: v for k, v in good.items() if k != "stale"}))
+
     sent: Dict[str, Any] = {}
     m.record("apply_no_duration_no_end", await through_apply(sent) and "duration_minutes" not in sent
              and sent.get("caller_role") == CALLER_ROLE and sent.get("apply_now") is False)
+
+
+def _protection_cases(m: _Matrix) -> None:
+    """Which slugs are protected, whatever the routing says (``protected_slugs``)."""
+    global _engine_seen
+    den = _SELFTEST_ROOM
+    up = {
+        f"input_text.{den}_policy": {"attributes": {AREA_ATTRIBUTE: "x"}},
+        f"input_boolean.{den}_motion_disable": {}, _SET_ENTITY: {},
+    }
+    no_script = {k: v for k, v in up.items() if k != _SET_ENTITY}
+    no_area = {**up, f"input_text.{den}_policy": {"attributes": {}}}
+    saved = _engine_seen
+    try:
+        _engine_seen = False
+        m.record("protection_before_the_engine_is_published", protected_slugs(no_script) == frozenset())
+        m.record("protection_when_the_engine_is_first_seen", protected_slugs(up) == {den})
+        m.record("protection_survives_the_script_going_missing", protected_slugs(no_script) == {den})
+        m.record("protection_ignores_a_blank_area", protected_slugs(no_area) == {den})
+        m.record("routing_needs_the_script_and_the_area",
+                 policy_slugs(no_script) == frozenset() and policy_slugs(no_area) == frozenset())
+        m.record("a_cache_without_input_booleans_is_cold",
+                 protected_slugs({_SET_ENTITY: {}}) is None and protected_slugs(None) is None)
+    finally:
+        _engine_seen = saved
 
 
 async def _run_matrix() -> _Matrix:
@@ -528,6 +706,7 @@ async def _run_matrix() -> _Matrix:
     try:
         await _boundary_cases(matrix)
         await _router_cases(matrix)
+        _protection_cases(matrix)
     finally:
         mp.set_policy_room_source(previous)
     return matrix

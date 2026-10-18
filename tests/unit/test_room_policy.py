@@ -106,16 +106,16 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def apply_through_guard(req, *, ha=None, permissions=OWNER, mode="owner", writes=None, slugs=("study",), **scope):
+def apply_through_guard(req, *, ha=None, permissions=OWNER, mode="owner", slugs=("study",), **scope):
     """``apply`` against the real guard; ``(outcome, ha, scope)``. No scope when ``permissions`` is None."""
     ha = ha or FakePolicyHA()
     inner = _InnerWithScript(ha)
     guard = mp.PermissionEnforcingHAClient(inner)
-    writes = writes if writes is not None else [f"input_boolean.{req.slug}_leave_lights_on", f"input_boolean.{req.slug}_motion_disable"]
+    mp.set_policy_room_source(lambda: frozenset(slugs))
     if permissions is None:
-        return run(rp.apply(req, guard, equivalent_writes=writes, policy_slugs=frozenset(slugs))), ha, None
+        return run(rp.apply(req, guard, policy_slugs=frozenset(slugs))), ha, None
     with mp.ha_permission_scope(permissions, mode=mode, **scope) as opened:
-        outcome = run(rp.apply(req, guard, equivalent_writes=writes, policy_slugs=frozenset(slugs)))
+        outcome = run(rp.apply(req, guard, policy_slugs=frozenset(slugs)))
     return outcome, ha, opened
 
 
@@ -319,16 +319,16 @@ def intent(room=None, action="leave_lights_on", **params):
 class PolicyChat:
     """The harness house plus a study that policy runs and a nursery that it doesn't."""
 
-    def __init__(self, monkeypatch, *, study_area="area_study", **fake):
+    def __init__(self, monkeypatch, *, study_area="area_study", scripts=None, **fake):
         self.chat = Chat(monkeypatch)
         cache = self.chat.rig.manager._entities_cache
-        cache.update(policy_states("study", study_area))
+        cache.update(policy_states("study", study_area, **({} if scripts is None else {"scripts": scripts})))
         cache.update(helper_states("nursery"))
         self.chat.rig.manager._build_indexes()
         self.ha = FakePolicyHA(**fake)
         self.chat.rig.raw.call_service_response = AsyncMock(side_effect=self.ha.call_service_response)
         manager = self.chat.rig.manager
-        mp.set_policy_room_source(lambda: rp.policy_slugs(manager.cached_entities()))
+        mp.set_policy_room_source(lambda: rp.protected_slugs(manager.cached_entities()))
 
     def say(self, reply, query="leave the lights on", **kw):
         self.chat.llm.reply = reply
@@ -617,28 +617,34 @@ def test_the_scripts_athena_calls_are_exactly_the_three_in_the_contract():
         assert f"`{name}`" in doc
 
 
-def test_the_handler_authorizes_the_caller_against_the_writes_it_replaces(pc, monkeypatch):
-    seen = {}
-    real = rp.apply
+@pytest.mark.parametrize("script,kind,expected", [
+    ("room_policy_set", "hold_on", ["input_number.study_leave_lights_on_minutes", "input_boolean.study_leave_lights_on",
+                                    "input_boolean.study_motion_disable"]),
+    ("room_policy_set", "hold_off", ["input_number.study_leave_lights_off_minutes", "input_boolean.study_leave_lights_off",
+                                     "input_boolean.study_motion_disable"]),
+    ("room_policy_set", "disable", ["input_boolean.study_motion_disable"]),
+    ("room_policy_clear", None, ["input_boolean.study_leave_lights_on", "input_boolean.study_leave_lights_off",
+                                 "input_boolean.study_brightness_override", "input_boolean.study_motion_disable"]),
+    ("room_policy_set", "capture", ["input_number.study_override_brightness", "input_boolean.study_brightness_override",
+                                    "input_boolean.study_motion_disable"]),
+    ("room_policy_good_night", None, ["script.good_night"]),
+])
+def test_the_guard_derives_the_writes_a_call_replaces(script, kind, expected):
+    """What the caller is authorized against is the guard's own account of the
+    call, the same set the direct voice writes used to make."""
+    assert list(mp.policy_equivalent_writes(script, "study", kind)) == expected
 
-    async def spy(req, ha, **kw):
-        seen[req.kind] = kw["equivalent_writes"]
-        return await real(req, ha, **kw)
 
-    monkeypatch.setattr(rp, "apply", spy)
-    pc.say(intent("study", duration_minutes=20), "leave the lights on")
-    pc.say(intent("study", "leave_lights_off", duration_minutes=20), "leave the lights off")
-    pc.say(intent("study", "disable_motion"), "disable motion")
-    pc.say(intent("study", "enable_motion"), "resume motion")
-    pc.say(intent("study", "set_brightness_override", brightness_percent=30), "set motion brightness to 30 percent")
-    helpers = lambda *names: [f"{d}.study_{n}" for d, n in names]  # noqa: E731
-    motion = ("input_boolean", "motion_disable")
-    assert seen["hold_on"] == helpers(("input_number", "leave_lights_on_minutes"), ("input_boolean", "leave_lights_on"), motion)
-    assert seen["hold_off"] == helpers(("input_number", "leave_lights_off_minutes"), ("input_boolean", "leave_lights_off"), motion)
-    assert seen["disable"] == helpers(motion)
-    assert seen["clear"] == helpers(("input_boolean", "leave_lights_on"), ("input_boolean", "leave_lights_off"),
-                                    ("input_boolean", "brightness_override"), motion)
-    assert seen["capture"] == helpers(("input_number", "override_brightness"), ("input_boolean", "brightness_override"), motion)
+@pytest.mark.parametrize("kind,permissions", [
+    ("hold_on", {"restricted_entities": [r".*_motion_disable$"]}),
+    ("hold_off", {"restricted_entities": [r".*_leave_lights_off_minutes$"]}),
+    ("capture", {"restricted_entities": [r".*_override_brightness$"]}),
+])
+def test_a_restriction_on_any_replaced_write_refuses_the_call(kind, permissions):
+    req = {"hold_on": hold_on(), "hold_off": rp.PolicyRequest("hold_off", "study", "study"),
+           "capture": rp.PolicyRequest("capture", "study", "study", brightness=40)}[kind]
+    outcome, ha, _ = apply_through_guard(req, permissions={"mode": "degraded", "allowed_domains": [], **permissions})
+    assert outcome.reason == "no_permission" and ha.calls == []
 
 
 def test_the_entity_manager_hands_out_its_cache_as_it_stands(monkeypatch):
@@ -646,3 +652,121 @@ def test_the_entity_manager_hands_out_its_cache_as_it_stands(monkeypatch):
     assert manager.cached_entities() is None, "nothing fetched: the guard fails closed"
     manager._entities_cache = {"input_boolean.x_motion_disable": {}}
     assert manager.cached_entities() is manager._entities_cache
+
+
+# ---------------------------------------------------------------------------
+# what is spoken, and to whom
+# ---------------------------------------------------------------------------
+
+def test_a_script_refusal_names_no_entity_id_registry_id_or_url():
+    ha = FakePolicyHA()
+    ha.error = refusal(
+        400, "Can't set input_boolean.study_leave_lights_on (0123456789abcdef0123456789abcdef) "
+             "via https://ha.example:8123/api/services/script/room_policy_set or script.room_policy_set")
+    outcome, _, _ = apply_through_guard(hold_on(), ha=ha)
+    assert outcome.speech.startswith("I couldn't change that: ")
+    for leak in ("input_boolean", "study_leave", "0123456789abcdef", "http", "ha.example", "room_policy", "script."):
+        assert leak not in outcome.speech, leak
+    assert "Can't set" in outcome.speech, "the rest of the sentence is kept"
+
+
+def test_a_plain_refusal_sentence_is_spoken_whole():
+    ha = FakePolicyHA()
+    ha.error = refusal(400, "Motion lighting is paused. Try again at 6:30 AM, or later.")
+    outcome, _, _ = apply_through_guard(hold_on(), ha=ha)
+    assert outcome.speech == "I couldn't change that: Motion lighting is paused. Try again at 6:30 AM, or later."
+
+
+def test_a_guest_learns_nothing_about_which_rooms_the_area_map_knows(monkeypatch):
+    unmapped = PolicyChat(monkeypatch, study_area="area_elsewhere")
+    answer = unmapped.say(intent("study"), perms={"mode": "guest"}, mode="guest")
+    assert "isn't set up" not in answer and "guest mode" in answer
+    assert unmapped.ha.calls == [] and unmapped.legacy == []
+    owner = unmapped.say(intent("study"))
+    assert owner == "Voice control isn't set up for the study yet."
+
+
+def test_a_room_whose_routing_is_briefly_down_is_not_written_directly(monkeypatch):
+    rp._reset_engine_seen_for_tests()
+    pc = PolicyChat(monkeypatch)
+    assert rp.protected_slugs(pc.chat.rig.manager._entities_cache) >= {"study"}, "the engine is seen"
+    del pc.chat.rig.manager._entities_cache["script.room_policy_set"]
+    pc.chat.rig.manager._build_indexes()
+    answer = pc.say(intent("study"))
+    assert pc.ha.calls == [] and pc.legacy == []
+    assert answer == "Voice control isn't set up for the study yet."
+    rp._reset_engine_seen_for_tests()
+
+
+def test_before_the_engine_exists_a_room_is_written_directly_as_today(monkeypatch):
+    rp._reset_engine_seen_for_tests()
+    pc = PolicyChat(monkeypatch, scripts=())
+    pc.say(intent("study", duration_minutes=30), "leave the lights on for 30 minutes")
+    assert pc.ha.calls == [] and [c[1] for c in pc.legacy] == ["set_value", "turn_on"]
+    rp._reset_engine_seen_for_tests()
+
+
+# F4: the answer is checked before anything is confirmed aloud
+
+GOOD = {"area": "study", "policy": "hold_on", "brightness_hold": False, "until": "", "until_spoken": "", "set_by": "voice",
+        "stale": False}
+
+
+def answer_with(response, req=None, script_kind="set"):
+    class Fixed(FakePolicyHA):
+        async def call_service_response(self, domain, service, data=None):
+            self.calls.append((domain, service, data))
+            return response
+    return apply_through_guard(req or hold_on(), ha=Fixed())[0]
+
+
+@pytest.mark.parametrize("name,response", [
+    ("empty", {}),
+    ("wrong_area", {**GOOD, "area": "nursery"}),
+    ("until_not_text", {**GOOD, "until": 1760000000}),
+    ("until_not_a_time", {**GOOD, "until": "tomorrow"}),
+    ("until_missing", {k: v for k, v in GOOD.items() if k != "until"}),
+    ("area_missing", {k: v for k, v in GOOD.items() if k != "area"}),
+    ("policy_missing", {k: v for k, v in GOOD.items() if k != "policy"}),
+    ("policy_not_text", {**GOOD, "policy": 3}),
+    ("until_spoken_missing", {k: v for k, v in GOOD.items() if k != "until_spoken"}),
+    ("until_spoken_not_text", {**GOOD, "until_spoken": 630}),
+    ("stale_missing", {k: v for k, v in GOOD.items() if k != "stale"}),
+    ("stale_not_bool", {**GOOD, "stale": "no"}),
+])
+def test_an_answer_that_fails_f4_is_never_confirmed(name, response):
+    outcome = answer_with(response)
+    assert not outcome.ok and outcome.reason == "bad_response", name
+    assert "Lights will stay" not in outcome.speech and "until you leave" not in outcome.speech
+
+
+def test_an_empty_answer_does_not_read_as_no_end_time():
+    outcome = answer_with({})
+    assert NO_END not in outcome.speech
+
+
+def test_a_good_answer_with_a_dated_or_null_until_passes():
+    for until in ("", None, "2026-01-01T10:00:00-05:00", "2026-01-01T10:00:00+00:00"):
+        outcome = answer_with({**GOOD, "until": until, "until_spoken": "10:00 AM" if until else ""})
+        assert outcome.ok, until
+
+
+@pytest.mark.parametrize("response", [
+    {}, {"area": "nursery", "until": "", "until_spoken": ""}, {"area": "study", "until": 5, "until_spoken": ""},
+    {"area": "study", "until_spoken": ""}, {"area": "study", "until": "", "until_spoken": 1},
+])
+def test_a_bad_good_night_answer_is_not_confirmed(response):
+    outcome = answer_with(response, rp.PolicyRequest("good_night", "study", "study"))
+    assert outcome.reason == "bad_response" and "Good night" not in outcome.speech
+
+
+def test_a_good_night_answer_with_its_three_keys_is_confirmed():
+    outcome = answer_with({"area": "study", "until": "2026-01-01T06:30:00-05:00", "until_spoken": "6:30 AM"},
+                          rp.PolicyRequest("good_night", "study", "study"))
+    assert outcome.ok and "6:30 AM" in outcome.speech
+
+
+def test_clear_and_disable_need_a_good_answer_too():
+    for kind in ("clear", "disable"):
+        assert answer_with({}, rp.PolicyRequest(kind, "study", "study")).reason == "bad_response"
+        assert answer_with(GOOD, rp.PolicyRequest(kind, "study", "study")).ok

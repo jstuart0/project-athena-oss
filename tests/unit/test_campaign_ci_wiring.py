@@ -125,6 +125,9 @@ GLOBS = (
 # The test files this campaign adds, pinned so a CI checkout at depth 1 (no
 # campaign base to diff against) still checks them. Each phase extends it.
 CAMPAIGN_TESTS = (
+    "tests/unit/test_ha_policy_boundary.py",
+    "tests/unit/test_room_policy.py",
+    "tests/unit/test_room_policy_wiring.py",
     "tests/unit/test_url_safety_service_host.py",
     "tests/unit/test_ha_credentials.py",
     "tests/unit/test_ha_auth_latch.py",

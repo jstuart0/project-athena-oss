@@ -1173,7 +1173,7 @@ def _policy_slugs_from_cache(entity_manager: Optional[HAEntityManager]) -> Calla
 
     def source() -> Optional[frozenset]:
         states = entity_manager.cached_entities() if entity_manager is not None else None
-        return None if states is None else room_policy.policy_slugs(states)
+        return room_policy.protected_slugs(states)
 
     return source
 

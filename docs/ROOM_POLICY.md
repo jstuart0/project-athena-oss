@@ -63,6 +63,18 @@ response carries an `until`. An explicit duration keeps the 5..480 clamp.
 Rooms that aren't policy rooms keep the one-hour default for a hold with no
 stated duration.
 
+## What the guard checks of a call
+
+`run_policy_script` does not take the caller's word for what it is doing. It
+checks every field against the table above (no other key; `until` and
+`caller_area` are never sent; `kind` is one of the four; a duration only for a
+hold, 5..480; a level only for a capture, 1..100; `set_by` is `voice`;
+`apply_now` is false), that `area` is one of its own policy rooms, and derives
+the writes the call stands for from the script and `kind`. Athena also checks
+the answer: `area` must be the room asked about, and `until`, `until_spoken`
+and `stale` (and `policy` for set and clear) must be present and well formed;
+otherwise nothing is confirmed aloud.
+
 ## Who may do it
 
 The caller is allowed exactly when the direct helper writes the voice command
@@ -84,15 +96,24 @@ other path to them:
   `override_brightness`, `motion_disable`, `policy`, `hold_until`,
   `hold_set_by`, `hold_brightness`, in any `input_*` domain);
 - anything matching a glob in `HA_POLICY_PROTECTED_EXTRA`;
-- a write whose targets can't be checked: `script.turn_on|turn_off|toggle`, or an
-  `input_*` service, aimed at an area, device, label, `all` or nothing, or at a
-  templated id.
+- a write whose targets can't be checked: `script.turn_on|turn_off|toggle`, an
+  `input_*` service or `homeassistant.turn_on|turn_off|toggle|update_entity`
+  aimed at an area, device, label, `all` or nothing; an entity-registry id; a
+  templated id. Ids listed beside an area still count, and so do the `entities`
+  and `snapshot_entities` of `scene.apply` and `scene.create`.
 
 The same checks run on the steps of automations the agent creates and on
-scheduled sequence steps. A denial is recorded like any other (`ha_write_denied`,
-reasons `policy_protected` and `policy_protected_unverifiable`). While the
-entity cache has never been filled, every helper of the policy shape is treated
-as protected.
+scheduled sequence steps. While a policy room or an extra exists, a step that
+reaches `script`, `homeassistant`, `scene`, `automation` or an `input_*` entity
+must be a plain service call with literal data: no template anywhere, no
+`data_template`, no string-valued target or data, no device action, no scene
+step; a step of a shape whose target can't be read (an event) is refused too. A denial is recorded like any other (`ha_write_denied`,
+reasons `policy_protected` and `policy_protected_unverifiable`). Protection is wider than
+routing: a room's helpers stay protected when its `ha_area` is blank or
+`script.room_policy_set` is briefly missing (a script reload, a restart), once a
+`room_policy_*` script has been seen by the process. Until one has, helpers are
+written directly as before. A cache with no `input_boolean` at all, or never
+filled, counts as cold: every helper of the policy shape is treated as protected.
 
 `HA_POLICY_PROTECTED_EXTRA` is for the entities of the engine itself that
 Athena should never write, such as its scripts, enable switches and schedule

@@ -1005,21 +1005,13 @@ def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> Lis
     ``data.target`` and the ids of all four are counted together (a second
     id hidden in another block can't slip past a one-door rule); "all"/a
     missing entity/an area-device-floor-label target all become
-    ``f"{domain}.all"``; a bare id without a domain becomes
-    ``f"{domain}.{id}"``.
+    ``f"{domain}.all"`` (beside any ids listed with an area/device/floor/label
+    target); a bare id without a domain becomes ``f"{domain}.{id}"``.
     """
     data = _as_dict(service_data)
     target_block = _as_dict(data.get("target"))
     data_block = _as_dict(data.get("data"))
     data_target_block = _as_dict(data_block.get("target"))
-
-    if (
-        _has_area_device_floor_label(data)
-        or _has_area_device_floor_label(target_block)
-        or _has_area_device_floor_label(data_block)
-        or _has_area_device_floor_label(data_target_block)
-    ):
-        return [f"{domain}.all"]
 
     entity_values: List[str] = []
     for block in (data, target_block, data_block, data_target_block):
@@ -1027,20 +1019,27 @@ def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> Lis
             if value not in entity_values:
                 entity_values.append(value)
 
-    if not entity_values:
+    # An area/device/floor/label target stands for entities nobody listed; the
+    # ids listed beside it still count (a protected id with a dummy area must
+    # not hide behind the pseudo-target).
+    targets: List[str] = []
+    if (
+        _has_area_device_floor_label(data)
+        or _has_area_device_floor_label(target_block)
+        or _has_area_device_floor_label(data_block)
+        or _has_area_device_floor_label(data_target_block)
+    ):
+        targets.append(f"{domain}.all")
+    elif not entity_values:
         return [f"{domain}.all"]
 
-    targets: List[str] = []
     for raw in entity_values:
         if raw.lower() == "all":
             pseudo = f"{domain}.all"
             if pseudo not in targets:
                 targets.append(pseudo)
             continue
-        if "." in raw:
-            targets.append(raw)
-        else:
-            targets.append(f"{domain}.{raw}")
+        targets.append(raw if "." in raw else f"{domain}.{raw}")
     return targets
 
 
@@ -1104,6 +1103,44 @@ def is_policy_protected(entity_id: str, slugs: Optional[AbstractSet[str]], extra
     return any(fnmatchcase(entity_id, glob) for glob in extras)
 
 
+_GENERIC_DOMAINS = frozenset({"homeassistant", "script", "scene", "automation"})
+_HOMEASSISTANT_TARGETING_SERVICES = frozenset({"turn_on", "turn_off", "toggle", "update_entity"})
+_SCENE_ID_KEYS = ("entities", "snapshot_entities")
+
+
+def _policy_capable(domain: str) -> bool:
+    """A domain through which a protected entity could be written or run."""
+    return domain in _GENERIC_DOMAINS or domain.startswith("input_")
+
+
+def _has_template_deep(value: Any) -> bool:
+    if isinstance(value, str):
+        return "{{" in value or "{%" in value
+    if isinstance(value, dict):
+        return any(_has_template_deep(k) or _has_template_deep(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_has_template_deep(v) for v in value)
+    return False
+
+
+def _scene_entity_ids(service_data: Optional[Dict[str, Any]]) -> List[str]:
+    """The ids ``scene.apply``/``scene.create`` would set or snapshot: the keys
+    (or items) of ``entities`` and the items of ``snapshot_entities``, whether
+    at the top of the payload or under ``data``."""
+    data = _as_dict(service_data)
+    found: List[str] = []
+    for block in (data, _as_dict(data.get("data"))):
+        for key in _SCENE_ID_KEYS:
+            value = block.get(key)
+            if isinstance(value, dict):
+                found.extend(str(k) for k in value)
+            elif isinstance(value, (list, tuple)):
+                found.extend(str(v) if not isinstance(v, dict) else str(v.get("entity_id", "{")) for v in value)
+            elif isinstance(value, str):
+                found.extend(_split_entity_ids(value) or [value])
+    return [i.strip().lower() for i in found]
+
+
 def policy_protection(
     domain: str,
     service: str,
@@ -1115,58 +1152,176 @@ def policy_protection(
 
     Pure. ``policy_slugs`` None means unknown: every helper of the policy
     shape is then protected (fail closed). Denies (a) a protected script
-    called by name, (b) any protected id among the targets, and (c) a target
-    that can't be checked: ``script.turn_on|turn_off|toggle`` or an
-    ``input_*`` service with an area/device/label/``all``/missing target
-    while a policy room or an extra could be inside it, and a templated id.
+    called by name, (b) any protected id among the targets (including those
+    listed beside an area/device/label, and the ``entities`` and
+    ``snapshot_entities`` of ``scene.apply``/``scene.create``), and (c) a
+    target that can't be checked, while a policy room or an extra exists:
+    ``script.turn_on|turn_off|toggle`` or an ``input_*`` service, or
+    ``homeassistant.turn_on|turn_off|toggle|update_entity``, aimed at an
+    area/device/floor/label/``all``/nothing; an entity-registry id; a
+    templated id.
     """
     domain = str(domain).strip().lower()
     service = str(service).strip().lower()
     targets = [t.strip().lower() for t in _extract_targets(domain, service_data)]
+    scene_ids = _scene_entity_ids(service_data) if domain == "scene" and service in ("apply", "create") else []
     if (
         domain == "script" and service not in _SCRIPT_UNPROTECTED_SERVICES
         and is_policy_protected(f"script.{service}", policy_slugs, extras)
     ):
         return POLICY_PROTECTED
-    if any(is_policy_protected(t, policy_slugs, extras) for t in targets):
+    if any(is_policy_protected(t, policy_slugs, extras) for t in targets + scene_ids):
         return POLICY_PROTECTED
     if domain == "script" and service in _SCRIPT_TARGETING_SERVICES and "script.all" in targets:
         return POLICY_PROTECTED_UNVERIFIABLE
-    if (
-        domain.startswith("input_") and f"{domain}.all" in targets
-        and (policy_slugs is None or policy_slugs or _extras_name_domain(extras, domain))
+    active = policy_slugs is None or bool(policy_slugs) or bool(extras)
+    if not active:
+        return None
+    if domain.startswith("input_") and f"{domain}.all" in targets and (
+        policy_slugs is None or policy_slugs or _extras_name_domain(extras, domain)
     ):
         return POLICY_PROTECTED_UNVERIFIABLE
-    if (domain in ("script", "homeassistant") or domain.startswith("input_")) and any("{" in t for t in targets):
+    if domain == "homeassistant" and service in _HOMEASSISTANT_TARGETING_SERVICES and "homeassistant.all" in targets:
+        return POLICY_PROTECTED_UNVERIFIABLE
+    if any(_REGISTRY_ID_RE.fullmatch(t.partition(".")[2]) for t in targets + scene_ids):
+        return POLICY_PROTECTED_UNVERIFIABLE
+    if _policy_capable(domain) and any("{" in t for t in targets + scene_ids):
+        return POLICY_PROTECTED_UNVERIFIABLE
+    if scene_ids and any(_REGISTRY_ID_RE.fullmatch(i) or "{" in i for i in scene_ids):
         return POLICY_PROTECTED_UNVERIFIABLE
     return None
 
 
-def _policy_denial(domain: str, service: str, service_data: Optional[Dict[str, Any]]) -> Optional[str]:
-    """``policy_protection`` against the registered source and the configured
-    extras. The slugs are read only for a write that could reach an input_*
-    helper, so a light call never scans the states. No source registered and
-    an input_* write: ``policy_source_missing``."""
-    names_helper = str(domain).strip().lower().startswith("input_") or any(
-        t.lower().startswith("input_") for t in _extract_targets(domain, service_data)
-    )
+def _policy_world(wants_slugs: bool) -> Tuple[Optional[AbstractSet[str]], Tuple[str, ...], bool]:
+    """``(slugs, extras, source missing)``. The slugs are read only when the
+    write could reach a helper, so a light call never scans the states; a
+    source that raises reads as unknown (None, fail closed)."""
     slugs: Optional[AbstractSet[str]] = frozenset()
-    if names_helper:
+    if wants_slugs:
         if _policy_room_source is None:
-            return POLICY_SOURCE_MISSING
+            return slugs, policy_extras(), True
         try:
             slugs = _policy_room_source()
         except Exception as exc:
             logger.warning("policy_room_source_failed", error_class=type(exc).__name__)
             slugs = None
-    return policy_protection(domain, service, service_data, slugs, policy_extras())
+    return slugs, policy_extras(), False
+
+
+def _policy_denial(domain: str, service: str, service_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """``policy_protection`` against the registered source and the configured
+    extras. No source registered and an input_* write: ``policy_source_missing``."""
+    d = str(domain).strip().lower()
+    targets = _extract_targets(d, service_data)
+    wants = (
+        d.startswith("input_") or d in _GENERIC_DOMAINS
+        or any(t.lower().startswith("input_") or _REGISTRY_ID_RE.fullmatch(t.partition(".")[2].lower()) for t in targets)
+    )
+    slugs, extras, source_missing = _policy_world(wants)
+    if source_missing and (d.startswith("input_") or any(t.lower().startswith("input_") for t in targets)):
+        return POLICY_SOURCE_MISSING
+    return policy_protection(domain, service, service_data, slugs, extras)
 
 
 def _step_policy_denial(step: Dict[str, Any]) -> Optional[str]:
-    """``_policy_denial`` for one leaf step of an automation. A step with a
-    templated service is left to ``_authorize_automation_step``, which denies it."""
-    call = _step_call(step)
-    return _policy_denial(*call) if call is not None else None
+    """The policy verdict on one leaf step of an automation.
+
+    While a policy room or an extra exists, a step that touches a domain a
+    protected entity could be written through (script, homeassistant, scene,
+    automation, input_*) must be a plain service call with literal data: no
+    template anywhere, no ``data_template``, no string-valued target or data,
+    no device action, no scene step. A step of a shape nobody can read the
+    target of (an event, say) is refused too. A templated service is left to
+    ``_authorize_automation_step``, which denies it."""
+    if set(step.keys()) <= _AUTOMATION_INERT_STEP_KEYS:
+        return None
+    service = _step_service(step)
+    if isinstance(service, str) and _has_template(service):
+        return None
+    slugs, extras, _ = _policy_world(True)
+    active = slugs is None or bool(slugs) or bool(extras)
+    if isinstance(service, str) and "." in service:
+        domain, svc = (part.strip().lower() for part in service.split(".", 1))
+        if active and _policy_capable(domain) and (
+            "data_template" in step or _has_template_deep(step)
+            or any(key in step and not isinstance(step[key], dict) for key in ("target", "data"))
+        ):
+            return POLICY_PROTECTED_UNVERIFIABLE
+        return _policy_denial(domain, svc, step)
+    if not active:
+        return None
+    device_domain = step.get("domain")
+    if "scene" in step or (isinstance(device_domain, str) and ("device_id" in step or "type" in step)):
+        domain = "scene" if "scene" in step else device_domain.strip().lower()
+        return POLICY_PROTECTED_UNVERIFIABLE if _policy_capable(domain) else None
+    return POLICY_PROTECTED_UNVERIFIABLE
+
+
+
+# What Athena may send to the three policy scripts (docs/ROOM_POLICY.md). Any
+# other key (``until``, ``caller_area``, ...) is refused.
+_POLICY_FIELD_KEYS: Mapping[str, AbstractSet[str]] = {
+    "room_policy_set": frozenset(
+        {"area", "kind", "brightness", "duration_minutes", "set_by", "caller_role", "apply_now"}),
+    "room_policy_clear": frozenset({"area", "caller_role", "clear_capture"}),
+    "room_policy_good_night": frozenset({"area", "caller_role"}),
+}
+POLICY_SET_KINDS = ("hold_on", "hold_off", "disable", "capture")
+POLICY_MIN_MINUTES, POLICY_MAX_MINUTES = 5, 480
+_POLICY_SLUG_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _policy_fields_problem(script: str, fields: Mapping[str, Any]) -> Optional[str]:
+    """What is wrong with the fields of a policy script call, else None."""
+    if not set(fields) <= _POLICY_FIELD_KEYS[script]:
+        return "unknown field"
+    area = fields.get("area")
+    if not isinstance(area, str) or not _POLICY_SLUG_RE.fullmatch(area):
+        return "area"
+    if script == "room_policy_clear":
+        return None if isinstance(fields.get("clear_capture", False), bool) else "clear_capture"
+    if script == "room_policy_good_night":
+        return None
+    kind = fields.get("kind")
+    if kind not in POLICY_SET_KINDS or fields.get("set_by") != "voice" or fields.get("apply_now") is not False:
+        return "kind, set_by or apply_now"
+    minutes = fields.get("duration_minutes")
+    if minutes is not None and not (
+        kind in ("hold_on", "hold_off") and _is_int(minutes) and POLICY_MIN_MINUTES <= minutes <= POLICY_MAX_MINUTES
+    ):
+        return "duration_minutes"
+    level = fields.get("brightness")
+    if (kind == "capture") != (level is not None) or (
+        level is not None and not (_is_int(level) and 1 <= level <= 100)
+    ):
+        return "brightness"
+    return None
+
+
+def policy_equivalent_writes(script: str, slug: str, kind: Optional[str]) -> Tuple[str, ...]:
+    """The entities the voice command a policy call replaces used to write
+    (the motion helpers of ``slug``, plus its ``motion_disable``), or for a
+    good night the script it replaced. The guard authorizes the caller
+    against these."""
+    if script == "room_policy_good_night":
+        return ("script.good_night",)
+    own = {
+        "hold_on": (("input_number", "leave_lights_on_minutes"), ("input_boolean", "leave_lights_on")),
+        "hold_off": (("input_number", "leave_lights_off_minutes"), ("input_boolean", "leave_lights_off")),
+        "disable": (),
+        "capture": (("input_number", "override_brightness"), ("input_boolean", "brightness_override")),
+    }
+    helpers = (
+        (("input_boolean", "leave_lights_on"), ("input_boolean", "leave_lights_off"), ("input_boolean", "brightness_override"))
+        if script == "room_policy_clear" else own[str(kind)]
+    )
+    ids = [f"{domain}.{slug}_{name}" for domain, name in helpers]
+    ids.append(f"input_boolean.{slug}_motion_disable")
+    return tuple(dict.fromkeys(ids))
 
 
 # ---------------------------------------------------------------------------
@@ -2219,35 +2374,52 @@ class PermissionEnforcingHAClient:
         fields: Mapping[str, Any],
         *,
         grant: Any,
-        equivalent_writes: Sequence[str],
     ) -> Dict[str, Any]:
         """Call one ``script.room_policy_*`` and return its ``service_response``.
 
         The only way past the policy boundary, and only for
-        ``orchestrator.room_policy`` (it alone holds the grant). A caller is
-        allowed exactly when the direct writes it replaces would have been:
-        ``equivalent_writes`` (the ids those writes would touch) must each pass
-        ``authorize_ha_write`` against the scope. Mode owner, a trusted voice
-        and a healthy mode service are not required, as for those writes; a
-        guest is refused. ``policy_protection`` is deliberately not applied to
-        ``equivalent_writes`` -- they are the protected helpers.
+        ``orchestrator.room_policy`` (it alone holds the grant). The guard does
+        not trust the caller's account of what it is doing: it checks the
+        field keys and values against the contract, that ``area`` is one of
+        its own policy rooms, and derives the writes the call stands for
+        (``policy_equivalent_writes``) itself. The caller is allowed exactly
+        when those direct writes would have been, as ``call_service`` would
+        decide: mode owner, a trusted voice and a healthy mode service are not
+        required; a guest is refused. ``policy_protection`` is deliberately not
+        applied to the derived writes -- they are the protected helpers.
         """
         from orchestrator import room_policy
 
         scope = self._resolve_scope()
         name = str(script)
+
+        def refuse(reason: str, targets: Tuple[str, ...] = ()) -> None:
+            self._deny(scope, "script", name, targets, reason)
+
         if grant is not room_policy._GRANT:
-            self._deny(scope, "script", name, (), "policy_grant")
+            refuse("policy_grant")
         if name not in room_policy.POLICY_SCRIPTS:
-            self._deny(scope, "script", name, (), "policy_script")
+            refuse("policy_script")
         if scope.read_only:
-            self._deny(scope, "script", name, (), "read_only_scope")
+            refuse("read_only_scope")
         if scope.halted:
-            self._deny(scope, "script", name, (), "halted_after_denial")
+            refuse("halted_after_denial")
         if scope.permissions.get("mode") == "guest" or scope.mode == "guest":
-            self._deny(scope, "script", name, (), "guest")
-        writes = tuple(equivalent_writes or ())
-        refused = [
+            refuse("guest")
+        if not isinstance(fields, Mapping) or _policy_fields_problem(name, fields):
+            refuse("policy_fields")
+        source = _policy_room_source
+        if source is None:
+            refuse(POLICY_SOURCE_MISSING)
+        try:
+            slugs = source()
+        except Exception as exc:
+            logger.warning("policy_room_source_failed", error_class=type(exc).__name__)
+            slugs = None
+        if slugs is None or fields["area"] not in slugs:
+            refuse("policy_area")
+        writes = policy_equivalent_writes(name, fields["area"], fields.get("kind"))
+        refused = tuple(
             entity_id for entity_id in writes
             if not authorize_ha_write(
                 entity_id.split(".", 1)[0],
@@ -2255,11 +2427,11 @@ class PermissionEnforcingHAClient:
                 {"entity_id": entity_id},
                 scope.permissions,
             ).allowed
-        ]
-        if not writes or refused:
-            self._deny(scope, "script", name, tuple(refused), "entity_or_domain_denied")
+        )
+        if refused:
+            refuse("entity_or_domain_denied", refused)
         if fields.get("caller_role") != "owner":
-            self._deny(scope, "script", name, (), "policy_caller_role")
+            refuse("policy_caller_role")
         scope.allowed_writes += 1
         return await self._inner.call_service_response("script", name, dict(fields))
 

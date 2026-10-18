@@ -7031,7 +7031,7 @@ Return ONLY the JSON, no other text."""
 
     async def _motion_via_room_policy(
         self, action: str, slug: str, key: str, spoken_room: str, duration: Optional[int], brightness: Any,
-        ha_client, equivalent_writes: List[str], policy_slugs: Any,
+        ha_client, policy_slugs: Any,
     ) -> str:
         """A motion command for a room the policy engine runs: the same
         commands, done by the room's policy script (docs/ROOM_POLICY.md). No
@@ -7066,7 +7066,7 @@ Return ONLY the JSON, no other text."""
         if request is None:
             return "I didn't understand that motion control command. Try 'leave the lights on', 'disable motion', or 'reset motion settings'."
         outcome = await room_policy.apply(
-            request, ha_client, equivalent_writes=equivalent_writes, policy_slugs=policy_slugs,
+            request, ha_client, policy_slugs=policy_slugs,
         )
         logger.info("motion_control_room_policy action=%s ok=%s reason=%s", action, outcome.ok, outcome.reason)
         if request.kind == "capture" and outcome.ok and action == "keep_current_brightness":
@@ -7085,7 +7085,7 @@ Return ONLY the JSON, no other text."""
             return None
         outcome = await room_policy.apply(
             room_policy.PolicyRequest("good_night", slug, self._spoken_room(key)), ha_client,
-            equivalent_writes=["script.good_night"], policy_slugs=room_policy.policy_slugs(states),
+            policy_slugs=room_policy.policy_slugs(states),
         )
         return outcome.speech
 
@@ -7118,11 +7118,6 @@ Return ONLY the JSON, no other text."""
             logger.info("motion_control_room_unsupported room_given=%s rooms_with_helpers=%d", bool(room), len(motion_rooms))
             return await self._motion_rooms_reply(motion_rooms)
         spoken_room = self._spoken_room(key)
-        if normalized_room in policy_slugs and policy_slug is None:
-            # A policy room reached only by a name Home Assistant's area map
-            # doesn't know: the guard would refuse the direct writes, so say so.
-            logger.info("motion_control_policy_room_unmapped")
-            return f"Voice control isn't set up for the {spoken_room} yet."
 
         # Authorize the whole write set before saying anything about the
         # room's helpers, so a denied caller learns nothing about them.
@@ -7140,6 +7135,13 @@ Return ONLY the JSON, no other text."""
             logger.info("motion_control_denied action=%s denied=%d", action, len(denied_ids))
             record_precheck_denial(scope, "input_boolean", action or "change", denied_ids or [f"{_INPUT_BOOLEAN}{normalized_room}{MOTION_DISABLE_SUFFIX}"])
             return permission_refusal_message((_INPUT_BOOLEAN.rstrip("."),), scope)
+
+        if policy_slug is None and normalized_room in (room_policy.protected_slugs(states) or ()):
+            # A policy room reached only by a name Home Assistant's area map
+            # doesn't know (or whose routing is briefly down): the guard would refuse
+            # the direct writes, so say so.
+            logger.info("motion_control_policy_room_unmapped")
+            return f"Voice control isn't set up for the {spoken_room} yet."
 
         entities = await self.entity_manager.get_entities()
         missing = [
@@ -7172,11 +7174,8 @@ Return ONLY the JSON, no other text."""
             return _motion_prompt
 
         if policy_slug:
-            equivalent_writes = list(dict.fromkeys(
-                self._motion_write_set(policy_slug, action) + [motion_disable_bool]
-            ))
             return await self._motion_via_room_policy(
-                action, policy_slug, key, spoken_room, duration, brightness, ha_client, equivalent_writes, policy_slugs,
+                action, policy_slug, key, spoken_room, duration, brightness, ha_client, policy_slugs,
             )
 
         # Rooms the policy engine doesn't run keep today's default: an hour.
