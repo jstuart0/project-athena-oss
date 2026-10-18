@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "orchestrat
 from . import _public_audience_harness as h  # noqa: E402
 from . import test_light_effects as fx  # noqa: E402
 from ._fast_path_harness import RaisingLLM  # noqa: E402
+from ._light_effect_corpus import NEGATIVES, OTHER_NEGATIVES, PARITY_CORPUS, POSITIVES, T4_NEGATIVES  # noqa: E402,F401
 from shared import assistant_profile, household  # noqa: E402
 from orchestrator import light_effects, mode_permission, room_context  # noqa: E402
 from orchestrator.ha_entity_manager import HAEntityManager  # noqa: E402
@@ -42,59 +43,6 @@ main = h.main
 SENTINEL = {"intent": "general_info", "confidence": 0.5, "entities": {}, "complexity": "simple"}
 BUDGET_MS = 3.0
 
-# The utterances that must classify CONTROL through the effect route.
-POSITIVES = [
-    "set the study prism to candlelight",
-    "set the study to candlelight",
-    "make the study twinkle",
-    "turn off the effect",
-    "turn off the candlelight effect",
-    "turn the effect off",
-    "candlelight mode off",
-    "candlelight mode on the study prism",
-    "stop the twinkle on the study prism",
-    "play the candle effect on the study prism",
-    "put the study on fade",
-    "set the study to fire 2012",
-    "turn off the effects in the study",
-    "turn off the effects on the guest room",
-    "no more effects",
-    "sunset effect on the study prism",
-    "can you turn off the effect",
-    "set bedroom 2 to candlelight",
-]
-
-# The F67 T4 negatives (nothing here is an effect request, with the full
-# vocabulary loaded) and the other commands the effect grammar must not take.
-T4_NEGATIVES = [
-    "turn off guest mode",
-    "turn off away mode",
-    "turn off sleep mode",
-    "game mode off",
-    "turn off the sound effects",
-    "stop the stream",
-    "stop the rain",
-    "stop the washing machine",
-    "stop the noise",
-]
-OTHER_NEGATIVES = [
-    "turn on the sound effect",
-    "play the rain sound effect in the living room",
-    "romantic mode",
-    "night mode on the study prism",
-    "set the study lights to 50 percent",
-    "turn on the kitchen light",
-    "fade the lights",
-    "set the study to blue",
-    "turn off the effects on the tv",
-    "turn off the effects on the guest",
-    "turn off the effects for the neighbours",
-    "is the candlelight effect on the study prism",
-    "what effect is on the study prism",
-]
-NEGATIVES = T4_NEGATIVES + OTHER_NEGATIVES
-
-PARITY_CORPUS = [(q, True) for q in POSITIVES] + [(q, False) for q in NEGATIVES]
 
 
 def _light(entity_id, name, base="govee_local"):
@@ -317,7 +265,6 @@ def test_a_state_question_is_never_an_effect_request(rig, query):
 HOUSE_MODE_EFFECTS = ["none", "Guest", "Away", "Sleep", "Game"]
 
 
-@pytest.mark.xfail(strict=True, reason="D19 lands in 2c")
 def test_house_mode_words_stay_off_the_route_even_when_a_light_has_an_effect_of_that_name(monkeypatch):
     states = [_light("light.study_prism", "Study Prism")]
     states[0]["attributes"]["effect_list"] = HOUSE_MODE_EFFECTS

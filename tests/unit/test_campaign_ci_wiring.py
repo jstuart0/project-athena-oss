@@ -248,6 +248,8 @@ CAMPAIGN_TESTS = (
     "tests/unit/test_light_effects.py",
     "tests/unit/test_light_effect_commands.py",
     "tests/unit/test_light_effect_fast_path.py",
+    "tests/unit/test_light_effect_classify.py",
+    "tests/unit/test_light_effect_agent.py",
 )
 
 # Files that match a glob and were not run by any workflow at the base commit.

@@ -73,11 +73,7 @@ def _narration_refusal(context: Any, names: tuple = ()) -> Optional[str]:
 
 def _effect_act(effect: Any) -> str:
     """The cue action an effect value asks for: a clear alias clears, anything else sets."""
-    clears = isinstance(effect, str) and (
-        light_effects.normalize(effect) in light_effects.CLEAR_ALIASES
-        or light_effects.compact(effect) in light_effects.CLEAR_ALIASES
-    )
-    return "clear_effect" if clears else "set_effect"
+    return "clear_effect" if light_effects.is_clear_alias(effect) else "set_effect"
 
 
 def _service_cue_refusal(
@@ -1181,7 +1177,7 @@ class AutomationAgent:
         groups: Dict[str, List[str]] = {}
         for leaf in leaves:
             name = light_effects.match(effect, cls._leaf_effects(entities, leaf))
-            if name is None or light_effects.compact(name) in light_effects.CLEAR_ALIASES:
+            if name is None or light_effects.is_clear_alias(name):
                 return None
             groups.setdefault(name, []).append(leaf)
         return groups
