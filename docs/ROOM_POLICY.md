@@ -1,0 +1,126 @@
+# Room policy
+
+Some Home Assistant installs run a room's lighting with a policy engine: a set
+of helpers per room plus a few scripts that are the only supported way to hold
+a room's lights on or off, switch its motion lighting off, or lock its
+brightness. Athena can drive such a room by voice, and when it does it calls
+those scripts instead of writing the helpers itself. A room that isn't run this
+way keeps the plain helper writes (`input_boolean.<room>_leave_lights_on` and
+so on) it always had.
+
+This page is the contract between Athena and a Home Assistant package that
+provides the scripts. Nothing in Athena names a house: Home Assistant says
+which rooms are policy rooms and which spoken area is which room.
+
+## How Athena knows a room is run by the policy engine
+
+A slug `<room>` is a **policy room** when all of these exist in Home
+Assistant's states:
+
+- `input_boolean.<room>_motion_disable`;
+- `input_text.<room>_policy`, with a non-empty string attribute `ha_area`
+  holding the Home Assistant **area id** of the room;
+- `script.room_policy_set`.
+
+The map from area to room is the `ha_area` attribute. An area claimed by two
+rooms is dropped from the map (and counted in the log), so neither room is
+reachable by voice. Publishing the package that sets the attributes, or
+removing it, switches Athena's routing and the helper protection together
+within one entity-cache refresh (five minutes); no Athena restart is needed.
+
+A spoken room resolves to its area through the area registry (the area's own
+name, or the one area that has the spoken name as an alias), then to the room
+through the map.
+
+## What Athena calls
+
+Only these, only as `POST /api/services/script/<name>?return_response`:
+
+| Script | Fields |
+|---|---|
+| `room_policy_set` | `area` (the room slug, never the area id), `kind` (`hold_on`, `hold_off`, `disable`, `capture`), `brightness` (1..100, required for `capture`), `duration_minutes` (absent means no end time; otherwise 5..480), `set_by` (`voice`), `caller_role` (`owner`), `apply_now` (`false`) |
+| `room_policy_clear` | `area`, `caller_role`, `clear_capture` (bool) |
+| `room_policy_good_night` | `area`, `caller_role` |
+
+`room_policy_set` answers with
+`{area, policy, brightness_hold, until, until_spoken, set_by, stale}`:
+`until` is an ISO-8601 string with an offset, or empty for no end;
+`until_spoken` is a clock time (`7:30 AM`) or empty; `stale` is true when the
+state read back hasn't caught up. `room_policy_clear` answers the same way.
+`room_policy_good_night` answers `{area, until, until_spoken}`.
+
+A refusal is a non-2xx answer whose message is spoken (capped at 160
+characters), so it must contain no entity ids.
+
+Athena never calls any other `room_policy_*` script.
+
+### No end time
+
+A hold with no stated duration sends no `duration_minutes`. The script decides
+what that means; the reply is "until you leave or press the switch" unless the
+response carries an `until`. An explicit duration keeps the 5..480 clamp.
+
+Rooms that aren't policy rooms keep the one-hour default for a hold with no
+stated duration.
+
+## Who may do it
+
+The caller is allowed exactly when the direct helper writes the voice command
+used to make would have been allowed in the same session. Athena adds no
+owner-mode, trusted-voice or degraded-mode requirement of its own on top.
+Guests are refused. The check is `PermissionEnforcingHAClient.run_policy_script`,
+which authorizes the caller against the entities the replaced writes would have
+touched (for a good-night, `script.good_night`).
+
+## The deny boundary
+
+With the policy engine's scripts present, Athena's HA write guard refuses every
+other path to them:
+
+- a call to a `script.room_policy_*` script, by service name or as a target of
+  `script.turn_on|turn_off|toggle` or any other service;
+- a write to a policy room's helpers (`leave_lights_on`, `leave_lights_off`,
+  `leave_lights_on_minutes`, `leave_lights_off_minutes`, `brightness_override`,
+  `override_brightness`, `motion_disable`, `policy`, `hold_until`,
+  `hold_set_by`, `hold_brightness`, in any `input_*` domain);
+- anything matching a glob in `HA_POLICY_PROTECTED_EXTRA`;
+- a write whose targets can't be checked: `script.turn_on|turn_off|toggle`, or an
+  `input_*` service, aimed at an area, device, label, `all` or nothing, or at a
+  templated id.
+
+The same checks run on the steps of automations the agent creates and on
+scheduled sequence steps. A denial is recorded like any other (`ha_write_denied`,
+reasons `policy_protected` and `policy_protected_unverifiable`). While the
+entity cache has never been filled, every helper of the policy shape is treated
+as protected.
+
+`HA_POLICY_PROTECTED_EXTRA` is for the entities of the engine itself that
+Athena should never write, such as its scripts, enable switches and schedule
+helpers.
+
+## Checking a deployment
+
+```sh
+python -m orchestrator.room_policy --selftest [--expect-extras N]
+```
+
+runs the guard's matrix against a recording fake (nothing is sent to Home
+Assistant) and prints one line:
+
+```
+room_policy selftest boundary=1 router=1 extras=<n> cases=<n> failures=0
+```
+
+The exit status is 0 when no case failed and, if `--expect-extras` is given,
+exactly that many globs are configured. `router=1` means the voice router is in
+the build. A deploy that publishes the engine's scripts should require this
+line first.
+
+```sh
+python -m orchestrator.room_probe --runs 1 --policy [--areas]
+```
+
+prints `motion rooms`, `policy rooms`, `room_policy scripts` and
+`protected with area/device/label` counts (the last should be 0: an entity in
+an area can be reached by an area-wide call from the assistant), and with
+`--areas` one `policy <area key> -> <room>` line per mapped room.

@@ -443,6 +443,12 @@ class HAEntityManager:
             if info.get('is_group') and info.get('members')
         ]
 
+    def cached_entities(self) -> Optional[Dict]:
+        """The cached states as they are, with no refresh and no I/O; None when
+        nothing has been fetched yet. For callers that can't await (the policy
+        guard): freshness comes from the awaiting reads earlier in a request."""
+        return self._entities_cache
+
     def entities_fetched_at(self) -> datetime:
         """When the cached states were read from Home Assistant, as an aware UTC time."""
         return self._cache_time.astimezone(timezone.utc)

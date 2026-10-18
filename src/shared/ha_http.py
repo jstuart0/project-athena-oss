@@ -40,6 +40,7 @@ WITHHELD_EXTENSION = "athena_ha_withheld"
 DIGEST_EXTENSION = "athena_ha_digest"
 PROOF_EXTENSION = "athena_ha_proof"
 DEFAULT_TIMEOUT = 30.0
+RETURN_RESPONSE_QUERY = "?return_response"
 
 _PATH = re.compile(r"/api(/[A-Za-z0-9_.\-]+)*")
 _ENTITY = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
@@ -319,13 +320,18 @@ class HAChannel:
 
     async def request(
         self, method: str, path: str, *, json: Any = None, timeout: Optional[float] = None,
+        return_response: bool = False,
     ) -> httpx.Response:
+        """``return_response`` appends Home Assistant's ``?return_response``
+        flag (a service call then answers with its ``service_response``). It
+        is the only query the channel will send; the path itself still can't
+        carry one."""
         snapshot = self._resolver.current()
         if not snapshot.configured:
             raise HomeAssistantNotConfiguredError("Home Assistant is not configured")
         validate_path(path)
         built = self._client.build_request(
-            method, snapshot.url + path, json=json,
+            method, snapshot.url + path + (RETURN_RESPONSE_QUERY if return_response else ""), json=json,
             timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
             extensions={DIGEST_EXTENSION: snapshot.digest},
         )

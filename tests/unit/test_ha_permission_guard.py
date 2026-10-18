@@ -615,7 +615,7 @@ class TestGuardAutomationMethods:
     def test_ha_client_write_surface_is_intercepted(self):
         """Public async def methods of HomeAssistantClient minus
         {get_state, get_states, close} equal exactly
-        {call_service, create_automation, delete_automation, disable_automation}."""
+        {call_service, call_service_response, create_automation, delete_automation, disable_automation}."""
         import inspect
         from shared.ha_client import HomeAssistantClient
 
@@ -624,9 +624,15 @@ class TestGuardAutomationMethods:
             if not name.startswith("_")
         }
         write_methods = public_async_methods - {"get_state", "get_states", "close"}
-        assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
+        assert write_methods == {
+            "call_service", "call_service_response", "create_automation", "delete_automation", "disable_automation",
+        }
+        # call_service_response is reachable only through the guard's one
+        # explicit, authorized method (the policy boundary, R1.5).
+        guard_method = {"call_service_response": "run_policy_script"}
         for name in write_methods:
-            assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"
+            assert hasattr(mp.PermissionEnforcingHAClient, guard_method.get(name, name)), f"guard doesn't intercept {name}"
+        assert not hasattr(mp.PermissionEnforcingHAClient(object()), "call_service_response")
 
 
 # ---------------------------------------------------------------------------

@@ -3,9 +3,15 @@ they speak through the channel, and each call maps to one method and path."""
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
+
+_SRC = str(Path(__file__).resolve().parents[2] / "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 from orchestrator.ha_entity_manager import HAEntityManager
 from shared.ha_client import HomeAssistantClient, HomeAssistantNotConfiguredError
@@ -124,3 +130,94 @@ def test_the_entity_manager_holds_no_credentials():
     manager = HAEntityManager(object())
     for name in ("ha_url", "ha_token", "headers", "client"):
         assert not hasattr(manager, name), name
+
+
+class ServiceResponder(FakeHA):
+    """Answers a service call the way Home Assistant does under
+    ``?return_response``, and records the query it came with."""
+
+    def __init__(self, reply, status=200, **kw):
+        super().__init__(**kw)
+        self.reply, self.status, self.queries = reply, status, []
+
+    def _rest(self, request, address):
+        response = super()._rest(request, address)
+        if request.method == "POST" and request.url.path.startswith("/api/services/") and response.status_code == 200:
+            self.queries.append(request.url.query.decode())
+            return httpx.Response(self.status, json=self.reply, request=request)
+        return response
+
+
+def response_client(reply, status=200):
+    fake = ServiceResponder(reply, status)
+    stack = make_stack(fake=fake, gate_wait=0.1)
+    return HomeAssistantClient(stack.channel), fake
+
+
+def test_return_response_posts_the_flag_and_returns_the_service_response():
+    async def go():
+        client, fake = response_client({"changed_states": [], "service_response": {"until": "", "stale": False}})
+        answer = await client.call_service_response("script", "room_policy_set", {"area": "den"})
+        return answer, fake.queries, [(m, p) for _, m, p in fake.rest_sent]
+
+    answer, queries, sent = run(go())
+    assert answer == {"until": "", "stale": False}
+    assert queries == ["return_response"]
+    assert sent == [("POST", "/api/services/script/room_policy_set")]
+
+
+def test_return_response_without_a_service_response_is_a_shape_error():
+    from shared.ha_client import HAResponseShapeError
+
+    for reply in ({"changed_states": []}, {"service_response": "text"}, [], {"service_response": None}):
+        async def go(reply=reply):
+            client, _ = response_client(reply)
+            with pytest.raises(HAResponseShapeError):
+                await client.call_service_response("script", "room_policy_set", {})
+
+        run(go())
+
+
+def test_return_response_error_status_is_an_http_error_with_the_body():
+    async def go():
+        client, _ = response_client({"message": "no such room"}, status=400)
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await client.call_service_response("script", "room_policy_set", {})
+        return caught.value.response.status_code, caught.value.response.json()
+
+    assert run(go()) == (400, {"message": "no such room"})
+
+
+def test_return_response_is_the_only_query_the_channel_sends():
+    async def go():
+        client, fake = response_client({"service_response": {}})
+        with pytest.raises(ValueError):
+            await client._channel.request("POST", "/api/services/script/x?return_response")
+        with pytest.raises(ValueError):
+            await client._channel.request("POST", "/api/services/script/x?other=1", return_response=True)
+        await client._channel.request("POST", "/api/services/script/x", json={}, return_response=True)
+        await client._channel.request("POST", "/api/services/script/x", json={})
+        return fake.queries
+
+    assert run(go()) == ["return_response", ""]
+
+
+def test_return_response_names_a_service_like_call_service_does():
+    async def go():
+        client, fake = response_client({"service_response": {}})
+        with pytest.raises(ValueError):
+            await client.call_service_response("script", "x/../../config", {})
+        return fake.rest_sent
+
+    assert run(go()) == []
+
+
+def test_return_response_without_credentials_says_where_to_set_them():
+    async def go():
+        stack = make_stack(fake=ServiceResponder({"service_response": {}}), gate_wait=0.1)
+        client = HomeAssistantClient(stack.channel)
+        client._channel = type("Unset", (), {"configured": False})()
+        with pytest.raises(HomeAssistantNotConfiguredError):
+            await client.call_service_response("script", "room_policy_set", {})
+
+    run(go())

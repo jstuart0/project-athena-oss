@@ -24,7 +24,7 @@ import subprocess
 import signal
 import contextvars
 import re
-from typing import Dict, Any, Optional, List, Literal, Tuple, get_args
+from typing import Callable, Dict, Any, Optional, List, Literal, Tuple, get_args
 from contextlib import asynccontextmanager
 from enum import Enum
 
@@ -46,7 +46,7 @@ from shared import ha_auth, ha_link, household
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
-from orchestrator import identity_answer, room_choice, room_context
+from orchestrator import identity_answer, room_choice, room_context, room_policy
 from orchestrator.entity_repair import repair_for_routing
 from orchestrator.intent_arbitration import arbitrate_intent, is_team_contest_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -210,6 +210,7 @@ from orchestrator.mode_permission import (
     offered_tools,
     PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
+    set_policy_room_source,
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
@@ -1165,6 +1166,18 @@ async def ensure_gateway_running() -> bool:
         return False
 
 
+def _policy_slugs_from_cache(entity_manager: Optional[HAEntityManager]) -> Callable[[], Optional[frozenset]]:
+    """Where the HA guard learns which rooms are policy rooms: the entity
+    cache as it stands (the guard can't await), None while nothing is cached
+    so that it fails closed."""
+
+    def source() -> Optional[frozenset]:
+        states = entity_manager.cached_entities() if entity_manager is not None else None
+        return None if states is None else room_policy.policy_slugs(states)
+
+    return source
+
+
 def _build_ha_channels(
     resolver: HACredentialResolver, latch: "ha_auth.HAAuthLatch", monitor: "ha_link.HALinkMonitor"
 ) -> Tuple[Optional[HomeAssistantClient], Optional[HAEntityManager]]:
@@ -1259,6 +1272,7 @@ async def lifespan(app: FastAPI):
     ha_client_raw, entity_manager = _build_ha_channels(ha_credentials, ha_latch, ha_link_monitor)
     ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
+    set_policy_room_source(_policy_slugs_from_cache(entity_manager))
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="Home Assistant is not configured")
     if not degraded_permissions()["restricted_entities"]:
