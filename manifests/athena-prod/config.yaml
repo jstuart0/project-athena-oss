@@ -53,6 +53,7 @@ data:
   # HA_ROOM_LIGHT_EXCLUDE_ENTITIES: ""
   # HA_MUSIC_PLAYERS: ""
   # HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES: ""
+  # HA_POLICY_PROTECTED_EXTRA: ""  # comma-separated fnmatch globs no write path may touch (docs/ROOM_POLICY.md)
   # HA_SATELLITE_ROOM_MAP: ""  # fallback for admin Rooms -> Speaker rooms
   # HA_TV_ENTITIES: ""
   # HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS: ""

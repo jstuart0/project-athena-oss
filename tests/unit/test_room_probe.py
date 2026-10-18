@@ -263,3 +263,45 @@ def test_the_reader_is_closed_when_the_probe_fails(monkeypatch):
         asyncio.run(room_probe._run_with_household(
             fetch, read_states, runs=1, shape=False, show_names=False, utterances=[], sources=True))
     assert reader.closed == 1
+
+
+def test_policy_prints_the_boundary_counts_and_no_ids():
+    raw, states = rch.house_raw_and_states()
+    for entity_id in ("input_boolean.study_motion_disable", "input_boolean.galley_motion_disable",
+                      "script.room_policy_set", "script.room_policy_clear"):
+        states[entity_id] = {"entity_id": entity_id, "state": "off", "attributes": {}}
+    states["input_text.study_policy"] = {"entity_id": "input_text.study_policy", "state": "", "attributes": {"ha_area": "area_study"}}
+    raw["entities"] += [
+        _reg("script.room_policy_set", area="area_study"),
+        _reg("input_boolean.study_leave_lights_on", device="dev_x"),
+        _reg("input_boolean.galley_leave_lights_on", area="area_galley"),
+        _reg("script.room_policy_clear"),
+    ]
+
+    async def fetch():
+        return raw
+
+    async def read_states():
+        return states
+
+    def go(**kw):
+        out = io.StringIO()
+        asyncio.run(room_probe.run(fetch, read_states, runs=1, shape=False, utterances=[], out=out, policy=True, **kw))
+        return out.getvalue().splitlines()
+
+    lines = go(show_names=False)
+    assert "motion rooms 2" in lines and "policy rooms 1" in lines and "room_policy scripts 2" in lines
+    assert "protected with area/device/label 2" in lines, "the script in an area and the policy helper on a device"
+    assert not any(l.startswith("policy study") for l in lines) and "study" not in "\n".join(lines).lower()
+    named = go(show_names=True)
+    assert "policy study -> study" in named
+
+
+def test_without_the_flag_no_policy_lines_are_printed():
+    _, text, _ = run_probe()
+    assert "policy rooms" not in text
+
+
+def test_the_policy_flag_is_an_argument_of_the_probe():
+    parser_source = Path(room_probe.__file__).read_text()
+    assert '"--policy"' in parser_source

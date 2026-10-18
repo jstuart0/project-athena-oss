@@ -591,6 +591,12 @@ class AthenaConfig(BaseSettings):
     #   HA writes -- a deliberate, logged deployer choice
     #   (ha_permission_fallback_disabled), not a silent default.
     ha_permission_fallback_restricted_entities: str = Field(default="")
+    # ha_policy_protected_extra: comma-separated fnmatch globs over full
+    #   entity ids (e.g. "script.lighting_*,input_boolean.*_v2") that no write
+    #   path may touch, beside the room-policy helpers and scripts the guard
+    #   derives from Home Assistant itself. Empty (the default) adds none.
+    #   Parsed by mode_permission.policy_extras(); see docs/ROOM_POLICY.md.
+    ha_policy_protected_extra: str = Field(default="")
     # guest_baseline_restricted_entities: the floor unioned into every
     #   guest's restricted_entities regardless of admin config (D8) --
     #   same domain set as the fallback list above, plus this is *always*

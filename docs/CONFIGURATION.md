@@ -1182,6 +1182,15 @@ returns an error, the orchestrator falls back to `degraded_permissions()`
 `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES=[]` — an explicit, logged
 deployer opt-out, never a silent default.
 
+**Room policy.** `HA_POLICY_PROTECTED_EXTRA` (default empty) is a
+comma-separated list of `fnmatch` globs over full entity ids, for example
+`script.my_engine_*,input_boolean.*_engine_on`. No write path may touch a
+match: not a direct service call, not an automation the agent creates, not a
+scheduled sequence step. The guard also protects, with no setting, every
+`script.room_policy_*` script and the helpers of every room whose lighting a
+Home Assistant policy engine runs. Voice changes to those rooms go through
+the scripts instead; see [ROOM_POLICY.md](ROOM_POLICY.md).
+
 **Owner PIN.** Set in the admin UI's Guest Mode page, which has a dedicated
 Owner PIN section (6-digit input, confirmation input, client-side format
 check). The server independently validates the format — exactly six ASCII
@@ -3110,6 +3119,8 @@ A room has motion control when Home Assistant holds `input_boolean.<room>_motion
 | Set or keep the brightness | `input_number.<room>_override_brightness`, `input_boolean.<room>_brightness_override` |
 
 A room missing one of the helpers an action needs gets a plain reply and nothing is written. "Keep this brightness" reads the room's lights (the same lights a room light command uses) for the current level. The room comes from the words in the request, else the speaker's room, like any other room command; a room Home Assistant has no area for is still found by its helpers' name. Writes are permission-checked and gated like every other device write.
+
+A hold with no duration ("leave the lights on") lasts an hour. A room that a Home Assistant policy engine runs (see [ROOM_POLICY.md](ROOM_POLICY.md)) is handled by that room's scripts instead of these writes, and there a hold with no duration has no end time: it lasts until someone leaves or presses the switch, and the reply says so.
 
 ### jarvis-web appliance and media entities
 

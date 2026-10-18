@@ -947,8 +947,15 @@ def test_buster_exit_two_is_not_a_pass():
     )
 
     # Sanity: a real, resolvable base against the actual repo passes cleanly (0).
+    # A pull-request checkout has origin/main but no local main branch.
+    base = next(
+        ref for ref in ("main", "origin/main")
+        if subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref], cwd=str(REPO_ROOT), capture_output=True,
+        ).returncode == 0
+    )
     proc_ok = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "check-frontend-cache-busters.py"), "--base", "main"],
+        [sys.executable, str(SCRIPTS_DIR / "check-frontend-cache-busters.py"), "--base", base],
         capture_output=True,
         text=True,
         timeout=30,

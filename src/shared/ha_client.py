@@ -12,7 +12,12 @@ from shared.ha_http import HAChannel, HomeAssistantNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HomeAssistantClient", "HomeAssistantNotConfiguredError"]
+__all__ = ["HAResponseShapeError", "HomeAssistantClient", "HomeAssistantNotConfiguredError"]
+
+
+class HAResponseShapeError(ValueError):
+    """A service call made with ``?return_response`` came back without a
+    ``service_response`` object."""
 
 
 class HomeAssistantClient:
@@ -99,6 +104,40 @@ class HomeAssistantClient:
                 status_code=getattr(getattr(e, "response", None), "status_code", None),
             )
             raise
+
+    async def call_service_response(
+        self,
+        domain: str,
+        service: str,
+        service_data: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Call a Home Assistant service that answers with data and return that
+        answer (``POST ...?return_response``). A reply without a
+        ``service_response`` object raises ``HAResponseShapeError``; an HTTP
+        error status raises ``httpx.HTTPStatusError`` as ``call_service`` does."""
+        self._check_configured()
+        import structlog
+        slog = structlog.get_logger()
+
+        path = f"/api/services/{domain}/{service}"
+        slog.info(
+            "ha_call_service_request", domain=domain, service=service,
+            data_keys=sorted((service_data or {}).keys()), path=path, return_response=True,
+        )
+        try:
+            response = await self._channel.request("POST", path, json=service_data or {}, return_response=True)
+            response.raise_for_status()
+            body = response.json()
+        except Exception as e:
+            slog.error(
+                "ha_call_service_error", domain=domain, service=service, error_class=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
+            )
+            raise
+        answer = body.get("service_response") if isinstance(body, dict) else None
+        if not isinstance(answer, dict):
+            raise HAResponseShapeError("service call returned no service_response")
+        return answer
 
     async def create_automation(
         self,

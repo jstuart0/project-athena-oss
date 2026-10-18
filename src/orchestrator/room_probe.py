@@ -1,6 +1,6 @@
 """Read-only probe of the Home Assistant area registry, for a roll.
 
-    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--sources] [--utterances FILE]
+    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--sources] [--policy] [--utterances FILE]
 
 Reads ``HA_URL`` and ``HA_TOKEN`` from the environment (through the one
 credential resolver), fetches the three registry lists ``--runs`` times over the
@@ -14,6 +14,11 @@ same read-only WebSocket session the orchestrator uses, and prints:
   (admin, the server's environment or neither), with counts only: rooms, lights,
   configured lights Home Assistant doesn't report, and configured rooms that
   are no area;
+* ``--policy``: how many rooms have motion control, how many of them the policy
+  engine runs (``policy rooms``), how many ``room_policy_*`` scripts exist and
+  how many protected entities (the policy rooms' helpers, those scripts and the
+  configured extras) sit in an area or on a device or label; with ``--areas``,
+  one ``policy <area key> -> <slug>`` line per mapped room;
 * ``--shape``: the key names present in each registry list (never a value);
 * ``--utterances FILE`` (one utterance per line): what ``decide_room`` would
   do for each, from each area that has a voice satellite.
@@ -32,7 +37,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TextIO
 
-from orchestrator import room_context
+from orchestrator import mode_permission, room_context, room_policy
 from orchestrator.room_directory import RoomDirectoryProvider
 from orchestrator.ha_entity_manager import _room_light_exclude_patterns, area_lamp_targets
 from shared.ha_auth import HAAuthLatch
@@ -124,6 +129,32 @@ def per_area_lines(
     return lines
 
 
+def policy_lines(
+    snapshot: RegistrySnapshot, raw: Mapping[str, Any], states: Mapping[str, Any], *, show_names: bool,
+) -> List[str]:
+    """The policy boundary as the probe sees it. Counts, and room keys with
+    slugs only under ``--areas``; never an entity id."""
+    slugs = room_policy.policy_slugs(states)
+    extras = mode_permission.policy_extras()
+    motion = sum(1 for eid in states if eid.startswith("input_boolean.") and eid.endswith("_motion_disable"))
+    scripts = sum(1 for eid in states if eid.startswith(f"script.{mode_permission.POLICY_SCRIPT_PREFIX}"))
+    reachable = sum(
+        1 for entry in raw.get("entities") or []
+        if isinstance(entry, dict) and mode_permission.is_policy_protected(str(entry.get("entity_id", "")), slugs, extras)
+        and (entry.get("area_id") or entry.get("device_id") or entry.get("labels"))
+    )
+    lines = [
+        f"motion rooms {motion}", f"policy rooms {len(slugs)}", f"room_policy scripts {scripts}",
+        f"protected with area/device/label {reachable}",
+    ]
+    if show_names:
+        mapped = room_policy.policy_map(states)
+        for area in sorted(snapshot.areas, key=lambda a: a.key):
+            if area.area_id in mapped:
+                lines.append(f"policy {area.key} -> {mapped[area.area_id]}")
+    return lines
+
+
 async def run(
     fetch: Callable[[], Any],
     read_states: Callable[[], Any],
@@ -134,6 +165,7 @@ async def run(
     utterances: Sequence[str],
     exclude: Sequence = (),
     sources: bool = False,
+    policy: bool = False,
     out: TextIO = sys.stdout,
 ) -> int:
     timings, raw = [], None
@@ -158,6 +190,10 @@ async def run(
 
     if sources:
         for line in source_lines(provider, states):
+            print(line, file=out)
+
+    if policy:
+        for line in policy_lines(snapshot, raw, states, show_names=show_names):
             print(line, file=out)
 
     if shape:
@@ -215,6 +251,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--shape", action="store_true")
     parser.add_argument("--areas", action="store_true", help="print area keys instead of numbering them")
     parser.add_argument("--sources", action="store_true", help="print where the room lights and speaker rooms come from")
+    parser.add_argument("--policy", action="store_true", help="print the room-policy boundary: counts, and mapped rooms with --areas")
     parser.add_argument("--utterances", metavar="FILE")
     args = parser.parse_args(argv)
     service_key = os.environ.get("SERVICE_API_KEY")
@@ -231,7 +268,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return asyncio.run(_run_with_household(
             snapshot_fetcher(resolver, latch, caller="orchestrator_registry"),
             lambda: _live_states(resolver, latch),
-            runs=args.runs, shape=args.shape, show_names=args.areas, sources=args.sources,
+            runs=args.runs, shape=args.shape, show_names=args.areas, sources=args.sources, policy=args.policy,
             utterances=_read_utterances(args.utterances),
         ))
     except Exception as exc:

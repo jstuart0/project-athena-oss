@@ -615,7 +615,7 @@ class TestGuardAutomationMethods:
     def test_ha_client_write_surface_is_intercepted(self):
         """Public async def methods of HomeAssistantClient minus
         {get_state, get_states, close} equal exactly
-        {call_service, create_automation, delete_automation, disable_automation}."""
+        {call_service, call_service_response, create_automation, delete_automation, disable_automation}."""
         import inspect
         from shared.ha_client import HomeAssistantClient
 
@@ -624,9 +624,15 @@ class TestGuardAutomationMethods:
             if not name.startswith("_")
         }
         write_methods = public_async_methods - {"get_state", "get_states", "close"}
-        assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
+        assert write_methods == {
+            "call_service", "call_service_response", "create_automation", "delete_automation", "disable_automation",
+        }
+        # call_service_response is reachable only through the guard's one
+        # explicit, authorized method (the policy boundary, R1.5).
+        guard_method = {"call_service_response": "run_policy_script"}
         for name in write_methods:
-            assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"
+            assert hasattr(mp.PermissionEnforcingHAClient, guard_method.get(name, name)), f"guard doesn't intercept {name}"
+        assert not hasattr(mp.PermissionEnforcingHAClient(object()), "call_service_response")
 
 
 # ---------------------------------------------------------------------------
@@ -852,10 +858,11 @@ class TestTargetExtraction:
                 "data": {"entity_id": "lock.c", "target": {"entity_id": "lock.d"}}}
         assert mp._extract_targets("lock", data) == ["lock.a", "lock.b", "lock.c", "lock.d"]
 
-    def test_an_area_device_floor_or_label_anywhere_makes_it_a_pseudo_target(self):
+    def test_an_area_device_floor_or_label_anywhere_makes_it_a_pseudo_target_beside_the_listed_ids(self):
         for data in ({"area_id": "k"}, {"target": {"floor_id": "g"}}, {"data": {"label_id": "l"}},
                      {"data": {"target": {"device_id": "d"}}}):
-            assert mp._extract_targets("lock", {"entity_id": "lock.a", **data}) == ["lock.all"], data
+            assert mp._extract_targets("lock", {"entity_id": "lock.a", **data}) == ["lock.all", "lock.a"], data
+            assert mp._extract_targets("lock", data) == ["lock.all"], data
 
     def test_a_non_string_domain_or_service_is_judged_not_crashed(self):
         assert mp.authorize_ha_write(["lock"], ["unlock"], {"entity_id": "lock.a"}, _owner_perms()).allowed in (True, False)

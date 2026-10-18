@@ -591,6 +591,7 @@ os-project-athena/
 - RAG service additions must pass `make smoke-rags SERVICE=<image-name>` before merge; CI enforces this on PRs touching `src/rag/**` or `src/shared/**`
 - The orchestrator timeout is 120 seconds to accommodate slower LLM inference
 - qwen3 models have `/no_think` optimization enabled to reduce response time
+- Policy-room writes go only through `room_policy.apply` -> `PermissionEnforcingHAClient.run_policy_script` (the room is a slug from `room_policy.resolve`, a room with `input_text.<slug>_policy` carrying an `ha_area` attribute, `input_boolean.<slug>_motion_disable` and `script.room_policy_set`). Every other path to the `room_policy_*` scripts, those rooms' helpers and `HA_POLICY_PROTECTED_EXTRA` is refused in `mode_permission.policy_protection`; `policy_protection` stays out of `authorize_ha_write`. No duration means no end time (`duration_minutes` omitted); rooms the engine doesn't run keep the 60-minute default. Pinned by `tests/unit/test_ha_policy_boundary.py`, `test_room_policy.py` and `test_room_policy_wiring.py`; contract in `docs/ROOM_POLICY.md`.
 
 ## Plane Project
 - Workspace: agile-solutions-group

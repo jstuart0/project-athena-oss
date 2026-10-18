@@ -66,3 +66,21 @@ def _household_settings_seam():
     household.install_for_test()
     yield
     household.reset_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _policy_room_source_seam():
+    """The HA guard refuses an ``input_*`` write while it has no source of
+    policy rooms (``policy_source_missing``), as in production before startup
+    registers one. Tests of other behaviour run with a source that names no
+    policy room; the boundary tests set their own. Only where the guard is
+    already imported, so jobs that don't install the orchestrator are
+    untouched."""
+    guard = sys.modules.get("orchestrator.mode_permission")
+    if guard is None:
+        yield
+        return
+    previous = guard._policy_room_source
+    guard.set_policy_room_source(lambda: frozenset())
+    yield
+    guard.set_policy_room_source(previous)
