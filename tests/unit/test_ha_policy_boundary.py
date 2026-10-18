@@ -772,3 +772,35 @@ def test_the_selftest_covers_every_class_this_file_pins(capsys):
 def test_homeassistant_turn_on_off_toggle_with_all_is_refused(service_name, data):
     reason, inner = attempt(service("homeassistant", service_name, data))
     assert reason == mp.POLICY_PROTECTED_UNVERIFIABLE and reached(inner) == 0
+
+
+EIGHT = (
+    "script.engine_*,input_boolean.*_engine_on,input_text.*_engine_last,input_number.*_engine_max,"
+    "input_number.*_engine_absence,input_datetime.engine_a_*,input_datetime.engine_b_*,automation.engine_kill_switch"
+)
+
+
+def test_the_selftest_checks_eight_globs_including_a_single_automation(monkeypatch, capsys):
+    set_extras(monkeypatch, EIGHT)
+    code, line = selftest(capsys, "--expect-extras", "8")
+    assert code == 0 and "extras=8" in line and "failures=0" in line, line
+    code, line = selftest(capsys, "--expect-extras", "7")
+    assert code == 1 and "extras=8" in line
+
+
+@pytest.mark.parametrize("call_name,args", [
+    ("create", None), ("delete_automation", ("engine_kill_switch",)), ("disable_automation", ("engine_kill_switch",)),
+])
+def test_an_extra_naming_one_automation_protects_it_on_every_path(monkeypatch, call_name, args):
+    set_extras(monkeypatch, EIGHT)
+    if call_name == "create":
+        call = lambda g: g.create_automation("engine_kill_switch", {"alias": "x", "trigger": [], "action": []})  # noqa: E731
+    else:
+        call = lambda g: getattr(g, call_name)(*args)  # noqa: E731
+    reason, inner = attempt(call)
+    assert reason == mp.POLICY_PROTECTED and reached(inner) == 0
+    for domain, name in (("automation", "turn_off"), ("automation", "toggle"), ("automation", "trigger")):
+        reason, inner = attempt(service(domain, name, {"entity_id": "automation.engine_kill_switch"}))
+        assert reason == mp.POLICY_PROTECTED and reached(inner) == 0, name
+    reason, _ = attempt(service("automation", "turn_off", {"entity_id": "automation.other"}))
+    assert reason is None

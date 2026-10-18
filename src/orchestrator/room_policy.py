@@ -579,6 +579,12 @@ async def _boundary_cases(m: _Matrix) -> None:
             f"extra_{glob}", "policy_protected",
             call(sample.split(".", 1)[0], "turn_on", {"entity_id": sample}),
         )
+        if sample.startswith("automation."):
+            object_id = sample.split(".", 1)[1]
+            await m.denied(f"extra_{glob}_rewrite", "policy_protected", lambda guard, i=object_id: guard.create_automation(
+                               i, {"alias": "x", "trigger": [], "action": []}))
+            await m.denied(f"extra_{glob}_delete", "policy_protected",
+                           lambda guard, i=object_id: guard.delete_automation(i))
 
 
 async def _router_cases(m: _Matrix) -> None:

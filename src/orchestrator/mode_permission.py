@@ -1779,6 +1779,10 @@ def authorize_automation_config(
     """
     perms = normalize_permissions(permissions)
 
+    own = _policy_denial("automation", "create", {"entity_id": f"automation.{automation_id}"})
+    if own:
+        # Rewriting a protected automation (an extra may name one) is a write to it.
+        return HAWriteDecision(allowed=False, denied_targets=(f"automation.{automation_id}",), reason=own)
     entity_decision = authorize_ha_write(
         "automation", "_precheck", {"entity_id": f"automation.{automation_id}"}, perms
     )
