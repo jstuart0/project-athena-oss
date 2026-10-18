@@ -230,6 +230,8 @@ _CUE_ENTITY_DOMAINS = {
     "light": ("light",), "fan": ("fan",), "switch": ("switch", "input_boolean"), "media": ("media_player",),
     "climate": ("climate",), "cover": ("cover",), "bed": ("switch", "climate", "input_boolean"),
 }
+# A clear re-reads its target lights when the cached state is older than this.
+EFFECT_CLEAR_MAX_AGE_SECONDS = 2.0
 # An effect request that found nothing re-reads the states at most this often.
 EFFECT_REFRESH_SECONDS = 60.0
 MOTION_ACTIONS = frozenset({
@@ -4204,6 +4206,15 @@ Return ONLY valid JSON."""
             return False
         return light_effects.normalize(effect) in vocab or light_effects.compact(effect) in vocab
 
+    async def _fresh_state(self, entity_id: str) -> Optional[Dict]:
+        """One light's state, no older than a couple of seconds; None when it can't be read."""
+        try:
+            return await self.entity_manager.get_entity(entity_id, max_age=EFFECT_CLEAR_MAX_AGE_SECONDS)
+        except Exception as exc:
+            import structlog
+            structlog.get_logger(__name__).warning("light_state_read_failed", error_class=type(exc).__name__)
+            return None
+
     async def _effect_refresh(self) -> bool:
         """Re-read every state once a minute at most, for an effect request that
         found no target: the list or the running effect may have changed since the
@@ -4262,7 +4273,7 @@ Return ONLY valid JSON."""
             intent, original_query, device_room, request, text, named_lights, directory,
         )
         if isinstance(decided, str):
-            return decided
+            return room_context.RefusedText(decided)
         room = intent.get("room")
         if room in ("whole_house", "multi_room") or not room or await self._is_room_group(room):
             return SEVERAL_ROOMS_UNSUPPORTED
@@ -4270,7 +4281,7 @@ Return ONLY valid JSON."""
             room, intent, original_query, target_scope="all_individual", per_light=True, denial_service="turn_on",
         )
         if isinstance(targets, str):
-            return targets
+            return room_context.RefusedText(targets)
         room_label = targets.room_label
 
         # A named light narrows the room to itself, and never to anything else.
@@ -4333,13 +4344,28 @@ Return ONLY valid JSON."""
             available = [leaf for leaf in available if (states.get(leaf) or {}).get("state", "unavailable") not in _UNAVAILABLE_STATES]
             match_cache.clear()
             writes, capable, eligible, unclearable = plan(index, states)
+        if not request.clear and len({light_effects.normalize(value) for value in writes.values()}) > 1:
+            # A fuzzy match that lands on different effects in different lights is no single request.
+            named = [light_effects.spoken_name(v) for v in dict.fromkeys(writes.values())]
+            listed = ", ".join(named[:-1]) + " or " + named[-1]
+            return room_context.RefusedText(EFFECT_NOT_FOUND_TRY.format(target=label, options=listed))
+        if writes and request.clear:
+            # The cache can be minutes old: a light turned off since must not come back on.
+            fresh = {leaf: await self._fresh_state(leaf) for leaf in writes}
+            states = await self.entity_manager.get_entities()
+            writes = {
+                leaf: value for leaf, value in writes.items()
+                if (active := light_effects.active_effect(fresh[leaf])) is not None and _same_effect(active, request.phrase)
+            }
+            eligible = len(writes) if writes else 0
         if not writes:
             return self._effect_nothing_to_write(request, label, capable, eligible, unclearable, index, available)
 
         service = "clear_effect" if request.clear else "set_effect"
         value_spoken = "" if request.clear else light_effects.spoken_name(next(iter(writes.values())))
+        detail = value_spoken if value_spoken and light_effects.EFFECT_CHARSET.fullmatch(value_spoken) else None
         refusal = write_fanout.gate(
-            "light", service, tuple(sorted(writes)), original_query, room=room_label, detail=value_spoken or None,
+            "light", service, tuple(sorted(writes)), without_effect, room=room_label, detail=detail,
         )
         if refusal:
             return refusal
@@ -4364,7 +4390,7 @@ Return ONLY valid JSON."""
         )
         sole_written = await self._single_light_name([leaf for leaf, _ in ordered]) if len(ordered) == 1 else None
         return light_reply(
-            service, rooms=[room_label], single_name=sole_written, effect=value_spoken or None,
+            service, rooms=[room_label], single_name=sole_written, effect=detail,
             unsupported=len(available) - len(ordered), unavailable=down, failed=failed,
         )
 
@@ -4397,6 +4423,8 @@ Return ONLY valid JSON."""
         a question that offers only those areas."""
         toks = light_effects.tokens(text)
         spoken = " ".join(toks[:request.span[0]] + toks[request.span[1]:])
+        if not intent.get("decided_room"):
+            intent["room"] = None  # a room the model guessed decides nothing; the words do
         mentions = [m for m in room_context.find_room_mentions(spoken, directory) if not m.in_exclusion]
         if not intent.get("decided_room") and (
             any(m.kind == "plural" for m in mentions)
@@ -4404,24 +4432,24 @@ Return ONLY valid JSON."""
         ):
             return SEVERAL_ROOMS_UNSUPPORTED
         if intent.get("decided_room") or mentions:
-            return await self._decide_intent_room(intent, original_query, device_room, "set_effect", "light")
+            return await self._decide_intent_room(intent, spoken, device_room, "set_effect", "light")
         named = named_lights(spoken)
         snapshot = self._registry_snapshot()
         if not named or snapshot is None:
-            return await self._decide_intent_room(intent, original_query, device_room, "set_effect", "light")
+            return await self._decide_intent_room(intent, spoken, device_room, "set_effect", "light")
         areas: Dict[str, str] = {}
         for eid in named:
             area = snapshot.area_for(eid)
             if area is not None:
                 areas.setdefault(room_key(area.name), self._spoken_room(room_key(area.name)))
         if not areas:
-            return await self._decide_intent_room(intent, original_query, device_room, "set_effect", "light")
+            return await self._decide_intent_room(intent, spoken, device_room, "set_effect", "light")
         usable = {}
         for key, label in areas.items():
             if await self._room_has_permitted_target("light", key):
                 usable[key] = label
         if not usable:
-            return await self._decide_intent_room(intent, original_query, device_room, "set_effect", "light")
+            return await self._decide_intent_room(intent, spoken, device_room, "set_effect", "light")
         mine = room_key(_plain_speaker_room(device_room)) if _plain_speaker_room(device_room) else None
         if len(usable) == 1 or mine in usable:
             key = next(iter(usable)) if len(usable) == 1 else mine

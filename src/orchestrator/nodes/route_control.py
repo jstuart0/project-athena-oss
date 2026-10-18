@@ -276,11 +276,14 @@ def _pending_domain(pending: Dict[str, Any]) -> str:
 
 async def _store_pending_write_confirmation(
     state: OrchestratorState, intent: Dict[str, Any], result: str, blk: "write_fanout.FanoutBlock",
-    query: Optional[str] = None,
+    query: Optional[str] = None, cue_query: Optional[str] = None,
 ) -> None:
     """5.2: `result` is the gate's answer. A bounded prompt (it ends in
     '?', which the gate only returns inside pending_carrier(enabled=True))
-    is stored as a pending confirmation; a rewording is only surfaced."""
+    is stored as a pending confirmation; a rewording is only surfaced.
+    ``cue_query`` is the words that carried the write cue when they differ from
+    ``query`` (a follow-up that continues an earlier command): the replay needs
+    them, or the cue check fails on the follow-up's own words."""
     state.answer = result
     if not (result and result.endswith("?") and not blk.unbounded and state.session_id):
         return
@@ -301,6 +304,7 @@ async def _store_pending_write_confirmation(
                 "fingerprint": state.caller_fingerprint,
                 "nonce": uuid4().hex,
                 "expires_at": time.time() + PENDING_CONFIRMATION_TTL_SECONDS,
+                **({"cue_query": cue_query[:room_context.SMART_HOME_MAX_QUERY_BYTES]} if isinstance(cue_query, str) and cue_query else {}),
             },
         },
         response=result,
@@ -404,9 +408,11 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         confirmed_ids = [e for w in (pending.get("writes") or []) for e in (w[2] if len(w) > 2 else [])]
         denials_before = len(scope.denials)
         writes_before = scope.allowed_writes
+        carried = pending.get("cue_query")
+        extra = {"cue_query": carried} if isinstance(carried, str) and carried else {}
         with write_fanout.confirmed(confirmed_ids):
             result = await smart_controller.execute_intent(
-                intent, ha_client, original_query=prev.get("query"), device_room=state.room
+                intent, ha_client, original_query=prev.get("query"), device_room=state.room, **extra,
             )
         blk = write_fanout.take_block()
 
@@ -418,7 +424,8 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
             return True
 
         if blk is not None:
-            await _store_pending_write_confirmation(state, intent, result, blk, query=prev.get("query"))
+            await _store_pending_write_confirmation(
+                state, intent, result, blk, query=prev.get("query"), cue_query=carried if extra else None)
             return True
 
         state.answer = result
@@ -682,7 +689,7 @@ async def _execute_and_record(
     elif blk is not None:
         # 5.2: the answer is the gate's prompt or rewording, not a completed
         # action -- no normal success store.
-        await _store_pending_write_confirmation(state, intent, result, blk, query=store_query)
+        await _store_pending_write_confirmation(state, intent, result, blk, query=store_query, cue_query=cue_query)
     elif room_context.is_refusal_text(result):
         # A fixed refusal changed nothing and is not a command to remember: no
         # context is stored, so "turn them on" has nothing to continue.

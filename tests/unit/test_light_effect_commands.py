@@ -598,10 +598,11 @@ def intent(**parameters):
 
 
 def say(rig, query, parameters=None, *, action="set_effect", device_room=None, perms=None, cue_query=None,
-        carry=False, confirmed=None, original_query="__same__"):
+        carry=False, confirmed=None, original_query="__same__", room=None):
     """One turn through execute_intent under the guard; the answer."""
     body = intent(**(parameters if parameters is not None else {}))
     body["action"] = action
+    body["room"] = room
     if parameters is None:
         body["parameters"] = {}
     original = query if original_query == "__same__" else original_query
@@ -1010,6 +1011,263 @@ def test_two_areas_otherwise_ask_and_the_reply_replays_to_exactly_the_named_leaf
     assert writes(rig) == [turn_on("light.north_lamp", "candlelight")]
 
 
+# -- the 2c review: room, gate words, fresh clears, typed refusals ------------------------
+
+def test_an_effect_named_like_a_room_does_not_decide_the_room(monkeypatch):
+    """F137."""
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST + ["Galley Sparkle"])
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "galley sparkle effect on the study prism", {"effect": "galley sparkle"})
+    assert writes(rig) == [turn_on("light.study_lamp", "Galley Sparkle")]
+
+
+def test_a_room_the_model_guessed_decides_nothing(monkeypatch):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST, effect="Fire 2012")
+    give(states, "light.galley_bulb_1", "Galley Spot", WLED_LIST, effect="Fire 2012")
+    give(states, "light.galley_bulb_2", "Galley Wash", WLED_LIST, effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "turn off the effect", {}, action="clear_effect", room="galley", device_room="study")
+    assert writes(rig) == [turn_on("light.study_lamp", "Solid")], "the speaker's room, not the model's galley"
+
+
+def test_an_effect_named_like_the_house_does_not_skip_the_confirmation(monkeypatch):
+    """F138: the gate reads the words without the effect, so "house party" is no scope cue."""
+    states = effect_states()
+    for eid in ("light.galley_bulb_1", "light.galley_bulb_2"):
+        give(states, eid, eid[-6:], WLED_LIST + ["House Party"])
+    rig = effect_rig(monkeypatch, states, hard_limit=1)
+    answer = say(rig, "make the galley house party effect", {"effect": "house party"})
+    assert writes(rig) == []
+    assert answer == ("That would set the house party effect on 2 lights in the galley. "
+                      "To do it, say: set all the galley lights to house party effect.")
+
+
+def test_the_gate_and_the_writer_read_the_same_words(monkeypatch):
+    """F140 L1."""
+    rig = effect_rig(monkeypatch, hard_limit=1)
+    seen = []
+    real_gate = write_fanout.gate
+
+    def spy(domain, service=None, ids=None, query=None, **kw):
+        seen.append(query)
+        return real_gate(domain, service, ids, query, **kw)
+
+    monkeypatch.setattr(write_fanout, "gate", spy)
+    say(rig, "make the galley twinkle", {"effect": "twinkle"})
+    assert seen == ["make the galley"], "the effect words are not the gate's words"
+
+
+def _stale_cache_rig(monkeypatch, live_state):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST, effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    rig.manager._ha.get_state = AsyncMock(return_value=live_state)
+    return rig
+
+
+def test_a_light_turned_off_since_the_cache_was_filled_is_not_turned_back_on(monkeypatch):
+    """F139: cached on, live off."""
+    live = copy.deepcopy(effect_states()["light.study_lamp"])
+    live["state"] = "off"
+    live["attributes"]["effect"] = "Fire 2012"
+    rig = _stale_cache_rig(monkeypatch, live)
+    answer = say(rig, "turn off the effect in the study", {}, action="clear_effect")
+    assert writes(rig) == [] and answer == "There's no effect running on the Study Prism."
+
+
+def test_a_light_still_running_the_effect_is_cleared_after_the_fresh_read(monkeypatch):
+    live = copy.deepcopy(effect_states()["light.study_lamp"])
+    live["attributes"]["effect"] = "Fire 2012"
+    rig = _stale_cache_rig(monkeypatch, live)
+    say(rig, "turn off the effect in the study", {}, action="clear_effect")
+    assert writes(rig) == [turn_on("light.study_lamp", "Solid")]
+    assert rig.manager._ha.get_state.await_count == 1
+
+
+def test_a_light_that_cannot_be_read_fresh_is_not_cleared(monkeypatch):
+    rig = _stale_cache_rig(monkeypatch, None)
+    rig.manager._ha.get_state = AsyncMock(side_effect=RuntimeError("ha down"))
+    say(rig, "turn off the effect in the study", {}, action="clear_effect")
+    assert writes(rig) == []
+
+
+def test_a_light_that_stands_for_unlisted_members_is_never_written(monkeypatch):
+    """F140 L4: the target resolution already keeps a group out of the leaves, so it never reaches the writer."""
+    states = effect_states()
+    states["light.galley_bulb_1"]["attributes"]["entity_id"] = ["light.not_in_this_house"]
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "make the galley twinkle", {"effect": "twinkle"})
+    assert all(w[2]["entity_id"] != "light.galley_bulb_1" for w in writes(rig))
+
+
+def test_a_refusal_from_the_room_decision_is_typed(monkeypatch):
+    rig = effect_rig(monkeypatch)
+    rig.controller._decide_intent_room = AsyncMock(return_value="I couldn't find a room called the cellar.")
+    answer = say(rig, "make the study twinkle", {"effect": "twinkle"})
+    assert answer == "I couldn't find a room called the cellar." and shc.is_refusal_text(answer) and writes(rig) == []
+
+
+def test_two_lists_give_each_light_its_own_spelling_with_one_match_each(monkeypatch):
+    """F143."""
+    states = effect_states()
+    give(states, "light.galley_bulb_2", "Galley Wash", GOVEE_LIST)
+    calls = {"n": 0}
+    real_match = light_effects.match
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real_match(*a, **kw)
+
+    monkeypatch.setattr(light_effects, "match", counting)
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "make the galley twinkle", {"effect": "twinkle"})
+    assert sorted(writes(rig), key=lambda w: w[2]["entity_id"]) == [
+        turn_on("light.galley_bulb_1", "Twinkle"), turn_on("light.galley_bulb_2", "twinkle")]
+    assert calls["n"] == 2
+
+
+def test_a_phrase_exact_in_one_light_and_loosely_matched_to_another_effect_in_a_sibling_is_refused(monkeypatch):
+    """F140 L2: "sparkle" is Sparkle in one list and would be Sparkles in the other."""
+    states = effect_states()
+    give(states, "light.galley_bulb_1", "Galley Spot", ["Solid", "Sparkle"])
+    give(states, "light.galley_bulb_2", "Galley Wash", ["Solid", "Sparkles"])
+    rig = effect_rig(monkeypatch, states)
+    answer = say(rig, "make the galley sparkle", {"effect": "sparkle"})
+    assert writes(rig) == [] and shc.is_refusal_text(answer) and "sparkle" in answer and "sparkles" in answer
+
+
+def test_the_executors_fuzzy_path_is_reached_by_an_effect_phrase_with_a_named_light(monkeypatch):
+    """F146: pinned. "<phrase> effect on <named light>" is recognised without the vocabulary and matched loosely."""
+    rig = effect_rig(monkeypatch)
+    say(rig, "play the candlelite effect on the hexagon", {"effect": "candlelite"})
+    assert writes(rig) == [turn_on("light.hall_lamp", "candlelight")]
+    rig.raw.call_service.reset_mock()
+    say(rig, "set the hexagon to candlelite", {"effect": "candlelite"})
+    assert writes(rig) == [], "T1 needs an exact name; only the effect form is loose"
+
+
+def test_the_needs_words_answer_is_reachable_only_from_the_writer_itself(monkeypatch):
+    rig = effect_rig(monkeypatch)
+
+    async def direct():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+            return await rig.controller._handle_effect_intent(intent(effect="twinkle"), rig.raw, None, None)
+
+    assert asyncio.run(direct()) == shc.EFFECT_NEEDS_WORDS and shc.is_refusal_text(asyncio.run(direct()))
+    body = intent(effect="twinkle")
+    assert asyncio.run(_execute_without_words(rig, body)) == shc.NO_WRITE_CUE_TEXT
+
+
+async def _execute_without_words(rig, body):
+    with mp.ha_permission_scope({"mode": "owner"}, mode="owner", trusted_voice=True):
+        return await rig.controller.execute_intent(body, rig.raw)
+
+
+def test_every_answer_that_changed_nothing_is_a_typed_refusal(monkeypatch):
+    """F142, the consumer side: whatever the scenario, route_control sees a refusal."""
+    scenarios = {}
+
+    def run(name, query, parameters=None, *, action="set_effect", prep=None, **kw):
+        states = effect_states()
+        if prep:
+            prep(states)
+        rig = effect_rig(monkeypatch, states, **kw.pop("rig", {}))
+        scenarios[name] = (say(rig, query, parameters, action=action, **kw), writes(rig))
+
+    run("not found", "set the study prism to candlelight", {"effect": "candlelight"})
+    run("none running", "turn off the effect in the study", {}, action="clear_effect")
+    run("cannot clear", "turn off the effect in the study", {}, action="clear_effect",
+        prep=lambda st: give(st, "light.study_lamp", "Study Prism", ["Fire", "Wave"], effect="Fire"))
+    run("unsupported", "make the galley twinkle", {"effect": "twinkle"},
+        prep=lambda st: [give(st, e, "Plain", None, bit=0) for e in ("light.galley_bulb_1", "light.galley_bulb_2")])
+    run("name not in room", "set the hexagon in the study to candlelight", {"effect": "candlelight"})
+    run("room down", "set the study prism to twinkle", {"effect": "twinkle"},
+        prep=lambda st: give(st, "light.study_lamp", "Study Prism", WLED_LIST, state="unavailable"))
+    run("named down", "set the galley spot to twinkle", {"effect": "twinkle"},
+        prep=lambda st: give(st, "light.galley_bulb_1", "Galley Spot", WLED_LIST, state="unavailable"))
+    run("several rooms", "make the galley and the study twinkle", {"effect": "twinkle"})
+    run("unknown room", "set the study prism in the cellar to twinkle", {"effect": "twinkle"})
+    assert set(scenarios) == {"not found", "none running", "cannot clear", "unsupported", "name not in room", "room down",
+                              "named down", "several rooms", "unknown room"}
+    for name, (answer, made) in scenarios.items():
+        assert made == [], name
+        assert shc.is_refusal_text(answer), (name, answer)
+    failing = effect_rig(monkeypatch)
+    failing.raw.call_service = AsyncMock(side_effect=RuntimeError("x"))
+    assert shc.is_refusal_text(say(failing, "make the galley twinkle", {"effect": "twinkle"}))
+
+
+def test_partial_down_writes_the_light_that_answers_and_counts_the_one_that_does_not(monkeypatch):
+    """F145."""
+    states = effect_states()
+    give(states, "light.galley_bulb_1", "Galley Spot", WLED_LIST, state="unavailable")
+    rig = effect_rig(monkeypatch, states)
+    answer = say(rig, "make the galley twinkle", {"effect": "twinkle"})
+    assert writes(rig) == [turn_on("light.galley_bulb_2", "Twinkle")]
+    assert answer == "Set the Galley Wash to twinkle. 1 other light doesn't have that effect. 1 isn't responding."
+
+
+def test_a_named_light_that_is_up_while_a_sibling_is_down_reports_no_count(monkeypatch):
+    states = effect_states()
+    give(states, "light.galley_bulb_1", "Galley Spot", WLED_LIST, state="unavailable")
+    rig = effect_rig(monkeypatch, states)
+    assert say(rig, "set the galley wash to twinkle", {"effect": "twinkle"}) == "Set the Galley Wash to twinkle."
+
+
+def test_a_clear_on_an_unavailable_light_that_still_reports_an_effect_writes_nothing(monkeypatch):
+    states = effect_states()
+    give(states, "light.galley_bulb_1", "Galley Spot", WLED_LIST, state="unavailable", effect="Fire 2012")
+    give(states, "light.galley_bulb_2", "Galley Wash", WLED_LIST, effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "turn off the effect in the galley", {}, action="clear_effect")
+    assert writes(rig) == [turn_on("light.galley_bulb_2", "Solid")]
+
+
+def test_a_guest_naming_a_restricted_light_in_another_room_gets_the_same_reply_as_for_none(monkeypatch):
+    perms = mp.apply_guest_baseline({"mode": "guest", "restricted_entities": [r"^light\.hall_lamp$"]})
+    rig = effect_rig(monkeypatch)
+    restricted = say(rig, "set the hexagon to candlelight", {"effect": "candlelight"}, perms=perms, device_room="study")
+    nonexistent = say(rig, "set the zebra to candlelight", {"effect": "candlelight"}, perms=perms, device_room="study")
+    assert restricted == nonexistent and writes(rig) == [] and rig.refreshes == 0
+
+
+def test_a_mixed_permitted_and_denied_room_writes_the_permitted_light_and_records_the_denial(monkeypatch):
+    """F146: the denial is recorded and the answer says part was refused."""
+    perms = mp.apply_guest_baseline({"mode": "guest", "restricted_entities": [r"^light\.galley_bulb_1$"]})
+    rig = effect_rig(monkeypatch)
+    captured = {}
+
+    async def go():
+        with mp.ha_permission_scope(perms, mode="owner", utterance=classify_utterance("make the galley twinkle"), trusted_voice=True) as scope:
+            answer = await rig.controller.execute_intent(intent(effect="twinkle") | {"action": "set_effect"}, rig.raw, "make the galley twinkle")
+            captured["denials"] = len(scope.denials)
+            return answer
+
+    answer = asyncio.run(go())
+    assert [w[2]["entity_id"] for w in writes(rig)] == ["light.galley_bulb_2"]
+    assert captured["denials"] >= 1 and answer
+
+
+def test_a_running_effect_reported_in_compact_form_is_cleared_by_name(monkeypatch):
+    states = effect_states()
+    give(states, "light.study_lamp", "Study Prism", WLED_LIST, effect="Fire2012")
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "turn off the fire 2012 effect in the study", {"effect": "fire 2012"}, action="clear_effect")
+    assert writes(rig) == [turn_on("light.study_lamp", "Solid")]
+
+
+def test_a_mixed_clearable_and_unclearable_group_clears_what_it_can(monkeypatch):
+    states = effect_states()
+    give(states, "light.galley_bulb_1", "Galley Spot", WLED_LIST, effect="Fire 2012")
+    give(states, "light.galley_bulb_2", "Galley Wash", ["Fire 2012", "Wave"], effect="Fire 2012")
+    rig = effect_rig(monkeypatch, states)
+    answer = say(rig, "turn off the effect in the galley", {}, action="clear_effect")
+    assert writes(rig) == [turn_on("light.galley_bulb_1", "Solid")]
+    assert answer.startswith("Turned off the effect on the Galley Spot.")
+
+
 # -- the words, not the model -----------------------------------------------
 
 def test_a_model_effect_the_caller_never_said_makes_no_service_call(monkeypatch):
@@ -1217,7 +1475,15 @@ def _recognise_real(text):
                                    names_target=fx.names_target, names_light=fx.names_light)
 
 
-@pytest.mark.parametrize("word", shc._HOUSE_MODE_WORDS)
+D19_WORDS = ("guest", "away", "home", "sleep", "vacation", "holiday", "eco", "game", "night", "morning", "party", "quiet",
+             "do not disturb")
+
+
+def test_the_house_mode_words_are_the_thirteen_the_decision_names():
+    assert len(D19_WORDS) == 13 and set(shc._HOUSE_MODE_WORDS) == set(D19_WORDS)
+
+
+@pytest.mark.parametrize("word", D19_WORDS)
 def test_a_house_mode_never_takes_the_effect_route_even_when_a_light_lists_an_effect_of_that_name(word):
     """D19."""
     for text in (f"turn off {word} mode", f"{word} mode off", f"set the study prism to {word} mode", f"{word} mode on the study prism",

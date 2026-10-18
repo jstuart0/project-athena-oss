@@ -183,6 +183,7 @@ class Rig:
                 self.manager._entities_cache = self.refresh_to
                 self.manager._build_indexes()
             self.manager._cache_time = datetime.now()
+            self.manager._generation += 1  # as the real refresh does, so memos built from the cache see it
             return self.manager._entities_cache
 
         self.manager.refresh_entities = refresh

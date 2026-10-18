@@ -2291,3 +2291,74 @@ class AutomationAgent:
         write_tools, unguarded, stray = _agent_violations(ast.parse(src))
         assert unguarded == []
         assert stray == ["_register"]
+
+
+# ---------------------------------------------------------------------------
+# Light effects through route_control (the 2c review)
+# ---------------------------------------------------------------------------
+
+from orchestrator import room_context as _room_context  # noqa: E402
+
+FOLLOW_UP_CUE = "set the office prism to twinkle. and the same again"
+
+
+def _spy_execute(h):
+    """Replace execute_intent with a recorder that answers 'Done.' and keeps its keyword arguments."""
+    calls = []
+
+    async def execute(intent, *a, **kw):
+        calls.append((dict(intent), a, dict(kw)))
+        return "Done."
+
+    h.controller.execute_intent = execute
+    return calls
+
+
+@pytest.mark.parametrize("room", ["office", None])
+def test_a_replay_passes_the_stored_cue_words_so_a_carried_follow_up_still_writes(room):
+    """F141: the follow-up's own words carry no cue; the pending keeps the words that did."""
+    h = _Harness()
+    prev = _prev_with_pending(fingerprint=_fp(room="office"), expires_at=_time_mod.time() + 60, query="and the same again",
+                              nonce=f"cue-nonce-{room}")
+    prev["parameters"]["pending_write_confirmation"]["cue_query"] = FOLLOW_UP_CUE
+    calls = _spy_execute(h)
+    h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO, room=room))
+    assert len(calls) == 1
+    assert calls[0][2]["cue_query"] == FOLLOW_UP_CUE and calls[0][2]["original_query"] == "and the same again"
+
+
+def test_a_replay_of_a_pending_saved_without_cue_words_passes_none():
+    h = _Harness()
+    prev = _prev_with_pending(fingerprint=_fp(room="office"), expires_at=_time_mod.time() + 60, nonce="cue-nonce-none")
+    calls = _spy_execute(h)
+    h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+    assert len(calls) == 1 and "cue_query" not in calls[0][2]
+
+
+def test_a_pending_stores_the_cue_words_only_when_there_are_some():
+    h = _Harness()
+    blk = write_fanout.FanoutBlock(writes=(write_fanout.PlannedWrite("light", "turn_off", ("light.a", "light.b")),),
+                                   unbounded=False, room="office")
+    intent = {"device_type": "light", "room": "office", "action": "turn_off", "parameters": {}}
+    for cue, expected in ((FOLLOW_UP_CUE, FOLLOW_UP_CUE), (None, None), ("", None)):
+        h.stores.clear()
+        state = _state54("and the same again")
+        with h.patched():
+            _run(rc_module._store_pending_write_confirmation(
+                state, intent, "That would turn off 2 lights in the office. Should I go ahead?", blk,
+                query="and the same again", cue_query=cue))
+        assert h.stores, cue
+        assert h.stores[-1]["parameters"]["pending_write_confirmation"].get("cue_query") == expected
+
+
+def test_an_effect_refusal_stores_no_context_but_the_same_words_as_plain_text_would():
+    """F142: route_control reads the type, not the words."""
+    refused = _room_context.RefusedText("There's no effect running on the office lights.")
+    for answer, stores_context in ((refused, False), (str(refused), True)):
+        h = _Harness()
+        h.controller.execute_intent = AsyncMock(return_value=answer)
+        out = h.run(_state54("office lights off please"))
+        assert out.answer == answer
+        assert bool(h.stores) is stores_context, (type(answer).__name__, h.stores)
+        if not stores_context:
+            assert out.error == "refused"

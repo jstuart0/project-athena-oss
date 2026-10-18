@@ -653,3 +653,20 @@ def test_a_pytest_directory_argument_covers_the_files_beneath_it_and_only_those(
     assert not runs_of(workflow, "tests/integration/test_x.py")  # wrong working directory
     real = all_workflows()["admin-memory.yml"]
     assert runs_of(real, "admin/backend/tests/integration/test_conversation_capture_postgres.py")
+
+
+def test_the_effect_command_tests_run_after_the_files_whose_imports_they_must_not_precede():
+    """test_room_light_area_tier.py (imported by the effect command tests) stubs prometheus_client and
+    langgraph in sys.modules when they are not loaded yet, which breaks any test file that needs the
+    real ones if it runs later in the same process. The orchestrator job runs the real-module files
+    first; this keeps the effect command tests behind them."""
+    workflow = all_workflows()["source-guards.yml"]
+    ordered = next(
+        pytest_paths_in(step["run"]) and [t.split("::", 1)[0] for t in _tokens(step["run"]) if t.endswith(".py") or ".py::" in t]
+        for _, step in run_steps(workflow) if "test_light_effects.py" in step["run"]
+    )
+    later = "tests/unit/test_light_effect_commands.py"
+    assert later in ordered
+    for earlier in ("tests/unit/test_write_fanout_confirmation.py", "tests/unit/test_state_question_routing.py",
+                    "tests/unit/test_smart_home_intent_prompt.py"):
+        assert earlier in ordered and ordered.index(earlier) < ordered.index(later), (earlier, later)
