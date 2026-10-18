@@ -1,6 +1,6 @@
 """Read-only probe of the Home Assistant area registry, for a roll.
 
-    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--sources] [--policy] [--utterances FILE]
+    cd /app && python -m orchestrator.room_probe --runs 10 [--shape] [--areas] [--sources] [--policy] [--effects] [--utterances FILE]
 
 Reads ``HA_URL`` and ``HA_TOKEN`` from the environment (through the one
 credential resolver), fetches the three registry lists ``--runs`` times over the
@@ -19,6 +19,12 @@ same read-only WebSocket session the orchestrator uses, and prints:
   how many protected entities (the policy rooms' helpers, those scripts and the
   configured extras) sit in an area or on a device or label; with ``--areas``,
   one ``policy <area key> -> <slug>`` line per mapped room;
+* ``--effects``: how many lights there are, how many take effects (the effect
+  feature bit and a usable list), how many report a list without the bit, how
+  many have a clear value in their list, how many have one running, and how many
+  names were dropped from the lists (unusable: not text, too long, outside the
+  allowed characters, repeated or past the cap); counts only, never an id, a name
+  or an effect;
 * ``--shape``: the key names present in each registry list (never a value);
 * ``--utterances FILE`` (one utterance per line): what ``decide_room`` would
   do for each, from each area that has a voice satellite.
@@ -37,7 +43,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TextIO
 
-from orchestrator import mode_permission, room_context, room_policy
+from orchestrator import light_effects, mode_permission, room_context, room_policy
 from orchestrator.room_directory import RoomDirectoryProvider
 from orchestrator.ha_entity_manager import _room_light_exclude_patterns, area_lamp_targets
 from shared.ha_auth import HAAuthLatch
@@ -155,6 +161,33 @@ def policy_lines(
     return lines
 
 
+def effect_lines(states: Mapping[str, Any]) -> List[str]:
+    """What the lights report about effects, as counts. A light is a ``light.``
+    state; no id, friendly name or effect name is read into the output."""
+    lights = [s for eid, s in states.items() if isinstance(eid, str) and eid.startswith("light.") and isinstance(s, dict)]
+    take = sum(1 for s in lights if light_effects.supports_effects(s))
+    unflagged = sum(
+        1 for s in lights
+        if not light_effects.supports_effects(s) and isinstance((s.get("attributes") or {}).get("effect_list"), list)
+        and (s["attributes"]["effect_list"])
+    )
+    clearable = sum(
+        1 for s in lights
+        if light_effects.supports_effects(s)
+        and light_effects.clear_value(light_effects.sanitize_effect_list(s["attributes"].get("effect_list"))) is not None
+    )
+    running = sum(1 for s in lights if light_effects.active_effect(s) is not None)
+    dropped = 0
+    for s in lights:
+        raw = (s.get("attributes") or {}).get("effect_list")
+        if isinstance(raw, (list, tuple)):
+            dropped += len(raw) - len(light_effects.sanitize_effect_list(raw))
+    return [
+        f"effects: lights {len(lights)}, with effects {take}, list without feature {unflagged}, "
+        f"with a clear value {clearable}, running {running}, dropped names {dropped}",
+    ]
+
+
 async def run(
     fetch: Callable[[], Any],
     read_states: Callable[[], Any],
@@ -166,6 +199,7 @@ async def run(
     exclude: Sequence = (),
     sources: bool = False,
     policy: bool = False,
+    effects: bool = False,
     out: TextIO = sys.stdout,
 ) -> int:
     timings, raw = [], None
@@ -194,6 +228,10 @@ async def run(
 
     if policy:
         for line in policy_lines(snapshot, raw, states, show_names=show_names):
+            print(line, file=out)
+
+    if effects:
+        for line in effect_lines(states):
             print(line, file=out)
 
     if shape:
@@ -252,6 +290,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--areas", action="store_true", help="print area keys instead of numbering them")
     parser.add_argument("--sources", action="store_true", help="print where the room lights and speaker rooms come from")
     parser.add_argument("--policy", action="store_true", help="print the room-policy boundary: counts, and mapped rooms with --areas")
+    parser.add_argument("--effects", action="store_true", help="print how many lights take effects, counts only")
     parser.add_argument("--utterances", metavar="FILE")
     args = parser.parse_args(argv)
     service_key = os.environ.get("SERVICE_API_KEY")
@@ -268,7 +307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return asyncio.run(_run_with_household(
             snapshot_fetcher(resolver, latch, caller="orchestrator_registry"),
             lambda: _live_states(resolver, latch),
-            runs=args.runs, shape=args.shape, show_names=args.areas, sources=args.sources, policy=args.policy,
+            runs=args.runs, shape=args.shape, show_names=args.areas, sources=args.sources, policy=args.policy, effects=args.effects,
             utterances=_read_utterances(args.utterances),
         ))
     except Exception as exc:

@@ -13,11 +13,12 @@ Supports guest-scoped automations with archival/restoration.
 
 import asyncio
 import json
+import math
 import re
 import time
 import unicodedata
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
@@ -25,7 +26,7 @@ from shared.config import get_config as get_athena_config
 from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
-from orchestrator import access_target
+from orchestrator import access_target, light_effects
 from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import default_city
 from orchestrator.utterance_kind import (
@@ -70,7 +71,18 @@ def _narration_refusal(context: Any, names: tuple = ()) -> Optional[str]:
     return None
 
 
-def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple = ()) -> Optional[str]:
+def _effect_act(effect: Any) -> str:
+    """The cue action an effect value asks for: a clear alias clears, anything else sets."""
+    clears = isinstance(effect, str) and (
+        light_effects.normalize(effect) in light_effects.CLEAR_ALIASES
+        or light_effects.compact(effect) in light_effects.CLEAR_ALIASES
+    )
+    return "clear_effect" if clears else "set_effect"
+
+
+def _service_cue_refusal(
+    domain: Any, service: Any, context: Any, names: tuple = (), data: Any = None,
+) -> Optional[str]:
     """An immediate service call needs a cue in the words, judged by the same
     rule the controller applies to a spoken command. A domain with no device
     kind of its own (an input boolean, an automation, an alarm panel) needs a
@@ -78,12 +90,22 @@ def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple =
     query = context.get("query") if isinstance(context, dict) else None
     if not isinstance(query, str):
         return None
-    domain_key = str(domain).lower()
+    domain_key = str(domain).strip().lower()
     kind = _SERVICE_KINDS.get(domain_key, domain_key)
     from orchestrator.smart_home_controller import (  # lazy, like mode_permission (see above)
         NO_DEVICE_TEXT, NO_WRITE_CUE_TEXT, scene_request_allowed,
     )
     uk = classify_utterance(query, assistant_names=names)
+    act, parameters = service, None
+    if kind == "light" and isinstance(data, dict) and "effect" in data:
+        # A model's effect counts only when the words themselves name it (or ask
+        # to clear it), a question included: this runs before the question exit.
+        act, parameters = _effect_act(data["effect"]), {"effect": data["effect"]}
+        problem = access_target.write_cue_problem(
+            kind, act, command_query(uk, query), parameters, kind_hint=uk.kind, assistant_names=names,
+        )
+        if problem is not None:
+            return NO_DEVICE_TEXT if problem == access_target.WRONG_DEVICE else NO_WRITE_CUE_TEXT
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return None  # a question's write is stopped by the read-only scope or the fan-out gate
     if has_trailing_condition(query, names):
@@ -95,11 +117,171 @@ def _service_cue_refusal(domain: Any, service: Any, context: Any, names: tuple =
     if kind in _COMMAND_ONLY_KINDS or kind not in _SERVICE_KINDS.values():
         return None if uk.kind == UtteranceKind.IMPERATIVE else NO_WRITE_CUE_TEXT
     problem = access_target.write_cue_problem(
-        kind, service, command_query(uk, query), kind_hint=uk.kind, assistant_names=names,
+        kind, act, command_query(uk, query), parameters, kind_hint=uk.kind, assistant_names=names,
     )
     if problem is None:
         return None
     return NO_DEVICE_TEXT if problem == access_target.WRONG_DEVICE else NO_WRITE_CUE_TEXT
+
+
+# Light effects (D8). An effect reaches Home Assistant only as a literal
+# `data.effect` of a `light.turn_on` the user's words call for, aimed at
+# concrete lights the caller may control, and spelled as each light's own list
+# spells it. Everything else that carries one is refused.
+EFFECT_CANT_CHECK_TEXT = "I can't check that light's effects right now."
+EFFECT_NOT_ALLOWED_TEXT = "I can only set a light effect by name, on specific lights."
+EFFECT_SCHEDULED_CLEAR_TEXT = "I can't schedule turning an effect off."
+EFFECT_NOT_FOUND_TEXT = "Those lights don't have that effect."
+EFFECT_NONE_RUNNING_TEXT = "There's no effect running on those lights."
+EFFECT_CANT_CLEAR_TEXT = "I can't turn off the effect on those lights."
+EFFECT_TOO_MANY_TEXT = "That's too many lights for one effect."
+BAD_SERVICE_TEXT = "I can't make that call."
+EFFECT_GROUP_TEXT = "I can't tell which lights are in that group."
+TEMPLATE_REFUSED_TEXT = "I can't set up an automation that uses a template."
+MAX_EFFECT_LEAVES = 64
+EFFECT_READ_MAX_AGE_SECONDS = 5.0
+EFFECT_LIST_SHOWN = 25
+_CONTAINER_KEYS = ("sequence", "default", "then", "else", "parallel", "choose", "repeat", "if")
+
+
+_SLUG = re.compile(r"[a-z_]+")
+
+
+def _slug(value: Any) -> Optional[str]:
+    """A domain or service as one lower-case word, or None."""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    return text if _SLUG.fullmatch(text) else None
+
+
+def _walk_steps(steps: Any):
+    from orchestrator.mode_permission import _walk_automation_steps  # lazy, like mode_permission (see above)
+
+    return _walk_automation_steps(steps)
+
+
+def _effect_entries(steps: Any) -> list:
+    """Every place an `effect` key sits in a list of steps: (path, step). The
+    step is set only for a top-level `service:` leaf's `data.effect`."""
+    return [e for e in light_effects.effect_carriers(steps, _walk_steps) if e[0] and e[0][-1] == "effect"]
+
+
+def _effect_pairs(steps: Any) -> Optional[list]:
+    """The (light, effect) pairs a list of steps sets, sorted, or None when any
+    effect in it sits somewhere this can't read."""
+    pairs = []
+    for _path, step in _effect_entries(steps):
+        data = step.get("data") if step else None
+        if not isinstance(data, dict) or not isinstance(data.get("effect"), str):
+            return None
+        ids = light_effects.effect_target_ids(data.get("entity_id"), step.get("target"), step.get("entity_id"))
+        if ids is None:
+            return None
+        pairs.extend((light, data["effect"]) for light in ids)
+    return sorted(pairs)
+
+
+def _canonical_effect_step(step: Dict[str, Any]) -> Dict[str, Any]:
+    """A literal `action: light.turn_on` step as the `service:` step the
+    builder reads. Only a step that carries an effect is touched."""
+    if not _effect_entries([step]) or not isinstance(step.get("action"), str):
+        return step
+    if "service" in step and step["service"] != step["action"]:
+        return step
+    return {**{k: v for k, v in step.items() if k != "action"}, "service": step["action"]}
+
+
+_BRIGHTNESS_KEYS = frozenset({"brightness", "brightness_pct", "brightness_step", "brightness_step_pct"})
+_COLOUR_KEYS = frozenset({
+    "color_name", "color_temp", "color_temp_kelvin", "kelvin", "hs_color", "rgb_color", "rgbw_color", "rgbww_color",
+    "xy_color", "white",
+})
+# Markers of a light that stands for several lights without listing them (a
+# bridge or Zigbee group): its members can't be permission-checked.
+_GROUP_MARKERS = ("is_hue_group", "is_deconz_group", "group_id", "group_type", "members", "lights")
+
+
+_DELAY_UNITS = frozenset({"days", "hours", "minutes", "seconds", "milliseconds"})
+_DELAY_CLOCK = re.compile(r"\d{1,3}:\d{2}:\d{2}(\.\d{1,3})?")
+
+
+def _delay_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+
+def _plain_delay(delay: Any) -> bool:
+    """A delay Home Assistant takes with nothing to evaluate: seconds as a
+    number, "HH:MM:SS" (optionally ".fff"), or a dict of day, hour, minute,
+    second and millisecond amounts. A template or any other shape is not."""
+    if isinstance(delay, dict):
+        return all(k in _DELAY_UNITS and _delay_number(v) for k, v in delay.items())
+    if isinstance(delay, str):
+        return _DELAY_CLOCK.fullmatch(delay) is not None
+    return _delay_number(delay)
+
+
+_TEMPLATE_MARKERS = ("{{", "{%", "{#")
+_TEXT_KEYS = frozenset({"message", "title", "text"})
+# What a template can read about the house: states, attributes, entity sets.
+_STATE_READERS = re.compile(
+    r"\b(states|state_attr|is_state|is_state_attr|expand|area_\w+|device_\w+|label_\w+|floor_\w+|"
+    r"integration_entities|closest|distance)\b"
+)
+
+
+def _marked(text: Any) -> bool:
+    return isinstance(text, str) and any(m in text for m in _TEMPLATE_MARKERS)
+
+
+def _template_refused(node: Any, *, notify: bool = False, depth: int = 0) -> bool:
+    """Whether a non-owner's action list holds a template it may not carry: any
+    template at all, except the text of a notify or tts message, and even there
+    nothing that reads the house's state. A template can read a light the caller
+    may not control and say what it found out loud."""
+    if depth > 16:
+        return True
+    if isinstance(node, (list, tuple)):
+        return any(_template_refused(item, depth=depth + 1) for item in node)
+    if not isinstance(node, dict):
+        return False
+    service = node.get("service", node.get("action"))
+    speaks = isinstance(service, str) and service.strip().lower().startswith(("notify.", "tts."))
+    for key, value in node.items():
+        if _marked(key):
+            return True
+        if _marked(value):
+            if not ((notify or speaks) and key in _TEXT_KEYS) or _STATE_READERS.search(value):
+                return True
+        elif isinstance(value, (dict, list, tuple)) and _template_refused(
+            value, notify=speaks and key == "data", depth=depth + 1,
+        ):
+            return True
+    return False
+
+
+def _hides_members(state: Any) -> bool:
+    attrs = _effect_state_attrs(state)
+    if "entity_id" in attrs and not (isinstance(attrs["entity_id"], list) and attrs["entity_id"]):
+        return True
+    return any(attrs.get(marker) for marker in _GROUP_MARKERS)
+
+
+def _backed_params(params: Dict[str, Any], words: Any) -> Dict[str, Any]:
+    """The light parameters an effect call may keep: a brightness only when the
+    words talk brightness (or give a percent), a colour only when they name one,
+    and nothing else. The model's other choices are dropped."""
+    text = words if isinstance(words, str) else ""
+    spoken = set(access_target.tokens(text))
+    keep = set()
+    if "%" in text or spoken & access_target.BRIGHTNESS_WORDS:
+        keep |= _BRIGHTNESS_KEYS
+    if spoken & access_target.COLOR_WORDS:
+        keep |= _COLOUR_KEYS
+    return {k: v for k, v in params.items() if k in keep}
+
+
+def _effect_state_attrs(state: Any) -> Mapping[str, Any]:
+    attrs = state.get("attributes") if isinstance(state, dict) else None
+    return attrs if isinstance(attrs, dict) else {}
 
 
 # Tool definitions for the LLM
@@ -132,7 +314,8 @@ AUTOMATION_TOOLS = [
                             "hs_color": {"type": "array", "description": "[hue 0-360, saturation 0-100]"},
                             "rgb_color": {"type": "array", "description": "[red, green, blue] 0-255 each"},
                             "temperature": {"type": "number", "description": "Temperature setpoint"},
-                            "hvac_mode": {"type": "string", "description": "HVAC mode (heat, cool, auto, off)"}
+                            "hvac_mode": {"type": "string", "description": "HVAC mode (heat, cool, auto, off)"},
+                            "effect": {"type": "string", "description": "Light effect (light.turn_on only). Only an effect the user named in their words; the light's own effect list is in get_entity_state"}
                         }
                     }
                 },
@@ -931,10 +1114,130 @@ class AutomationAgent:
             return None
         return NAME_THE_DOOR_TEXT
 
+    @staticmethod
+    def _effect_denial(entity_ids: List[str]) -> Optional[str]:
+        """The scope's refusal when the caller may not control one of these
+        lights, else None. Reads no state, so it can run before anything else."""
+        from orchestrator.mode_permission import (
+            HADenial, check_entity_permission, current_ha_scope, record_precheck_denial, refusal_message,
+        )
+        permissions, scope = _scope_permissions(), current_ha_scope()
+        denied = [e for e in entity_ids if not check_entity_permission(e, permissions)]
+        if not denied:
+            return None
+        record_precheck_denial(scope, "light", "turn_on", denied)
+        return refusal_message(
+            (HADenial(domain="light", service="turn_on", targets=tuple(denied), reason="entity_or_domain_denied"),),
+            scope,
+        )
+
+    async def _effect_leaves(
+        self, ids: List[str], *, ceiling: int = MAX_EFFECT_LEAVES,
+    ) -> Tuple[Optional[str], List[str], Mapping[str, Any]]:
+        """The physical lights beneath the target ids, or a refusal. The order is
+        fixed: permission on the ids, then group members (membership only), then
+        permission on every leaf, and only then the caller reads names or effect
+        lists, so a denied light's data is never read. A group whose members
+        can't be listed would fan out to lights nobody checked, so it refuses."""
+        from orchestrator.ha_entity_manager import expand_light_leaves  # lazy, like mode_permission (see above)
+
+        refusal = self._effect_denial(ids)
+        if refusal:
+            return refusal, [], {}
+        if self.entity_manager is None:
+            return EFFECT_CANT_CHECK_TEXT, [], {}
+        try:
+            entities = await self.entity_manager.get_entities(max_age=EFFECT_READ_MAX_AGE_SECONDS)
+        except Exception:
+            return EFFECT_CANT_CHECK_TEXT, [], {}
+        if not isinstance(entities, Mapping):
+            return EFFECT_CANT_CHECK_TEXT, [], {}
+        members = expand_light_leaves(ids, entities)
+        leaves = sorted({leaf for group in members.values() for leaf in group})
+        if len(leaves) > min(MAX_EFFECT_LEAVES, ceiling):
+            return EFFECT_TOO_MANY_TEXT, [], {}
+        if not all(leaf.startswith("light.") for leaf in leaves):
+            return EFFECT_NOT_ALLOWED_TEXT, [], {}
+        refusal = self._effect_denial(leaves)
+        if refusal:
+            return refusal, [], {}
+        if any(_hides_members(entities.get(leaf)) for leaf in leaves):
+            return EFFECT_GROUP_TEXT, [], {}
+        return None, leaves, entities
+
+    @staticmethod
+    def _leaf_effects(entities: Mapping[str, Any], leaf: str) -> Tuple[str, ...]:
+        """A permitted light's usable effect names (empty when it takes none)."""
+        state = entities.get(leaf)
+        if not light_effects.supports_effects(state):
+            return ()
+        return light_effects.sanitize_effect_list(_effect_state_attrs(state).get("effect_list"))
+
+    @classmethod
+    def _spell_for_leaves(cls, effect: str, leaves: List[str], entities: Mapping[str, Any]) -> Optional[Dict[str, List[str]]]:
+        """Leaves grouped by the spelling their own list gives the effect, or
+        None when any leaf lacks it (all or nothing). A set that lands on a
+        clear member is a clear in disguise, so it is not a match."""
+        groups: Dict[str, List[str]] = {}
+        for leaf in leaves:
+            name = light_effects.match(effect, cls._leaf_effects(entities, leaf))
+            if name is None or light_effects.compact(name) in light_effects.CLEAR_ALIASES:
+                return None
+            groups.setdefault(name, []).append(leaf)
+        return groups
+
+    async def _effect_call(
+        self, domain: Any, service: Any, data: Any, context: Dict,
+    ) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]], int]:
+        """(refusal, light.turn_on payloads, lights skipped) for an immediate
+        call that carries an effect; (None, None, 0) for one that doesn't. Any
+        `effect` in the data is a light-effect request whatever the domain says.
+        Permission comes before the domain test, so a caller who may not control
+        the light hears the same answer either way. Every payload targets leaves
+        only and spells the effect as that light's own list does. A clear goes
+        only to lights that are on with a non-clear effect running, so clearing
+        never powers a light on."""
+        step = {"service": f"{domain}.{service}", "data": data}
+        if not _effect_entries([step]):
+            return None, None, 0
+        ids = light_effects.effect_target_ids(data.get("entity_id")) if isinstance(data, dict) else None
+        if ids:
+            refusal = self._effect_denial(ids)
+            if refusal:
+                return refusal, None, 0
+        if light_effects.effect_step_problem(step) is not None or ids is None:
+            return EFFECT_NOT_ALLOWED_TEXT, None, 0
+        threshold = get_athena_config().ha_write_fanout_confirm_threshold
+        refusal, leaves, entities = await self._effect_leaves(ids, ceiling=threshold or MAX_EFFECT_LEAVES)
+        if refusal:
+            return refusal, None, 0
+        rest = _backed_params(
+            {k: v for k, v in data.items() if k not in ("effect", "entity_id")}, context.get("query"),
+        )
+        skipped = 0
+        if _effect_act(data["effect"]) == "clear_effect":
+            running = [leaf for leaf in leaves if light_effects.active_effect(entities.get(leaf)) is not None]
+            if not running:
+                return EFFECT_NONE_RUNNING_TEXT, None, 0
+            groups: Dict[str, List[str]] = {}
+            for leaf in running:
+                value = light_effects.clear_value(self._leaf_effects(entities, leaf))
+                if value is not None:
+                    groups.setdefault(value, []).append(leaf)
+            if not groups:
+                return EFFECT_CANT_CLEAR_TEXT, None, 0
+            skipped = len(leaves) - sum(len(g) for g in groups.values())
+        else:
+            groups = self._spell_for_leaves(data["effect"], leaves, entities)
+            if groups is None:
+                return EFFECT_NOT_FOUND_TEXT, None, 0
+        return None, [{**rest, "entity_id": group, "effect": name} for name, group in groups.items()], skipped
+
     async def _exec_ha_service(self, args: Dict, context: Dict) -> str:
         """Execute immediate HA service call."""
         entity_id = args.get("entity_id", "")
-        service = args.get("service", "turn_on")
+        if isinstance(entity_id, str):
+            entity_id = entity_id.strip().lower()
         data = args.get("data", {})
 
         # Extract domain from entity_id if not explicitly provided
@@ -945,18 +1248,21 @@ class AutomationAgent:
             domain = entity_id.split(".")[0]
         else:
             domain = "light"  # Last resort default
+        # One spelling of the domain and service from here on: every guard below
+        # (the cues, the grounding, the effect checks, the call) reads these.
+        domain, service = _slug(domain), _slug(args.get("service", "turn_on"))
+        if domain is None or service is None:
+            return BAD_SERVICE_TEXT
 
         # Resolve room name to entity if needed -- but a room never becomes a
         # door: a lock or cover target is a named entity or nothing, so a
         # call with none is refused rather than aimed at "<domain>.<room>".
-        way_in_domain = str(domain).lower() in access_target.WAY_IN_DOMAINS
-        if not entity_id and way_in_domain and str(domain).lower() in access_target.DOMAINS:
+        way_in_domain = domain in access_target.WAY_IN_DOMAINS
+        if not entity_id and way_in_domain and domain in access_target.DOMAINS:
             return NAME_THE_DOOR_TEXT
-        grounding = await self._ungrounded_target(args, str(domain).lower(), str(service).lower(), context)
+        grounding = await self._ungrounded_target(args, domain, service, context)
         if grounding:
             return grounding
-        if way_in_domain and isinstance(entity_id, str) and self._CONCRETE_ID.match(entity_id.strip().lower()):
-            entity_id = entity_id.strip().lower()  # the id that was validated, nothing else
         if not entity_id and context.get("room") and not way_in_domain:
             entity_id = f"{domain}.{context['room']}"
 
@@ -971,12 +1277,21 @@ class AutomationAgent:
         if refusal:
             return refusal
         names = await _assistant_names()
-        refusal = _narration_refusal(context, names) or _service_cue_refusal(domain, service, context, names)
+        refusal = _narration_refusal(context, names) or _service_cue_refusal(domain, service, context, names, data)
+        if refusal:
+            return refusal
+        refusal, effect_calls, skipped = await self._effect_call(domain, service, data, context)
         if refusal:
             return refusal
 
         from orchestrator.mode_permission import HADenial, HAWritePermissionDenied, current_ha_scope, refusal_message
         try:
+            if effect_calls is not None:
+                for payload in effect_calls:
+                    await self.ha_client.call_service("light", "turn_on", payload)
+                changed = sum(len(p["entity_id"]) for p in effect_calls)
+                left = f"; {skipped} had no effect running or can't be cleared" if skipped else ""
+                return f"Changed the effect on {changed} light(s){left}"
             await self.ha_client.call_service(domain, service, data)
             return f"Called {domain}.{service} on {entity_id}"
         except HAWritePermissionDenied as denied:
@@ -988,7 +1303,7 @@ class AutomationAgent:
             )
             return make_user_safe(phrase, 403) or model_safe_error(denied)
         except Exception as e:
-            logger.error(f"HA service call failed: {e}")
+            logger.error("ha_service_call_failed", error_class=type(e).__name__)
             return f"Failed to call {domain}.{service}: {model_safe_error(e)}"
 
     async def _create_automation(self, args: Dict, context: Dict) -> str:
@@ -1014,9 +1329,17 @@ class AutomationAgent:
         # Generate unique automation ID
         automation_id = f"voice_{mode}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
+        # One validated action list feeds both the build and the stored record.
+        refusal, validated_args = await self._effect_actions(args, context)
+        if refusal:
+            return refusal
+
         try:
             # Build HA automation config
-            ha_config = self._build_ha_automation(automation_id, args)
+            ha_config = self._build_ha_automation(automation_id, validated_args)
+            refusal = self._built_effect_problem(ha_config, validated_args)
+            if refusal:
+                return refusal
 
             # Register with Home Assistant
             await self._register_ha_automation(automation_id, ha_config)
@@ -1024,7 +1347,7 @@ class AutomationAgent:
             # Store in admin backend if available
             if self.admin:
                 await self._store_automation_record(
-                    automation_id, args, context
+                    automation_id, validated_args, context
                 )
 
             name = args.get("name", "Automation")
@@ -1034,8 +1357,116 @@ class AutomationAgent:
             return f"Created automation {render_label(name)} (triggers at {render_label(trigger_desc)})"
 
         except Exception as e:
-            logger.error(f"Failed to create automation: {e}")
+            logger.error("create_automation_failed", error_class=type(e).__name__)
             return f"Failed to create automation: {model_safe_error(e)}"
+
+    async def _effect_actions(self, args: Dict, context: Dict) -> Tuple[Optional[str], Optional[Dict]]:
+        """(refusal, args to build and store) for a scheduled automation.
+
+        With no effect anywhere the args pass through unchanged. An effect is
+        allowed only as the literal `data.effect` of a top-level `light.turn_on`
+        step, named in the words, never a clear, aimed at lights the caller may
+        control and spelled as each light's list spells it; that step becomes one
+        canonical `service:` step per spelling. An effect anywhere else (the
+        singular `action`, a container, a template, a variable, a trigger) or
+        content hidden from this check beside a light refuses the whole call."""
+        if _effect_entries([{k: v for k, v in args.items() if k != "actions"}]):
+            return EFFECT_NOT_ALLOWED_TEXT, None
+        actions = args.get("actions")
+        if isinstance(actions, (list, tuple)):
+            if any(isinstance(step, dict) and "delay" in step and not _plain_delay(step["delay"]) for step in actions):
+                return EFFECT_NOT_ALLOWED_TEXT, None
+            if _scope_permissions().get("mode", "owner") != "owner" and _template_refused(actions):
+                return TEMPLATE_REFUSED_TEXT, None
+        entries = light_effects.effect_carriers(actions, _walk_steps)
+        if not entries:
+            return None, args
+        if not isinstance(actions, (list, tuple)):
+            return EFFECT_NOT_ALLOWED_TEXT, None
+        with_effect = {e[0][0] for e in entries if e[0][-1] == "effect"}
+        for index in {e[0][0] for e in entries} - with_effect:
+            step = actions[index]
+            if (not isinstance(step, dict) or any(k in step for k in _CONTAINER_KEYS)
+                    or light_effects.effect_step_problem(step) is not None):
+                return EFFECT_NOT_ALLOWED_TEXT, None
+        replacements: Dict[int, List[Dict[str, Any]]] = {}
+        names = await _assistant_names() if with_effect else ()
+        for index in sorted(with_effect):
+            refusal, steps = await self._scheduled_effect_step(actions[index], context, names)
+            if refusal:
+                return refusal, None
+            replacements[index] = steps
+        if not replacements:
+            return None, args
+        rewritten = [piece for i, step in enumerate(actions) for piece in replacements.get(i, [step])]
+        return None, {**args, "actions": rewritten}
+
+    async def _scheduled_effect_step(
+        self, raw: Any, context: Dict, names: tuple,
+    ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        if not isinstance(raw, dict):
+            return EFFECT_NOT_ALLOWED_TEXT, []
+        step = _canonical_effect_step(raw)
+        delay = step.get("delay")
+        core = {k: v for k, v in step.items() if k != "delay"}
+        raw_data = core.get("data")
+        wanted = light_effects.effect_target_ids(
+            raw_data.get("entity_id") if isinstance(raw_data, dict) else None, core.get("target"), core.get("entity_id"),
+        )
+        if wanted:  # permission comes before any other judgement of the step
+            refusal = self._effect_denial(wanted)
+            if refusal:
+                return refusal, []
+        direct = _effect_entries([core])
+        if len(direct) != 1 or direct[0][1] is None or light_effects.effect_step_problem(core) is not None:
+            return EFFECT_NOT_ALLOWED_TEXT, []
+        data = core["data"]
+        effect = data["effect"]
+        if _effect_act(effect) == "clear_effect":
+            return EFFECT_SCHEDULED_CLEAR_TEXT, []
+        query = context.get("query")
+        from orchestrator.smart_home_controller import NO_DEVICE_TEXT, NO_WRITE_CUE_TEXT  # lazy, like mode_permission (see above)
+        if not isinstance(query, str):
+            return NO_WRITE_CUE_TEXT, []
+        problem = access_target.write_cue_problem(
+            "light", "set_effect", query, {"effect": effect}, assistant_names=names, allow_scheduled=True,
+        )
+        if problem is not None:
+            return (NO_DEVICE_TEXT if problem == access_target.WRONG_DEVICE else NO_WRITE_CUE_TEXT), []
+        ids = light_effects.effect_target_ids(data.get("entity_id"), core.get("target"), core.get("entity_id"))
+        if ids is None:
+            return EFFECT_NOT_ALLOWED_TEXT, []
+        refusal, leaves, entities = await self._effect_leaves(ids)
+        if refusal:
+            return refusal, []
+        groups = self._spell_for_leaves(effect, leaves, entities)
+        if groups is None:
+            return EFFECT_NOT_FOUND_TEXT, []
+        rest = _backed_params({k: v for k, v in data.items() if k not in ("effect", "entity_id")}, query)
+        steps = [
+            {"service": "light.turn_on", "entity_id": group, "data": {**rest, "effect": name}}
+            for name, group in groups.items()
+        ]
+        if "delay" in step:
+            steps[-1]["delay"] = delay
+        return None, steps
+
+    @staticmethod
+    def _built_effect_problem(ha_config: Dict, validated_args: Dict) -> Optional[str]:
+        """Defence in depth on the config about to be registered: every effect in
+        the whole of it (not only `action`: variables, blueprint inputs, trigger
+        variables) is one the validated list set, and nothing else."""
+        built = ha_config.get("action")
+        in_action = _effect_entries(built)
+        everywhere = _effect_entries([ha_config])
+        wanted = _effect_pairs(validated_args.get("actions"))
+        got = _effect_pairs(built)
+        if wanted is None or got is None or wanted != got or len(everywhere) != len(in_action):
+            return EFFECT_NOT_ALLOWED_TEXT
+        for step in built if isinstance(built, list) else []:
+            if isinstance(step, dict) and _effect_entries([step]) and light_effects.effect_step_problem(step) is not None:
+                return EFFECT_NOT_ALLOWED_TEXT
+        return None
 
     def _build_ha_automation(self, automation_id: str, args: Dict) -> Dict:
         """Convert tool args to HA automation format."""
@@ -1170,7 +1601,7 @@ class AutomationAgent:
                 "data": action.get("data", {})
             }
 
-        logger.warning(f"Unknown action format: {action}")
+        logger.warning("unknown_action_format", action_keys=sorted(str(k) for k in action))
         return None
 
     def _build_single_trigger(self, trigger: Dict) -> Optional[Dict]:
@@ -1353,11 +1784,7 @@ class AutomationAgent:
             success = await self.ha_client.create_automation(automation_id, config)
 
             if success:
-                logger.info(
-                    "ha_automation_registered",
-                    automation_id=automation_id,
-                    alias=config.get("alias")
-                )
+                logger.info("ha_automation_registered", automation_id=automation_id)
             else:
                 logger.warning(
                     "ha_automation_registration_failed",
@@ -1367,11 +1794,7 @@ class AutomationAgent:
                 raise Exception("Home Assistant rejected the automation configuration")
 
         except Exception as e:
-            logger.error(
-                "ha_automation_registration_error",
-                automation_id=automation_id,
-                error=str(e)
-            )
+            logger.error("ha_automation_registration_error", automation_id=automation_id, error_class=type(e).__name__)
             raise
 
     async def _store_automation_record(self, automation_id: str, args: Dict, context: Dict):
@@ -1417,7 +1840,7 @@ class AutomationAgent:
                 automation_id=automation_id,
             )
         except Exception as e:
-            logger.warning(f"Could not store automation record: {e}")
+            logger.warning("voice_automation_store_failed", error_class=type(e).__name__)
 
     async def _list_automations(self, args: Dict, context: Dict) -> str:
         """List voice-created automations.
@@ -1507,6 +1930,22 @@ class AutomationAgent:
             logger.error(f"Failed to delete automation: {e}")
             return "Could not delete automation."
 
+    @staticmethod
+    def _effects_line(entity_id: str, state: Dict) -> str:
+        """The effects a light the caller may control takes, at most 25 names and
+        a count of the rest; empty for a denied light or one with none."""
+        from orchestrator.mode_permission import check_entity_permission  # lazy, like mode_permission (see above)
+
+        if not check_entity_permission(entity_id, _scope_permissions()) or not light_effects.supports_effects(state):
+            return ""
+        listed = light_effects.sanitize_effect_list(_effect_state_attrs(state).get("effect_list"))
+        shown = ", ".join(listed[:EFFECT_LIST_SHOWN])
+        more = f" and {len(listed) - EFFECT_LIST_SHOWN} more" if len(listed) > EFFECT_LIST_SHOWN else ""
+        running = light_effects.active_effect(state)
+        if running and not light_effects.EFFECT_CHARSET.fullmatch(running):
+            running = None
+        return f"; effects: {shown}{more}" + (f"; running: {running}" if running else "")
+
     async def _get_state(self, args: Dict) -> str:
         """Get entity state from Home Assistant."""
         entity_id = args.get("entity_id", "")
@@ -1522,9 +1961,10 @@ class AutomationAgent:
 
                 if domain == "light":
                     brightness = attributes.get("brightness", 0)
+                    effects = self._effects_line(entity_id, state)
                     if state_value == "on":
-                        return f"{entity_id} is on (brightness: {int(brightness/255*100)}%)"
-                    return f"{entity_id} is off"
+                        return f"{entity_id} is on (brightness: {int(brightness/255*100)}%){effects}"
+                    return f"{entity_id} is off{effects}"
 
                 elif domain == "climate":
                     temp = attributes.get("current_temperature")
