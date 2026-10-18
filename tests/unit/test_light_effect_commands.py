@@ -1565,3 +1565,13 @@ def test_turn_off_the_effect_through_the_fast_path_does_not_touch_an_off_light(m
     rig = effect_rig(monkeypatch, states)
     _, answer = _through_the_fast_path(rig, "turn off the effect")
     assert writes(rig) == [] and answer == "There's no effect running on the Study Prism."
+
+
+def test_a_repeated_effect_word_names_no_light_in_the_controller_either(monkeypatch):
+    """F151: "twinkle twinkle" must not name a bedroom light called Twinkle, or send the write there."""
+    states = effect_states()
+    give(states, "light.north_lamp", "Twinkle", GOVEE_LIST)
+    rig = effect_rig(monkeypatch, states)
+    say(rig, "make the galley twinkle twinkle", {"effect": "twinkle"})
+    assert sorted(w[2]["entity_id"] for w in writes(rig)) == ["light.galley_bulb_1", "light.galley_bulb_2"]
+    assert all(w[2]["entity_id"] != "light.north_lamp" for w in writes(rig))

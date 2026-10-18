@@ -4285,8 +4285,7 @@ Return ONLY valid JSON."""
         room_label = targets.room_label
 
         # A named light narrows the room to itself, and never to anything else.
-        toks = light_effects.tokens(text)
-        without_effect = " ".join(toks[:request.span[0]] + toks[request.span[1]:])
+        without_effect = self._words_without_effect(text, request)
         named = named_house_wide = named_lights(without_effect)
         leaves = list(targets.lt.gate_ids)
         if named:
@@ -4410,6 +4409,16 @@ Return ONLY valid JSON."""
         listed = ", ".join(options[:-1]) + (" or " if len(options) > 1 else "") + options[-1]
         return room_context.RefusedText(EFFECT_NOT_FOUND_TRY.format(target=label, options=listed))
 
+    @staticmethod
+    def _words_without_effect(text: str, request) -> str:
+        """The request's words with the effect taken out: the matched span, and every
+        other place the effect's own words occur, so a repeated effect word names no light."""
+        toks = light_effects.tokens(text)
+        rest = toks[:request.span[0]] + toks[request.span[1]:]
+        if request.phrase:
+            rest = list(light_effects.strip_spoken(request.phrase, rest))
+        return " ".join(rest)
+
     async def _decide_effect_room(
         self, intent: Dict, original_query: Optional[str], device_room: Optional[str], request, text: str,
         named_lights, directory,
@@ -4421,8 +4430,7 @@ Return ONLY valid JSON."""
         command. A named light with no room named decides it: the light's area,
         or the speaker's when the named lights span areas and one is theirs, else
         a question that offers only those areas."""
-        toks = light_effects.tokens(text)
-        spoken = " ".join(toks[:request.span[0]] + toks[request.span[1]:])
+        spoken = self._words_without_effect(text, request)
         if not intent.get("decided_room"):
             intent["room"] = None  # a room the model guessed decides nothing; the words do
         mentions = [m for m in room_context.find_room_mentions(spoken, directory) if not m.in_exclusion]

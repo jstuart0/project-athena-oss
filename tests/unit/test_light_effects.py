@@ -760,6 +760,17 @@ def test_clear_value_finds_a_member_spelled_with_spaces_and_active_effect_ignore
     assert le.active_effect({"state": "on", "attributes": {"effect": "Solid Glitter"}}) == "Solid Glitter"
 
 
+@pytest.mark.parametrize("effect,spoken,expected", [
+    ("twinkle", ("set", "twinkle", "twinkle", "now"), ("set", "now")),
+    ("Fire 2012", ("fire", "2012", "and", "fire2012", "fire", "2012"), ("and",)),
+    ("twinkle", ("twinkles", "twin", "kle"), ("twinkles",)),  # run together they spell it
+    ("twinkle", ("twin", "twinkle", "kle"), ()),  # then the rest runs together and spells it too
+    ("", ("a", "b"), ("a", "b")), (None, ("a",), ("a",)), ("twinkle", (), ()),
+])
+def test_strip_spoken_removes_every_occurrence(effect, spoken, expected):
+    assert le.strip_spoken(effect, spoken) == expected
+
+
 def test_spoken_name_is_short_lower_case_and_clean():
     assert le.spoken_name("Fire  2012") == "fire 2012"
     long_name = "Chase Flash Rnd " * 4

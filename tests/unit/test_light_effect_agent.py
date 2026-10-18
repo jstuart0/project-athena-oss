@@ -576,8 +576,11 @@ def test_stored_actions_equal_registered_actions_for_effect_steps(form):
     rig = Rig()
     reply = rig.schedule([STORED_EQUALS_REGISTERED_FORMS[form]()], query=SCHEDULED + " at 40 percent")
     assert reply.startswith("Created automation"), reply
-    stored, registered = rig.stored[0]["actions_config"], rig.registered[0]["action"]
+    record, config = rig.stored[0], rig.registered[0]
+    stored, registered = record["actions_config"], config["action"]
     assert stored == registered and stored
+    assert record["trigger_config"] == config["trigger"][0] == {"platform": "time", "at": "20:00"}
+    assert record["conditions_config"] == config["condition"] == []
     assert not any("action" in step for step in stored)
     calls = [step for step in registered if "service" in step]
     assert all(step["service"] == "light.turn_on" and "target" in step and "entity_id" not in step for step in calls)
@@ -585,6 +588,21 @@ def test_stored_actions_equal_registered_actions_for_effect_steps(form):
     assert all(step["data"].get("brightness") == (40 if form == "with other data" else None) for step in calls)
     if form == "with delay":
         assert registered[-1] == {"delay": "00:05:00"} and stored[-1] == registered[-1]
+
+
+def test_the_whole_stored_effect_automation_equals_the_registered_config_with_conditions():
+    rig = Rig()
+    rig.schedule([effect_step()], conditions=[{"type": "weekday", "weekdays": ["mon", "tue"]}])
+    record, config = rig.stored[0], rig.registered[0]
+    assert (record["trigger_config"], record["conditions_config"], record["actions_config"]) == (
+        config["trigger"][0], config["condition"], config["action"])
+    assert config["condition"] == [{"condition": "time", "weekday": ["mon", "tue"]}]
+
+
+def test_a_multi_trigger_effect_automation_stores_the_first_built_trigger():
+    rig = Rig()
+    rig.schedule([effect_step()], trigger={}, triggers=[{"type": "time", "time": "07:30"}, {"type": "time", "time": "20:00"}])
+    assert rig.stored[0]["trigger_config"] == rig.registered[0]["trigger"][0] == {"platform": "time", "at": "07:30"}
 
 
 def test_an_automation_with_no_effect_is_stored_as_it_always_was():
@@ -1342,3 +1360,49 @@ def test_a_call_with_no_words_is_never_grounded():
     leaves = [PRISM]
     assert asyncio.run(rig.agent._effect_ungrounded(leaves, rig.manager.states, "candlelight", {})) == shc_no_device()
     assert asyncio.run(rig.agent._effect_ungrounded(leaves, rig.manager.states, "candlelight", {"query": 5})) == shc_no_device()
+
+
+# ----- F151: every occurrence of the effect's words is taken out before a light is named ------------------
+
+def named_twinkle_house():
+    states = two_room_house()
+    states[BEDROOM_LAMP]["attributes"]["friendly_name"] = "Twinkle"
+    return states
+
+
+def test_a_repeated_effect_word_names_no_light_now():
+    rig = Rig(named_twinkle_house())
+    assert rig.say("set the study lights to twinkle twinkle", entity_id=BEDROOM_LAMP, data={"effect": "twinkle"}) == shc_no_device()
+    assert rig.say("set the study lights to twinkle and twinkle twinkle", entity_id=BEDROOM_LAMP, data={"effect": "twinkle"}) == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_repeated_effect_word_names_no_light_when_scheduled():
+    rig = Rig(named_twinkle_house())
+    assert rig.schedule([effect_step("twinkle", entity=BEDROOM_LAMP)],
+                        query="at 8pm set the study lights to twinkle twinkle") == shc_no_device()
+    assert nothing_happened(rig)
+
+
+def test_a_light_whose_name_is_the_effect_is_not_named_by_it_when_scheduled():
+    rig = Rig(named_twinkle_house())
+    assert rig.schedule([effect_step("twinkle", entity=BEDROOM_LAMP)],
+                        query="at 8pm set the study lights to twinkle") == shc_no_device()
+    assert nothing_happened(rig)
+
+
+@pytest.mark.parametrize("query", ["", "   ", "\n"])
+def test_an_empty_query_grounds_nothing_without_the_cues_help(query):
+    rig = Rig(two_room_house())
+    for context in ({"query": query, "room": "study"}, {"query": None, "room": "study"}):
+        assert asyncio.run(rig.agent._effect_ungrounded([PRISM], rig.manager.states, "candlelight", context)) == shc_no_device()
+
+
+def test_a_light_whose_name_holds_the_effect_word_cannot_be_named_beside_it_and_a_room_still_grounds():
+    """Fail closed: the effect's words name nothing, so such a light is reached by its room."""
+    states = named_twinkle_house()
+    states[BEDROOM_LAMP]["attributes"]["friendly_name"] = "Twinkle Nightstand"
+    rig = Rig(states)
+    assert rig.say("set the nightstand to twinkle twinkle", entity_id=BEDROOM_LAMP, data={"effect": "twinkle"}) == shc_no_device()
+    rig.say("set the bedroom lights to twinkle twinkle", entity_id=BEDROOM_LAMP, data={"effect": "twinkle"})
+    assert [w[2]["entity_id"] for w in rig.writes] == [[BEDROOM_LAMP]]

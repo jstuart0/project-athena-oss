@@ -1155,11 +1155,10 @@ class AutomationAgent:
         from orchestrator.smart_home_controller import NO_DEVICE_TEXT, SmartHomeController, _EffectNames, _plain_speaker_room
         from shared.ha_registry import room_key
         query = context.get("query")
-        if not isinstance(query, str):
-            return NO_DEVICE_TEXT
+        if not isinstance(query, str) or not query.strip():
+            return NO_DEVICE_TEXT  # no words, nothing to ground in, whatever the cue said
         toks = light_effects.tokens(query)
-        span = light_effects.spoken_span(effect, toks) if isinstance(effect, str) else None
-        spoken = " ".join(toks[:span[0]] + toks[span[1]:]) if span else " ".join(toks)
+        spoken = " ".join(light_effects.strip_spoken(effect, toks) if isinstance(effect, str) else toks)
         directory = current_directory()
         named = set(_EffectNames(entities, SmartHomeController._permitted_light_ids_now(entities), directory).named_lights(spoken))
         rooms = {
@@ -1398,8 +1397,10 @@ class AutomationAgent:
             if self.admin:
                 # An automation that carries an effect is stored as registered: the built
                 # action list, not the arguments it was built from.
+                # The record keeps one trigger (its column is an object), the first built one.
                 stored_args = (
-                    {**validated_args, "actions": ha_config["action"]}
+                    {**validated_args, "actions": ha_config["action"], "trigger": ha_config["trigger"][0],
+                     "triggers": [], "conditions": ha_config["condition"]}
                     if _effect_entries(ha_config.get("action")) else validated_args
                 )
                 await self._store_automation_record(automation_id, stored_args, context)

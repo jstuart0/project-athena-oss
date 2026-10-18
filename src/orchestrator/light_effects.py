@@ -278,6 +278,17 @@ def spoken_span(effect: Any, spoken_tokens: Sequence[str]) -> Optional[Tuple[int
     return None
 
 
+def strip_spoken(effect: Any, spoken_tokens: Sequence[str]) -> Tuple[str, ...]:
+    """The spoken tokens with EVERY occurrence of the effect's words removed, not
+    only the first, so a repeated effect word names no light called by it."""
+    remaining = tuple(spoken_tokens)
+    while True:
+        span = spoken_span(effect, remaining)
+        if span is None:
+            return remaining
+        remaining = remaining[:span[0]] + remaining[span[1]:]
+
+
 def spoken_in(effect: Any, spoken_tokens: Sequence[str]) -> bool:
     """Whether the effect's own words appear in the spoken tokens (see ``spoken_span``)."""
     return spoken_span(effect, spoken_tokens) is not None
