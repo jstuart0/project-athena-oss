@@ -612,6 +612,64 @@ def test_every_writer_calls_finalizer(monkeypatch):
     assert len(rig.finalize_calls) >= 4
 
 
+def _attr_calls(node, name):
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == name]
+
+
+def _awaited_attr(stmt, name):
+    """True for a direct ``x = await self.<name>(...)`` statement."""
+    return (isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Await)
+            and isinstance(stmt.value.value, ast.Call) and getattr(stmt.value.value.func, "attr", "") == name)
+
+
+def helper_finalizes_unconditionally(method) -> bool:
+    """``_finalize_light_targets`` is a direct statement of the helper's body (not
+    under If/For/Try/With) and comes before the ``return RoomLightTargets(...)``,
+    which carries the name it was assigned to."""
+    finalize = [(i, st) for i, st in enumerate(method.body) if _awaited_attr(st, "_finalize_light_targets")]
+    returns = [(i, st) for i, st in enumerate(method.body)
+               if isinstance(st, ast.Return) and isinstance(st.value, ast.Call)
+               and getattr(st.value.func, "id", "") == "RoomLightTargets"]
+    if len(finalize) != 1 or len(returns) != 1 or finalize[0][0] >= returns[0][0]:
+        return False
+    assigned = finalize[0][1].targets[0].id
+    first = returns[0][1].value.args[0]
+    return isinstance(first, ast.Name) and first.id == assigned
+
+
+def dispatcher_writes_the_helpers_ids(method) -> bool:
+    """Before the first ``call_service``: ``targets`` comes from the awaited helper,
+    ``lt`` from ``targets.lt``, and ``target_lights`` is assigned from
+    ``lt.write_ids`` and from nothing else anywhere in the method."""
+    writes = [n.lineno for n in _attr_calls(method, "call_service")]
+    assigns = [n for n in ast.walk(method) if isinstance(n, ast.Assign)]
+
+    def only(name):
+        return [a for a in assigns if any(isinstance(t, ast.Name) and t.id == name for t in a.targets)]
+
+    def tuple_targets(name):
+        return [a for a in assigns if any(isinstance(t, ast.Tuple) and any(
+            isinstance(e, ast.Name) and e.id == name for e in t.elts) for t in a.targets)]
+
+    helper = [a for a in only("targets") if _awaited_attr(a, "_room_light_targets")]
+    lt_tuple = tuple_targets("lt")
+    tl = only("target_lights")
+    if not writes or len(only("targets")) != 1 or len(helper) != 1 or len(tl) != 1 or only("lt"):
+        return False
+    if len(lt_tuple) != 1 or not isinstance(lt_tuple[0].value, ast.Tuple):
+        return False
+    # `lt, room, room_label = targets.lt, targets.room, targets.room_label`
+    names = [e.id for e in lt_tuple[0].targets[0].elts]
+    source = lt_tuple[0].value.elts[names.index("lt")]
+    from_helper = (isinstance(source, ast.Attribute) and source.attr == "lt"
+                   and getattr(source.value, "id", "") == "targets")
+    value = tl[0].value
+    ids = (isinstance(value, ast.Call) and getattr(value.func, "id", "") == "list" and len(value.args) == 1
+           and isinstance(value.args[0], ast.Attribute) and value.args[0].attr == "write_ids"
+           and getattr(value.args[0].value, "id", "") == "lt")
+    return from_helper and ids and max(helper[0].lineno, lt_tuple[0].lineno, tl[0].lineno) < min(writes)
+
+
 def test_every_writer_has_a_finalizer_call_before_its_service_calls():
     tree = ast.parse((SRC / "orchestrator" / "smart_home_controller.py").read_text())
     methods = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -619,17 +677,51 @@ def test_every_writer_has_a_finalizer_call_before_its_service_calls():
         method = methods[name]
         finalizers = {"_finalize_light_targets"}
         if name == "_dispatch_light_or_room_command":
-            # The single-room tail finalizes inside the shared helper, which must itself finalize.
+            # The single-room tail finalizes in the shared helper; the dispatcher must write what it returns.
             finalizers.add("_room_light_targets")
-            helper_calls = {getattr(n.func, "attr", "") for n in ast.walk(methods["_room_light_targets"])
-                            if isinstance(n, ast.Call)}
-            assert "_finalize_light_targets" in helper_calls
-        finalize_lines = [n.lineno for n in ast.walk(method)
-                          if isinstance(n, ast.Call) and getattr(n.func, "attr", "") in finalizers]
-        write_lines = [n.lineno for n in ast.walk(method)
-                       if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "call_service"]
+            assert helper_finalizes_unconditionally(methods["_room_light_targets"])
+            assert dispatcher_writes_the_helpers_ids(method)
+        finalize_lines = [n.lineno for f in finalizers for n in _attr_calls(method, f)]
+        write_lines = [n.lineno for n in _attr_calls(method, "call_service")]
         assert finalize_lines, f"{name} never finalizes"
         assert min(finalize_lines) < min(write_lines), f"{name} writes before it finalizes"
+
+
+HELPER_OK = """
+async def h(self):
+    light_matches = await self._resolve_room_lights(room)
+    lt = await self._finalize_light_targets(light_matches, ids=ids, per_light=True)
+    if lt.denied_all:
+        return 'no'
+    return RoomLightTargets(lt, light_matches, room, label, 0, None)
+"""
+DISPATCH_OK = """
+async def d(self, ha_client):
+    targets = await self._room_light_targets(room, intent, q, target_scope=s, per_light=True, denial_service='x')
+    if isinstance(targets, str):
+        return targets
+    lt, room, room_label = targets.lt, targets.room, targets.room_label
+    target_lights = list(lt.write_ids)
+    await ha_client.call_service('light', 'turn_on', {'entity_id': target_lights})
+"""
+
+
+def _fn(src):
+    return ast.parse(src).body[0]
+
+
+def test_the_helper_and_dispatcher_guards_catch_their_mutants():
+    assert helper_finalizes_unconditionally(_fn(HELPER_OK))
+    assert dispatcher_writes_the_helpers_ids(_fn(DISPATCH_OK))
+    assert not helper_finalizes_unconditionally(_fn(HELPER_OK.replace(
+        "    lt = await self._finalize_light_targets(light_matches, ids=ids, per_light=True)\n",
+        "    if False:\n        lt = await self._finalize_light_targets(light_matches, ids=ids, per_light=True)\n")))
+    assert not helper_finalizes_unconditionally(_fn(HELPER_OK.replace("RoomLightTargets(lt,", "RoomLightTargets(other,")))
+    assert not dispatcher_writes_the_helpers_ids(_fn(DISPATCH_OK.replace(
+        "list(lt.write_ids)", "[m['entity_id'] for m in targets.matches]")))
+    assert not dispatcher_writes_the_helpers_ids(_fn(DISPATCH_OK.replace(
+        "    await ha_client", "    target_lights = [m['entity_id'] for m in targets.matches]\n    await ha_client")))
+    assert not dispatcher_writes_the_helpers_ids(_fn(DISPATCH_OK.replace("targets.lt,", "targets.matches,")))
 
 
 def test_a_planted_writer_without_a_finalizer_is_caught_by_the_same_check():
