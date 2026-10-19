@@ -67,6 +67,15 @@ trimming, no case folding. A refusal carrying any other key, F4's included, gets
 the generic sentence and is never accepted. What is spoken is Athena's closed-set
 sentence or a validated time, so a turn is stored in history as spoken.
 
+Room names are a closed set too. Policy speech names a room from
+`room_policy.SPOKEN_ROOMS` (`mbr` and `master_bedroom` as "the master bedroom",
+`alpha`, `beta`, `office`, `master_bathroom`) and calls any other slug "that
+room". The label Home Assistant gives an area is never spoken by
+`room_policy` or by the motion handler's policy branch. Other
+controller replies still speak that label through `_spoken_room`
+(smart_home_controller.py: the light, status and sequence replies); that is a
+separate follow-up.
+
 The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`: one reason
 per line, UTF-8, LF line endings, a final newline, in the generator's order, no
 blank lines. The authoritative gate is on the HA side: the HA config repo pins

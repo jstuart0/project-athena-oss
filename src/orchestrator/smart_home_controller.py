@@ -7612,7 +7612,7 @@ Return ONLY the JSON, no other text."""
                 logger.error(f"Error getting current brightness: {e}")
                 return "I couldn't determine the current brightness. Please specify a level like 'set motion brightness to 50 percent'."
             if current is None:
-                return f"The {spoken_room} lights are off. Please turn them on first or specify a brightness level."
+                return f"The lights in {room_policy.spoken_name(slug)} are off. Please turn them on first or specify a brightness level."
             level = min(100, max(1, current))
             request = room_policy.PolicyRequest("capture", slug, spoken_room, brightness=level)
         if request is None:
@@ -7622,7 +7622,7 @@ Return ONLY the JSON, no other text."""
         )
         logger.info("motion_control_room_policy action=%s ok=%s reason=%s", action, outcome.ok, outcome.reason)
         if request.kind == "capture" and outcome.ok and action == "keep_current_brightness":
-            return f"Brightness locked at {request.brightness}% in the {spoken_room}."
+            return f"Brightness locked at {request.brightness}% in {room_policy.spoken_name(slug)}."
         return outcome.speech
 
     async def _good_night_via_room_policy(self, room: Optional[str], ha_client) -> Optional[str]:

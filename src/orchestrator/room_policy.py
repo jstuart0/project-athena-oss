@@ -257,9 +257,27 @@ def _spoken_time(response: Mapping[str, Any]) -> str:
     return value if isinstance(value, str) and _SPOKEN_TIME.fullmatch(value) else ""
 
 
+# The policy rooms are a closed set and the speech names them in Athena's own
+# words. The label Home Assistant gives an area (PolicyRequest.spoken_room) is
+# never spoken: it is free text. A slug not listed here is "that room".
+SPOKEN_ROOMS: Mapping[str, str] = {
+    "mbr": "the master bedroom",
+    "master_bedroom": "the master bedroom",
+    "alpha": "Alpha",
+    "beta": "Beta",
+    "office": "the office",
+    "master_bathroom": "the master bathroom",
+}
+UNKNOWN_ROOM = "that room"
+
+
+def spoken_name(slug: str) -> str:
+    return SPOKEN_ROOMS.get(slug, UNKNOWN_ROOM)
+
+
 def _hold_speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
     state = "on" if req.kind == "hold_on" else "off"
-    lead = f"Lights will stay {state} in the {req.spoken_room}"
+    lead = f"Lights will stay {state} in {spoken_name(req.slug)}"
     stale = bool(response.get("stale"))
     until = response.get("until")
     if (req.duration_minutes is None) if stale else not until:
@@ -271,19 +289,19 @@ def _hold_speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
 
 
 def _speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
-    room = req.spoken_room
+    room = spoken_name(req.slug)
     if req.kind in ("hold_on", "hold_off"):
         return _hold_speech(req, response)
     if req.kind == "disable":
-        return f"Motion detection disabled in the {room}. Use the light switch to control lights."
+        return f"Motion detection disabled in {room}. Use the light switch to control lights."
     if req.kind == "clear":
-        return f"Motion detection resumed in the {room}. All overrides cleared."
+        return f"Motion detection resumed in {room}. All overrides cleared."
     if req.kind == "capture":
         level = min(100, max(1, int(req.brightness or 1)))
-        return f"Motion will set lights to {level}% brightness in the {room}."
+        return f"Motion will set lights to {level}% brightness in {room}."
     spoken = _spoken_time(response)
     tail = f" Motion lighting resumes at {spoken}." if spoken else ""
-    return f"Good night! The {room} lights are off and set for the night.{tail}"
+    return f"Good night! The lights in {room} are off and set for the night.{tail}"
 
 
 # What a script's refusal may sound like. The scripts' reason text is never
@@ -434,11 +452,10 @@ async def apply(
     ``ha`` is the permission-enforcing HA client; it checks the fields, the
     room and the caller itself (docs/ROOM_POLICY.md). ``policy_slugs`` is the
     set from the snapshot the room was resolved in."""
-    room = req.spoken_room
     if req.slug in WHOLE_HOUSE_WORDS or (req.spoken_room or "").strip().lower().replace(" ", "_") in WHOLE_HOUSE_WORDS:
         return _refused("whole_house", "Tell me which room to change.")
     if req.slug not in policy_slugs:
-        return _refused("unknown_area", f"Voice control isn't set up for the {room} yet.")
+        return _refused("unknown_area", f"Voice control isn't set up for {spoken_name(req.slug)} yet.")
     script, fields = _call_for(req)
     failure: Optional[PolicyOutcome] = None
     response: Any = None
