@@ -34,6 +34,7 @@ import contextlib
 import logging
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AbstractSet, Any, Awaitable, Callable, Dict, FrozenSet, List, Literal, Mapping, Optional, Sequence, Tuple
@@ -42,6 +43,7 @@ import httpx
 import structlog
 
 from orchestrator import mode_permission as mp
+from orchestrator.session_manager import note_for_history
 from shared.ha_client import HAResponseShapeError, HomeAssistantNotConfiguredError
 
 logger = structlog.get_logger(__name__)
@@ -55,7 +57,6 @@ CALLER_ROLE = "owner"
 SET_BY = "voice"
 MIN_MINUTES = 5
 MAX_MINUTES = 480
-MAX_REFUSAL_CHARS = 160
 AREA_ATTRIBUTE = "ha_area"
 WHOLE_HOUSE_WORDS = frozenset({"", "whole_house", "all", "house", "everywhere"})
 NO_END_PHRASE = "until you leave or press the switch"
@@ -249,6 +250,15 @@ def _call_for(req: PolicyRequest) -> Tuple[str, Dict[str, Any]]:
     return SET_SCRIPT, fields
 
 
+# What the scripts emit for `until_spoken` (strftime '%-I:%M %p'); nothing else is spoken.
+_SPOKEN_TIME = re.compile(r"(?:[1-9]|1[0-2]):[0-5][0-9] [AP]M", re.ASCII)
+
+
+def _spoken_time(response: Mapping[str, Any]) -> str:
+    value = response.get("until_spoken")
+    return value if isinstance(value, str) and _SPOKEN_TIME.fullmatch(value) else ""
+
+
 def _hold_speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
     state = "on" if req.kind == "hold_on" else "off"
     lead = f"Lights will stay {state} in the {req.spoken_room}"
@@ -258,7 +268,7 @@ def _hold_speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
         return f"{lead} {NO_END_PHRASE}."
     if req.duration_minutes is not None:
         return f"{lead} for {spoken_duration(clamp_minutes(int(req.duration_minutes)))}."
-    spoken = response.get("until_spoken")
+    spoken = _spoken_time(response)
     return f"{lead} until {spoken}." if spoken else f"{lead} for a while."
 
 
@@ -273,43 +283,103 @@ def _speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:
     if req.kind == "capture":
         level = min(100, max(1, int(req.brightness or 1)))
         return f"Motion will set lights to {level}% brightness in the {room}."
-    spoken = response.get("until_spoken")
+    spoken = _spoken_time(response)
     tail = f" Motion lighting resumes at {spoken}." if spoken else ""
     return f"Good night! The {room} lights are off and set for the night.{tail}"
 
 
-# Entity ids (including registry ids) and URLs never reach the speaker.
-_ENTITY_OR_URL = re.compile(r"https?://\S+|\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b|\b[0-9a-f]{32}\b", re.IGNORECASE)
+# What a script's refusal may sound like. The scripts' reason text is never
+# spoken or stored: a reason is looked up here, exactly, and the speech is
+# Athena's own. Anything not listed gets the generic sentence. The keys are the
+# reasons node-red-flows' scripts/lib/p3b-scripts.js can emit; the pinned copy
+# is tests/unit/room_policy_refusal_reasons.txt, kept in step by
+# scripts/check-room-policy-refusals.py (docs/ROOM_POLICY.md).
+_REFUSED = "I couldn't change that."
+GENERIC_REFUSAL = f"{_REFUSED} That wasn't allowed."
+_GENERIC = None  # a listed reason with no sentence of its own
+REFUSAL_REASONS: Mapping[str, Optional[str]] = {
+    "caller_role must be one of: owner, guest, button, dashboard, test": _GENERIC,
+    "caller_role must be one of: owner, guest, dashboard, test": _GENERIC,
+    "caller_role must be one of: owner, guest": _GENERIC,
+    "caller_role must be one of: owner, dashboard, test": _GENERIC,
+    "area is required": "Tell me which room to change.",
+    "unknown area": "I don't have that room set up.",
+    "the test area needs caller_role test, and test is only for the test area": _GENERIC,
+    "the test role may only revert the test area": _GENERIC,
+    "a guest may only act on their own room (caller_area must equal area)": "You can only change the room you're staying in.",
+    "kind must be one of: hold_on, hold_off, brightness, disable, max_brightness, capture": _GENERIC,
+    "this area does not support that kind": "That room doesn't support that setting.",
+    "a button may only set hold_on or hold_off": "That control can only keep lights on or off.",
+    "a guest may not use disable, max_brightness or capture": "Guests can't change that setting.",
+    "another person has set a hold in this room; a guest cannot override it": "Someone else has set a hold in this room.",
+    "set_by is required and at most 56 characters": _GENERIC,
+    "brightness must be 1-100 for this kind": "Brightness has to be between 1 and 100 percent.",
+    "brightness must be 1-100": "Brightness has to be between 1 and 100 percent.",
+    "a duration_minutes or until is required for a guest hold": "Tell me how long, for example for two hours.",
+    "duration_minutes must be a whole number of minutes, 1 or more": "I need a whole number of minutes.",
+    "give duration_minutes or until, not both": _GENERIC,
+    "duration_minutes is out of range for this kind (a guest hold_off max 120, others max 480)": "That length of time isn't allowed.",
+    "this kind takes no duration or until": _GENERIC,
+    "until must be ISO-8601 with a UTC offset": _GENERIC,
+    "until is in the past": "That length of time isn't allowed.",
+    "until is beyond the cap for this kind": "That length of time isn't allowed.",
+    "motion lighting is disabled in this room; clear the disable first (DEC-12)": "Motion lighting is switched off in that room. Turn it back on first.",
+    "only the owner may change the lighting schedule": "Only the owner can change the lighting schedule.",
+    "window must be bedtime or dimming": _GENERIC,
+    "start and end must be valid HH:MM times": _GENERIC,
+    "start and end must differ (xander L3)": _GENERIC,
+    "this area has no hold-off to apply": "That room doesn't have a hold-off setting.",
+}
+
+
+_INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Cn")
+
+
+def _comparable(text: str) -> Optional[str]:
+    """NFKC with one space between words, or None when any control or format
+    character (ESC, NUL, bidi overrides, zero-width) is present: such a reason
+    is not one the scripts emit, however it would read once cleaned."""
+    normalized = unicodedata.normalize("NFKC", text)
+    if any(unicodedata.category(ch) in _INVISIBLE and ch not in "\t\n\r" for ch in normalized):
+        return None
+    return " ".join(normalized.split())
+
+
+def _refusal_speech(reason: Any) -> str:
+    """Athena's sentence for a script's reason: the listed one, else the generic one."""
+    key = _comparable(reason) if isinstance(reason, str) else None
+    sentence = REFUSAL_REASONS.get(key) if key is not None else None
+    return f"{_REFUSED} {sentence}" if sentence else GENERIC_REFUSAL
 
 
 def _refusal_message(exc: httpx.HTTPStatusError) -> str:
-    """What the script said when it refused, capped, never the entity ids it
-    doesn't contain and never the raw body."""
-    message = ""
+    """The speech for a script that refused with an error status: its message
+    is looked up, never spoken and never the raw body."""
+    message: Any = None
     try:
         body = exc.response.json()
-        if isinstance(body, dict) and isinstance(body.get("message"), str):
-            message = body["message"]
+        if isinstance(body, dict):
+            message = body.get("message")
     except ValueError:
         pass
-    return _sanitized_refusal(message)
+    return _refusal_speech(message)
 
 
-def _sanitized_refusal(message: str) -> str:
-    message = _ENTITY_OR_URL.sub("that", message)
-    message = " ".join(message.split()) or "that wasn't allowed"
-    return message[:MAX_REFUSAL_CHARS]
+_F4_KEYS = frozenset({"area", "policy", "brightness_hold", "until", "until_spoken", "set_by", "stale"})
 
 
 def _script_declined(response: Any) -> Optional[str]:
-    """The reason when the script answered with a refusal, exactly
-    ``{ok: false, reason: <str>}``; anything else with ``ok`` in it is not one."""
-    if (
-        isinstance(response, Mapping) and set(response) == {"ok", "reason"}
-        and response["ok"] is False and isinstance(response["reason"], str)
-    ):
-        return response["reason"]
-    return None
+    """Athena's speech when the script answered with a refusal, else None.
+
+    A refusal is ``{ok: false, reason: <str>}`` and nothing else; its reason is
+    looked up. With extra keys (and none of F4's) the script still said no, but
+    its text is not trusted: the generic sentence. Any other answer carrying
+    ``ok`` is not a refusal."""
+    if not (isinstance(response, Mapping) and response.get("ok") is False and isinstance(response.get("reason"), str)):
+        return None
+    if set(response) == {"ok", "reason"}:
+        return _refusal_speech(response["reason"])
+    return GENERIC_REFUSAL if not _F4_KEYS & set(response) else None
 
 
 def _valid_until(value: Any) -> bool:
@@ -368,10 +438,33 @@ def _denied(exc: "mp.HAWritePermissionDenied") -> PolicyOutcome:
 
 def _script_refused(script: str, exc: httpx.HTTPStatusError) -> PolicyOutcome:
     logger.warning("room_policy_script_refused", script=script, status=exc.response.status_code)
-    return _refused("script_refused", f"I couldn't change that: {_refusal_message(exc)}")
+    return _refused("script_refused", _refusal_message(exc))
+
+
+_HISTORY_NOTES: Mapping[str, str] = {
+    "hold_on": "(room policy hold set)", "hold_off": "(room policy hold set)",
+    "disable": "(room policy motion disabled)", "clear": "(room policy cleared)",
+    "capture": "(room policy brightness set)", "good_night": "(room policy good night set)",
+}
 
 
 async def apply(
+    req: PolicyRequest,
+    ha: Any,
+    *,
+    policy_slugs: AbstractSet[str],
+) -> PolicyOutcome:
+    """``_apply``, and a fixed note for the stored conversation: what was
+    spoken came from a script's answer, and the model replays history."""
+    outcome = await _apply(req, ha, policy_slugs=policy_slugs)
+    if outcome.ok:
+        note_for_history(_HISTORY_NOTES[req.kind])
+    elif outcome.reason == "script_refused":
+        note_for_history("(room policy refused)")
+    return outcome
+
+
+async def _apply(
     req: PolicyRequest,
     ha: Any,
     *,
@@ -407,7 +500,7 @@ async def apply(
     declined = _script_declined(response)
     if declined is not None:
         logger.warning("room_policy_script_refused", script=script, status=200)
-        return _refused("script_refused", f"I couldn't change that: {_sanitized_refusal(declined)}")
+        return _refused("script_refused", declined)
     if not isinstance(response, Mapping) or "ok" in response or _response_problem(req, response):
         logger.warning("room_policy_bad_response", script=script)
         return _refused("bad_response", _UNCONFIRMED)

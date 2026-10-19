@@ -10,6 +10,7 @@ import time
 import uuid
 import json
 import asyncio
+import contextvars
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import structlog
@@ -36,6 +37,32 @@ from orchestrator.session_keys import (  # noqa: F401  (re-exported: callers imp
 from shared.config import get_config as _get_athena_config
 
 logger = structlog.get_logger()
+
+# What replaces an assistant turn's text in stored history. A handler that
+# spoke text which came from Home Assistant records a fixed note here instead;
+# the list is made once per request (begin_turn_history_notes) so that nodes
+# running in child tasks append to the same list the request later reads.
+_history_notes: "contextvars.ContextVar[Optional[List[str]]]" = contextvars.ContextVar(
+    "assistant_history_notes", default=None,
+)
+
+
+def begin_turn_history_notes() -> None:
+    _history_notes.set([])
+
+
+def note_for_history(note: str) -> None:
+    notes = _history_notes.get()
+    if notes is not None and note not in notes:
+        notes.append(note)
+
+
+def history_form(content: str) -> str:
+    """The text to store for an assistant turn: the turn's notes when any
+    handler recorded one, else the text as spoken."""
+    notes = _history_notes.get()
+    return " ".join(notes) if notes else content
+
 
 # Redis connection details
 # Note: Default to false due to Homebrew Python socket issues on some hosts
@@ -114,7 +141,7 @@ class ConversationSession:
         """
         message = {
             "role": role,
-            "content": content,
+            "content": history_form(content) if role == "assistant" else content,
             "timestamp": datetime.utcnow().isoformat(),
             "metadata": metadata or {}
         }

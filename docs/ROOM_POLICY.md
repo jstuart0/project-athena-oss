@@ -52,11 +52,24 @@ bare date or a time without an offset) for no end;
 state read back hasn't caught up. `room_policy_clear` answers the same way.
 `room_policy_good_night` answers `{area, until, until_spoken}`.
 
-A refusal is a non-2xx answer whose message is spoken (capped at 160
-characters), so it must contain no entity ids. A script may also refuse with
-HTTP 200 and exactly `{ok: false, reason: "<message>"}`, writing nothing; Athena
-speaks the reason the same way. Accepted answers never contain `ok`, and an
-empty `{}` or any other shape carrying `ok` is not confirmed.
+A refusal is either a non-2xx answer with a `message`, or HTTP 200 with
+exactly `{ok: false, reason: "<message>"}`; nothing was written. Athena never
+speaks or stores the script's words. The reason is looked up, exactly, in a
+closed table (`room_policy.REFUSAL_REASONS`) and Athena says its own sentence
+for it; any other reason, and a refusal carrying extra keys, gets "I couldn't
+change that. That wasn't allowed." Accepted answers never contain `ok`; an
+empty `{}`, or any other answer shape carrying `ok`, is not confirmed.
+`until_spoken` is spoken only when it is a clock time as the scripts write it
+(`7:30 AM`), else "for a while".
+
+The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`, the
+reasons the generator (`scripts/lib/p3b-scripts.js` in the HA config repo) can
+emit. After changing a guard there, run
+`scripts/check-room-policy-refusals.py <ha-config-repo>` (`--write` updates the
+pinned list); the unit test then fails until the table matches.
+
+What the model replays is a fixed note, not the spoken words: "(room policy
+refused)", "(room policy hold set)" and the like, set per request.
 
 Athena never calls any other `room_policy_*` script.
 
