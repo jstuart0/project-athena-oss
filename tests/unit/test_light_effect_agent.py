@@ -1323,7 +1323,8 @@ def test_the_registry_and_configured_rooms_decide_which_room_a_light_is_in(monke
     snapshot = MagicMock()
     snapshot.area_for = lambda leaf: type("Area", (), {"name": "Nightstand Room"})() if leaf == PRISM else None
     monkeypatch.setattr(shc.SmartHomeController, "_registry_snapshot", staticmethod(lambda: snapshot))
-    monkeypatch.setattr(shc, "_room_lights_value", lambda: type("V", (), {"mapping": {"kitchen": (LAMP,)}})())
+    from shared import household
+    monkeypatch.setattr(household, "room_lights", lambda: type("V", (), {"mapping": {"kitchen": (LAMP,)}})())
     agent = AutomationAgent(MagicMock(), MagicMock())
     assert agent._leaf_room_keys(PRISM) == {"nightstand_room"}
     assert agent._leaf_room_keys(LAMP) == {"kitchen"}

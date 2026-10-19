@@ -1132,14 +1132,17 @@ class AutomationAgent:
     def _leaf_room_keys(self, leaf: str) -> set:
         """The rooms a light is in: its registry area, and any room whose configured
         lights hold it."""
-        from orchestrator.smart_home_controller import SmartHomeController, _room_lights_value  # lazy, like mode_permission (see above)
+        from orchestrator.smart_home_controller import SmartHomeController  # lazy, like mode_permission (see above)
+        from shared import household
         from shared.ha_registry import room_key
         keys = set()
         snapshot = SmartHomeController._registry_snapshot()
         area = snapshot.area_for(leaf) if snapshot is not None else None
         if area is not None:
             keys.add(room_key(area.name))
-        keys.update(key for key, ids in _room_lights_value().mapping.items() if leaf in ids)
+        # The household resolver is the one reader of the Room lights setting outside the controller
+        # (test_room_settings_drift.py); the controller's own accessor stays the controller's.
+        keys.update(key for key, ids in household.room_lights().mapping.items() if leaf in ids)
         return keys
 
     async def _effect_ungrounded(
