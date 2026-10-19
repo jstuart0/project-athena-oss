@@ -70,8 +70,8 @@ sentence or a validated time, so a turn is stored in history as spoken.
 The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`: one reason
 per line, UTF-8, LF line endings, a final newline, in the generator's order, no
 blank lines. The authoritative gate is on the HA side: the HA config repo pins
-the same list in its own test (`test/room-policy-refusal-reasons.txt`, same
-format, byte-identical to this file), so a generator change there fails until
+the same list at `test/fixtures/room_policy_refusal_reasons.txt` (byte-identical
+to this file), checked by `test/room-policy-refusal-reasons.test.js`, so a generator change there fails until
 both pinned lists are updated. `scripts/check-room-policy-refusals.py
 <ha-config-repo>` compares this file to the generator by hand (`--write`
 updates it); the unit test here then fails until the table matches.
