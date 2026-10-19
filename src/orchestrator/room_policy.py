@@ -34,7 +34,6 @@ import contextlib
 import logging
 import re
 import sys
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AbstractSet, Any, Awaitable, Callable, Dict, FrozenSet, List, Literal, Mapping, Optional, Sequence, Tuple
@@ -43,7 +42,6 @@ import httpx
 import structlog
 
 from orchestrator import mode_permission as mp
-from orchestrator.session_manager import note_for_history
 from shared.ha_client import HAResponseShapeError, HomeAssistantNotConfiguredError
 
 logger = structlog.get_logger(__name__)
@@ -332,23 +330,10 @@ REFUSAL_REASONS: Mapping[str, Optional[str]] = {
 }
 
 
-_INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Cn")
-
-
-def _comparable(text: str) -> Optional[str]:
-    """NFKC with one space between words, or None when any control or format
-    character (ESC, NUL, bidi overrides, zero-width) is present: such a reason
-    is not one the scripts emit, however it would read once cleaned."""
-    normalized = unicodedata.normalize("NFKC", text)
-    if any(unicodedata.category(ch) in _INVISIBLE and ch not in "\t\n\r" for ch in normalized):
-        return None
-    return " ".join(normalized.split())
-
-
 def _refusal_speech(reason: Any) -> str:
-    """Athena's sentence for a script's reason: the listed one, else the generic one."""
-    key = _comparable(reason) if isinstance(reason, str) else None
-    sentence = REFUSAL_REASONS.get(key) if key is not None else None
+    """Athena's sentence for a script's reason: the listed one, else the generic one.
+    The reason must equal a listed string exactly; nothing is normalized or trimmed."""
+    sentence = REFUSAL_REASONS.get(reason) if isinstance(reason, str) else None
     return f"{_REFUSED} {sentence}" if sentence else GENERIC_REFUSAL
 
 
@@ -365,21 +350,18 @@ def _refusal_message(exc: httpx.HTTPStatusError) -> str:
     return _refusal_speech(message)
 
 
-_F4_KEYS = frozenset({"area", "policy", "brightness_hold", "until", "until_spoken", "set_by", "stale"})
-
-
 def _script_declined(response: Any) -> Optional[str]:
     """Athena's speech when the script answered with a refusal, else None.
 
     A refusal is ``{ok: false, reason: <str>}`` and nothing else; its reason is
-    looked up. With extra keys (and none of F4's) the script still said no, but
-    its text is not trusted: the generic sentence. Any other answer carrying
-    ``ok`` is not a refusal."""
+    looked up. With any other key (F4's included) the script still said no, but
+    its text is not trusted: the generic sentence, and nothing is accepted. Any
+    other answer carrying ``ok`` is not a refusal."""
     if not (isinstance(response, Mapping) and response.get("ok") is False and isinstance(response.get("reason"), str)):
         return None
     if set(response) == {"ok", "reason"}:
         return _refusal_speech(response["reason"])
-    return GENERIC_REFUSAL if not _F4_KEYS & set(response) else None
+    return GENERIC_REFUSAL
 
 
 def _valid_until(value: Any) -> bool:
@@ -441,30 +423,7 @@ def _script_refused(script: str, exc: httpx.HTTPStatusError) -> PolicyOutcome:
     return _refused("script_refused", _refusal_message(exc))
 
 
-_HISTORY_NOTES: Mapping[str, str] = {
-    "hold_on": "(room policy hold set)", "hold_off": "(room policy hold set)",
-    "disable": "(room policy motion disabled)", "clear": "(room policy cleared)",
-    "capture": "(room policy brightness set)", "good_night": "(room policy good night set)",
-}
-
-
 async def apply(
-    req: PolicyRequest,
-    ha: Any,
-    *,
-    policy_slugs: AbstractSet[str],
-) -> PolicyOutcome:
-    """``_apply``, and a fixed note for the stored conversation: what was
-    spoken came from a script's answer, and the model replays history."""
-    outcome = await _apply(req, ha, policy_slugs=policy_slugs)
-    if outcome.ok:
-        note_for_history(_HISTORY_NOTES[req.kind])
-    elif outcome.reason == "script_refused":
-        note_for_history("(room policy refused)")
-    return outcome
-
-
-async def _apply(
     req: PolicyRequest,
     ha: Any,
     *,

@@ -76,7 +76,6 @@ from orchestrator.session_manager import (
     CALLER_CLASS_OTHER,
     CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
-    begin_turn_history_notes,
     get_session_manager,
     get_session_summary, update_session_summary
 )
@@ -1578,13 +1577,6 @@ app = FastAPI(
 
 # Add request tracing middleware (generates X-Request-ID for all requests)
 app.add_middleware(RequestTracingMiddleware, service_name="orchestrator")
-
-
-@app.middleware("http")
-async def _history_notes_per_request(request, call_next):
-    """One history-notes list per request (see session_manager.note_for_history)."""
-    begin_turn_history_notes()
-    return await call_next(request)
 
 # Register unified exception handlers
 register_exception_handlers(app)

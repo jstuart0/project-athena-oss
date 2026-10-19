@@ -62,14 +62,19 @@ empty `{}`, or any other answer shape carrying `ok`, is not confirmed.
 `until_spoken` is spoken only when it is a clock time as the scripts write it
 (`7:30 AM`), else "for a while".
 
-The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`, the
-reasons the generator (`scripts/lib/p3b-scripts.js` in the HA config repo) can
-emit. After changing a guard there, run
-`scripts/check-room-policy-refusals.py <ha-config-repo>` (`--write` updates the
-pinned list); the unit test then fails until the table matches.
+The reason must equal a listed string byte for byte: no Unicode folding, no
+trimming, no case folding. A refusal carrying any other key, F4's included, gets
+the generic sentence and is never accepted. What is spoken is Athena's closed-set
+sentence or a validated time, so a turn is stored in history as spoken.
 
-What the model replays is a fixed note, not the spoken words: "(room policy
-refused)", "(room policy hold set)" and the like, set per request.
+The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`: one reason
+per line, UTF-8, LF line endings, a final newline, in the generator's order, no
+blank lines. The authoritative gate is on the HA side: the HA config repo pins
+the same list in its own test (`test/room-policy-refusal-reasons.txt`, same
+format, byte-identical to this file), so a generator change there fails until
+both pinned lists are updated. `scripts/check-room-policy-refusals.py
+<ha-config-repo>` compares this file to the generator by hand (`--write`
+updates it); the unit test here then fails until the table matches.
 
 Athena never calls any other `room_policy_*` script.
 
