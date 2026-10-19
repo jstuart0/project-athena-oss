@@ -2017,7 +2017,7 @@ class SmartHomeController:
             is_turn_on = True
         has_color = any(c in query_lower for c in HAS_COLOR_WORDS)
 
-        if not self._defers_to_model(query_lower):
+        if not self._defers_to_model(query_lower) or self._is_motion_control_request(query_lower):
             fast_intent = await self._fast_path_intent(
                 query, query_lower, device_room, is_turn_on, is_turn_off, has_color, utterance)
             if fast_intent is not None:
@@ -2505,6 +2505,20 @@ Return ONLY valid JSON."""
         return room_context.explicit_whole_house(query, self._directory())
 
     _EVERYTHING_BUT_RE = re.compile(r'(everything|all\s+(the\s+)?lights?)\s+but\s+')
+
+    def _is_motion_control_request(self, query: str) -> bool:
+        """A motion-flow command ("leave the lights on in beta") with no real
+        exclusion phrase. "leave" and "keep" are deferral words only because
+        they can carry an exclusion ("leave the porch on"); here the command is
+        the motion handler's, so the deferral does not apply. An exclusion
+        phrase ("except", "but", "not the"...) still defers, and so does a
+        motion condition ("when there's motion, leave the lights on")."""
+        from .automation_agent import is_motion_trigger_form
+        return (
+            any(p in query for p in access_target.MOTION_CONTROL_PATTERNS)
+            and not is_motion_trigger_form(query)
+            and not room_context.has_exclusion(query, self._directory())
+        )
 
     def _defers_to_model(self, query: str) -> bool:
         """True when no fast path may answer: the wording holds an exclusion

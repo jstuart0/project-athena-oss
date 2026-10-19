@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -1025,3 +1026,153 @@ def test_a_hostile_area_label_is_never_spoken_for_any_outcome(slug):
 def test_an_unknown_room_is_called_that_room_in_the_unknown_area_message():
     outcome = run(rp.apply(rp.PolicyRequest("hold_on", "attic", "Attic"), FakePolicyHA(), policy_slugs=frozenset()))
     assert outcome.reason == "unknown_area" and outcome.speech == "Voice control isn't set up for that room yet."
+
+
+# ---------------------------------------------------------------------------
+# the front door: real fast paths and sequence detection, a model that tells them apart
+# ---------------------------------------------------------------------------
+
+MOTION_PROMPT_MARK = "Extract the motion control intent"
+SEQUENCE_PROMPT_MARK = "creates action sequences"
+DECOY_LIGHT = {"device_type": "light", "room": "beta", "action": "turn_on", "target_scope": "group", "parameters": {}}
+DECOY_SEQUENCE = {"type": "sequence", "acknowledge": "Starting sequence...", "steps": [
+    {"action": "turn_on", "target": {"device_type": "light", "room": "beta"}, "parameters": {}, "delay_after": 1200}]}
+
+
+class RoutingLLM:
+    """Answers the motion extractor with the motion intent for the phrase and
+    every other prompt (the generic extractor, the sequence extractor) with a
+    different intent that would write a light, so a phrase that reaches the
+    wrong extractor fails the test that sent it."""
+
+    def __init__(self):
+        self.motion_reply = intent()
+        self.consulted = []
+
+    async def generate(self, **kwargs):
+        prompt = kwargs.get("prompt", "")
+        if MOTION_PROMPT_MARK in prompt:
+            self.consulted.append("motion")
+            return {"response": json.dumps(self.motion_reply)}
+        if SEQUENCE_PROMPT_MARK in prompt:
+            self.consulted.append("sequence")
+            return {"response": json.dumps(DECOY_SEQUENCE)}
+        self.consulted.append("generic")
+        return {"response": json.dumps(DECOY_LIGHT)}
+
+
+class RoutedHouse(PolicyChat):
+    """PolicyChat plus bare-name policy rooms beta, alpha and office."""
+
+    def __init__(self, monkeypatch):
+        super().__init__(monkeypatch)
+        raw = self.chat.raw_registry
+        cache = self.chat.rig.manager._entities_cache
+        for slug, name in (("beta", "Beta"), ("alpha", "Alpha"), ("office", "Office")):
+            raw["areas"].append({"area_id": f"area_{slug}", "name": name, "aliases": []})
+            for i in range(2):
+                eid = f"light.{slug}_lamp_{i}"
+                raw["entities"].append(rch._reg(eid, area=f"area_{slug}"))
+                cache[eid] = rch._state(eid)
+            cache.update(policy_states(slug, f"area_{slug}"))
+        self.chat.rig.registry._snapshot = hr.RegistrySnapshot.from_raw(raw, fetched_at=2.0)
+        self.chat.rig.manager._build_indexes()
+        self.llm = RoutingLLM()
+        self.chat.rig.controller.llm_router = self.llm
+
+    def route(self, query, motion_reply, **kw):
+        self.llm.motion_reply = motion_reply
+        self.llm.consulted.clear()
+        self.ha.calls.clear()
+        return self.chat.turn(query, **kw)
+
+
+@pytest.fixture
+def house(monkeypatch):
+    return RoutedHouse(monkeypatch)
+
+
+@pytest.mark.parametrize("query,reply,fields", [
+    ("leave the lights on in Beta", intent("beta"), {"area": "beta", "kind": "hold_on"}),
+    ("leave the lights on in Beta for 20 minutes", intent("beta", duration_minutes=20), {"area": "beta", "kind": "hold_on", "duration_minutes": 20}),
+    ("keep the lights on in alpha", intent("alpha"), {"area": "alpha", "kind": "hold_on"}),
+    ("keep the lights off in alpha for 3 hours", intent("alpha", "leave_lights_off", duration_minutes=180), {"area": "alpha", "kind": "hold_off", "duration_minutes": 180}),
+    ("resume motion in Beta", intent("beta", "enable_motion"), {"area": "beta"}),
+    ("leave the lights off in the office for an hour", intent("office", "leave_lights_off", duration_minutes=60), {"area": "office", "kind": "hold_off", "duration_minutes": 60}),
+    ("leave the lights on in Beta for half an hour", intent("beta", duration_minutes=30), {"area": "beta", "kind": "hold_on", "duration_minutes": 30}),
+    ("leave the lights on in Beta for 20 hours", intent("beta", duration_minutes=1200), {"area": "beta", "kind": "hold_on", "duration_minutes": 480}),
+])
+def test_a_policy_phrase_reaches_the_motion_handler_and_the_script(house, query, reply, fields):
+    out = house.route(query, reply)
+    assert house.llm.consulted == ["motion"], (house.llm.consulted, out.answer)
+    assert house.ha.calls, out.answer
+    sent = house.ha.calls[-1][2]
+    assert {k: sent[k] for k in fields} == fields
+    assert house.legacy == [], "no light was written"
+
+
+def test_resume_motion_reaches_the_clear_script(house):
+    house.route("resume motion in Beta", intent("beta", "enable_motion"))
+    assert house.ha.calls[-1][1] == "room_policy_clear"
+
+
+@pytest.mark.parametrize("query", [
+    "turn off all the lights except beta",
+    "turn off everything but beta",
+    "leave the lights on in the hall but turn off the rest",
+    "leave the lights on in beta but turn off the others",
+])
+def test_a_real_exclusion_still_defers_to_the_model(house, query):
+    out = house.route(query, intent("beta"))
+    assert "motion" not in house.llm.consulted, (query, house.llm.consulted, out.answer)
+    assert house.ha.calls == []
+
+
+@pytest.mark.parametrize("query", [
+    "turn on the lights for 10 minutes then off",
+    "turn on the lights in beta for 10 minutes then turn them off",
+    "leave the lights on in beta for 10 minutes then turn them off",
+    "leave the lights on in beta until 9 pm",
+    "leave the lights on in beta at 9 pm",
+    "turn the lights on and off 3 times",
+    "turn on the lights in beta for 20 minutes",
+])
+def test_a_real_sequence_still_sequences(house, query):
+    house.route(query, intent("beta"))
+    assert house.llm.consulted[:1] == ["sequence"], (query, house.llm.consulted)
+    assert "motion" not in house.llm.consulted and house.ha.calls == []
+
+
+@pytest.mark.parametrize("query", [
+    "when there is motion in beta leave the lights on for 10 minutes",
+    "if there is motion keep the lights on in beta",
+])
+def test_a_motion_condition_is_not_a_motion_hold(house, query):
+    house.route(query, intent("beta", duration_minutes=10))
+    assert "motion" not in house.llm.consulted, house.llm.consulted
+    assert house.ha.calls == []
+
+
+def test_a_deferral_word_without_a_motion_phrase_still_defers(house):
+    for query in ("leave beta on", "keep beta lights on"):
+        house.route(query, intent("beta"))
+        assert house.llm.consulted == ["generic"], (query, house.llm.consulted)
+
+
+def test_a_legacy_room_gets_the_timed_hold_too(house):
+    out = house.route("leave the lights on in the nursery for 2 hours", intent("nursery", duration_minutes=120))
+    assert house.llm.consulted == ["motion"], (house.llm.consulted, out.answer)
+    assert house.ha.calls == [], "the nursery isn't a policy room"
+    assert any(call[1] == "set_value" for call in house.legacy), house.legacy
+
+
+def test_a_bare_hold_with_no_room_word_still_routes(house):
+    house.route("leave the lights on", intent("study"))
+    assert house.llm.consulted == ["motion"] and house.ha.calls
+
+
+def test_the_decoy_models_really_differ(house):
+    """The rig is only a gate if the other prompts would write a light."""
+    assert DECOY_LIGHT["device_type"] == "light" and DECOY_SEQUENCE["steps"][0]["action"] == "turn_on"
+    assert MOTION_PROMPT_MARK in inspect.getsource(shc.SmartHomeController._extract_motion_control_intent)
+    assert SEQUENCE_PROMPT_MARK in inspect.getsource(shc.SmartHomeController.extract_sequence_intent)

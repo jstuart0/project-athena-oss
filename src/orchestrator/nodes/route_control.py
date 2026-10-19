@@ -87,8 +87,31 @@ def _is_agent_exempt(query: str, uk: UtteranceClassification) -> bool:
     automation and stays with the agent."""
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return True
+    return _is_motion_flow_command(query)
+
+
+def _is_motion_flow_command(query: str) -> bool:
     lower = query.lower()
     return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not is_motion_trigger_form(lower)
+
+
+# "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
+_NUMBER_OR_ARTICLE = (
+    r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
+)
+_HOLD_DURATION_RE = re.compile(
+    rf"\bfor\s+(?:about\s+|around\s+)?(?:half\s+an?\s+|(?:{_NUMBER_OR_ARTICLE})\s+)(?:seconds?|minutes?|mins?|hours?|hrs?)\b"
+)
+
+
+def _is_timed_motion_hold(smart_controller: Any, query: str) -> bool:
+    """"leave the lights on in beta for 20 minutes": a motion-flow command whose
+    only timing is its duration. The motion handler takes the duration (and
+    clamps it); the sequence detector would read it as a timed light sequence.
+    Any other timing (a clock time, "then", a repeat) keeps it a sequence."""
+    if not _is_motion_flow_command(query):
+        return False
+    return not smart_controller.detect_sequence_intent(_HOLD_DURATION_RE.sub(" ", query.lower()))
 
 
 CONDITIONAL_COMMAND_TEXT = (
@@ -1249,7 +1272,11 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # as a sequence. With the kill switch on, uk is UNKNOWN and
                 # legacy routing applies; the sequence executor's gate then
                 # stops a real question's writes.
-                if uk.kind != UtteranceKind.STATE_QUESTION and smart_controller.detect_sequence_intent(state.query):
+                if (
+                    uk.kind != UtteranceKind.STATE_QUESTION
+                    and smart_controller.detect_sequence_intent(state.query)
+                    and not _is_timed_motion_hold(smart_controller, state.query)
+                ):
                     logger.info(f"Sequence intent detected (pattern matching mode): query_len={len(state.query)}")
 
                     # Extract sequence from the complex command
