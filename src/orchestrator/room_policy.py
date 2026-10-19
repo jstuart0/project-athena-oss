@@ -292,9 +292,24 @@ def _refusal_message(exc: httpx.HTTPStatusError) -> str:
             message = body["message"]
     except ValueError:
         pass
+    return _sanitized_refusal(message)
+
+
+def _sanitized_refusal(message: str) -> str:
     message = _ENTITY_OR_URL.sub("that", message)
-    message = " ".join((message or "that wasn't allowed").split())
+    message = " ".join(message.split()) or "that wasn't allowed"
     return message[:MAX_REFUSAL_CHARS]
+
+
+def _script_declined(response: Any) -> Optional[str]:
+    """The reason when the script answered with a refusal, exactly
+    ``{ok: false, reason: <str>}``; anything else with ``ok`` in it is not one."""
+    if (
+        isinstance(response, Mapping) and set(response) == {"ok", "reason"}
+        and response["ok"] is False and isinstance(response["reason"], str)
+    ):
+        return response["reason"]
+    return None
 
 
 def _valid_until(value: Any) -> bool:
@@ -389,7 +404,11 @@ async def apply(
         failure = _refused("ha_unavailable", "I couldn't reach Home Assistant just now.")
     if failure is not None:
         return failure
-    if not isinstance(response, Mapping) or _response_problem(req, response):
+    declined = _script_declined(response)
+    if declined is not None:
+        logger.warning("room_policy_script_refused", script=script, status=200)
+        return _refused("script_refused", f"I couldn't change that: {_sanitized_refusal(declined)}")
+    if not isinstance(response, Mapping) or "ok" in response or _response_problem(req, response):
         logger.warning("room_policy_bad_response", script=script)
         return _refused("bad_response", _UNCONFIRMED)
     logger.info("room_policy_applied", script=script, kind=req.kind)

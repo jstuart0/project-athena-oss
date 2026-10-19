@@ -53,7 +53,10 @@ state read back hasn't caught up. `room_policy_clear` answers the same way.
 `room_policy_good_night` answers `{area, until, until_spoken}`.
 
 A refusal is a non-2xx answer whose message is spoken (capped at 160
-characters), so it must contain no entity ids.
+characters), so it must contain no entity ids. A script may also refuse with
+HTTP 200 and exactly `{ok: false, reason: "<message>"}`, writing nothing; Athena
+speaks the reason the same way. Accepted answers never contain `ok`, and an
+empty `{}` or any other shape carrying `ok` is not confirmed.
 
 Athena never calls any other `room_policy_*` script.
 

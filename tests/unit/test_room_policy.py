@@ -740,6 +740,55 @@ def test_an_answer_that_fails_f4_is_never_confirmed(name, response):
     assert "Lights will stay" not in outcome.speech and "until you leave" not in outcome.speech
 
 
+def test_a_refusal_answer_is_script_refused_with_its_reason_spoken():
+    outcome = answer_with({"ok": False, "reason": "Motion lighting is paused for the night"})
+    assert not outcome.ok and outcome.reason == "script_refused"
+    assert outcome.speech == "I couldn't change that: Motion lighting is paused for the night"
+    assert outcome.response is None
+
+
+def test_a_refusal_answer_is_sanitized_like_a_refused_status():
+    outcome = answer_with({"ok": False, "reason": (
+        "Can't set input_boolean.study_leave_lights_on (0123456789abcdef0123456789abcdef) "
+        "via https://ha.example:8123/api/services/script/room_policy_set")})
+    assert outcome.reason == "script_refused" and outcome.speech.startswith("I couldn't change that: Can't set ")
+    for leak in ("input_boolean", "study_leave", "0123456789abcdef", "http", "ha.example", "room_policy"):
+        assert leak not in outcome.speech, leak
+
+
+def test_a_refusal_answer_is_truncated():
+    outcome = answer_with({"ok": False, "reason": "x" * 400})
+    assert outcome.reason == "script_refused"
+    assert len(outcome.speech) == len("I couldn't change that: ") + rp.MAX_REFUSAL_CHARS
+
+
+def test_a_blank_refusal_reason_still_says_something():
+    assert answer_with({"ok": False, "reason": "  "}).speech == "I couldn't change that: that wasn't allowed"
+
+
+@pytest.mark.parametrize("name,response", [
+    ("empty", {}),
+    ("no_reason", {"ok": False}),
+    ("reason_not_text", {"ok": False, "reason": 1}),
+    ("reason_null", {"ok": False, "reason": None}),
+    ("ok_true", {**GOOD, "ok": True}),
+    ("ok_true_with_reason", {"ok": True, "reason": "fine"}),
+    ("ok_not_a_bool", {"ok": 0, "reason": "no"}),
+    ("refusal_with_extra_key", {"ok": False, "reason": "no", "extra": 1}),
+    ("refusal_with_accepted_keys", {**GOOD, "ok": False, "reason": "no"}),
+    ("accepted_with_ok_false", {**GOOD, "ok": False}),
+])
+def test_anything_else_with_ok_is_bad_response_never_accepted(name, response):
+    outcome = answer_with(response)
+    assert not outcome.ok and outcome.reason == "bad_response", name
+    assert outcome.speech == "I sent that, but I couldn't confirm it went through."
+
+
+def test_an_accepted_answer_without_ok_is_unchanged():
+    outcome = answer_with(GOOD)
+    assert outcome.ok and outcome.response == GOOD and outcome.reason != "script_refused"
+
+
 def test_an_empty_answer_does_not_read_as_no_end_time():
     outcome = answer_with({})
     assert NO_END not in outcome.speech
