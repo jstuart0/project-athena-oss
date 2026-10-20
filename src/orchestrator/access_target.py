@@ -375,6 +375,50 @@ MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
     "don't change brightness",
 )
 
+# "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
+_NUMBER_OR_ARTICLE = (
+    r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
+)
+_HOLD_DURATION = (
+    rf"(?:about |around )?(?:half an? |(?:{_NUMBER_OR_ARTICLE}) )(?:seconds?|minutes?|mins?|hours?|hrs?)"
+)
+
+_PLAIN_MOTION_COMMAND = re.compile(
+    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in sorted(MOTION_CONTROL_PATTERNS, key=len, reverse=True)) + r")"
+    r"(?: in (?:the )?(?P<room>(?!please\b|for\b)[a-z0-9]+(?: (?!please\b|for\b)[a-z0-9]+){0,3}))?"
+    rf"(?: for (?P<duration>{_HOLD_DURATION}))?"
+    r"(?: please)?",
+)
+
+
+def _normalized_utterance(query: str) -> str:
+    text = " ".join((query or "").lower().split())
+    return text[:-1] if text.endswith(".") else text
+
+
+def is_plain_motion_command(query: str, directory: Optional[room_context.RoomDirectory]) -> bool:
+    """True only when the whole utterance is exactly
+
+        [please ]<motion phrase>[ in [the ]<room>][ for <duration>][ please]
+
+    (lowercased, whitespace collapsed, one trailing period dropped). It is an
+    allowlist: any other word, any punctuation, a second room, a question, a
+    negator, a conjunction or a stray "only" fails the full match, and the
+    query takes the path it always took. The room, when named, must be one
+    room the room parser resolves exactly."""
+    match = _PLAIN_MOTION_COMMAND.fullmatch(_normalized_utterance(query))
+    if match is None:
+        return False
+    room = match.group("room")
+    if room is None:
+        return True
+    mentions = room_context.find_room_mentions(room, directory)
+    return (
+        len(mentions) == 1 and mentions[0].kind == "exact" and len(mentions[0].candidates) == 1
+        and mentions[0].start == 0 and mentions[0].end == len(room_context.tokens(room))
+    )
+
+
 IMPLICIT_BRIGHTER: Tuple[str, ...] = (
     "can't see",
     'cant see',

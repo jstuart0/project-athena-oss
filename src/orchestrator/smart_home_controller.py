@@ -1948,7 +1948,8 @@ class SmartHomeController:
     async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
                               prev_query: str = None, prev_response: str = None,
                               prev_intent_entities: Dict = None,
-                              utterance: Optional[UtteranceClassification] = None) -> Dict:
+                              utterance: Optional[UtteranceClassification] = None,
+                              plain_motion_command: bool = False) -> Dict:
         """Use LLM to extract structured intent from natural language query
 
         Args:
@@ -1962,6 +1963,12 @@ class SmartHomeController:
                 route_control_node always passes this. When None (no
                 non-route_control caller exists today), classified locally
                 so the 3.3(b)/(c) guarantees still hold standalone.
+            plain_motion_command: the caller found the user's whole utterance
+                to be a plainly said motion-flow command
+                (``is_plain_motion_command``). ``query`` can be only the
+                command clause of it, so the grammar is applied to the
+                utterance by the caller and not here; the clause must be
+                plain too. Only then does the exclusion deferral not apply.
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -2017,7 +2024,7 @@ class SmartHomeController:
             is_turn_on = True
         has_color = any(c in query_lower for c in HAS_COLOR_WORDS)
 
-        if not self._defers_to_model(query_lower):
+        if not self._defers_to_model(query_lower) or (plain_motion_command and self.is_plain_motion_command(query)):
             fast_intent = await self._fast_path_intent(
                 query, query_lower, device_room, is_turn_on, is_turn_off, has_color, utterance)
             if fast_intent is not None:
@@ -2505,6 +2512,14 @@ Return ONLY valid JSON."""
         return room_context.explicit_whole_house(query, self._directory())
 
     _EVERYTHING_BUT_RE = re.compile(r'(everything|all\s+(the\s+)?lights?)\s+but\s+')
+
+    def is_plain_motion_command(self, query: str) -> bool:
+        """The whole utterance is a plainly said motion-flow command
+        (``access_target.is_plain_motion_command``). "leave" and "keep" are
+        deferral words only because they can carry an exclusion ("leave the
+        porch on"); in this exact grammar they are part of the command, so the
+        deferral guard does not apply. Anything else takes the old path."""
+        return access_target.is_plain_motion_command(query, self._directory())
 
     def _defers_to_model(self, query: str) -> bool:
         """True when no fast path may answer: the wording holds an exclusion
@@ -7612,7 +7627,7 @@ Return ONLY the JSON, no other text."""
                 logger.error(f"Error getting current brightness: {e}")
                 return "I couldn't determine the current brightness. Please specify a level like 'set motion brightness to 50 percent'."
             if current is None:
-                return f"The {spoken_room} lights are off. Please turn them on first or specify a brightness level."
+                return f"The lights in {room_policy.spoken_name(slug)} are off. Please turn them on first or specify a brightness level."
             level = min(100, max(1, current))
             request = room_policy.PolicyRequest("capture", slug, spoken_room, brightness=level)
         if request is None:
@@ -7622,7 +7637,7 @@ Return ONLY the JSON, no other text."""
         )
         logger.info("motion_control_room_policy action=%s ok=%s reason=%s", action, outcome.ok, outcome.reason)
         if request.kind == "capture" and outcome.ok and action == "keep_current_brightness":
-            return f"Brightness locked at {request.brightness}% in the {spoken_room}."
+            return f"Brightness locked at {request.brightness}% in {room_policy.spoken_name(slug)}."
         return outcome.speech
 
     async def _good_night_via_room_policy(self, room: Optional[str], ha_client) -> Optional[str]:
@@ -7693,7 +7708,7 @@ Return ONLY the JSON, no other text."""
             # doesn't know (or whose routing is briefly down): the guard would refuse
             # the direct writes, so say so.
             logger.info("motion_control_policy_room_unmapped")
-            return f"Voice control isn't set up for the {spoken_room} yet."
+            return f"Voice control isn't set up for {room_policy.spoken_name(normalized_room)} yet."
 
         entities = await self.entity_manager.get_entities()
         missing = [
@@ -7702,7 +7717,7 @@ Return ONLY the JSON, no other text."""
         ]
         if missing:
             logger.info("motion_control_helpers_missing action=%s missing=%d", action, len(missing))
-            return f"Motion control in the {spoken_room} isn't fully set up for that. Some of its Home Assistant helpers are missing."
+            return f"Motion control in {room_policy.spoken_name(normalized_room)} isn't fully set up for that. Some of its Home Assistant helpers are missing."
 
         leave_on_bool = f"input_boolean.{normalized_room}_leave_lights_on"
         leave_off_bool = f"input_boolean.{normalized_room}_leave_lights_off"
@@ -7736,9 +7751,10 @@ Return ONLY the JSON, no other text."""
         try:
             if action == "leave_lights_on":
                 # Set duration first, then enable the boolean
+                duration = min(480, max(5, duration))
                 await ha_client.call_service(
                     "input_number", "set_value",
-                    {"entity_id": leave_on_minutes, "value": min(480, max(5, duration))}
+                    {"entity_id": leave_on_minutes, "value": duration}
                 )
                 await ha_client.call_service(
                     "input_boolean", "turn_on",
@@ -7753,9 +7769,10 @@ Return ONLY the JSON, no other text."""
 
             elif action == "leave_lights_off":
                 # Set duration first, then enable the boolean
+                duration = min(480, max(5, duration))
                 await ha_client.call_service(
                     "input_number", "set_value",
-                    {"entity_id": leave_off_minutes, "value": min(480, max(5, duration))}
+                    {"entity_id": leave_off_minutes, "value": duration}
                 )
                 await ha_client.call_service(
                     "input_boolean", "turn_on",

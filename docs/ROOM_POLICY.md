@@ -52,8 +52,41 @@ bare date or a time without an offset) for no end;
 state read back hasn't caught up. `room_policy_clear` answers the same way.
 `room_policy_good_night` answers `{area, until, until_spoken}`.
 
-A refusal is a non-2xx answer whose message is spoken (capped at 160
-characters), so it must contain no entity ids.
+A refusal is either a non-2xx answer with a `message`, or HTTP 200 with
+exactly `{ok: false, reason: "<message>"}`; nothing was written. Athena never
+speaks or stores the script's words. The reason is looked up, exactly, in a
+closed table (`room_policy.REFUSAL_REASONS`) and Athena says its own sentence
+for it; any other reason, and a refusal carrying extra keys, gets "I couldn't
+change that. That wasn't allowed." Accepted answers never contain `ok`; an
+empty `{}`, or any other answer shape carrying `ok`, is not confirmed.
+`until_spoken` is spoken only when it is a clock time as the scripts write it
+(`7:30 AM`), else "for a while".
+
+The reason must equal a listed string byte for byte: no Unicode folding, no
+trimming, no case folding. A refusal carrying any other key, F4's included, gets
+the generic sentence and is never accepted. What is spoken is Athena's closed-set
+sentence or a validated time, so a turn is stored in history as spoken.
+
+Room names are a closed set too. Policy speech names a room from the
+deployment's `HA_POLICY_ROOM_NAMES` (`slug=spoken name` pairs, for example
+`den=the den,kids_room=the kids' room`) and calls any other slug "that room";
+nothing is built in. A name must be letters, digits, spaces, apostrophes and
+hyphens, 40 characters at most, so configuration cannot bring free text back;
+a pair outside that is ignored, and a slug that is set twice is ignored
+altogether (with a warning that names the slug, not the values). The label Home Assistant gives an area is never
+spoken by `room_policy` or by the motion handler's policy branch. Other
+controller replies still speak that label through `_spoken_room`
+(smart_home_controller.py: the light, status and sequence replies); that is a
+separate follow-up.
+
+The table is pinned in `tests/unit/room_policy_refusal_reasons.txt`: one reason
+per line, UTF-8, LF line endings, a final newline, in the generator's order, no
+blank lines. The authoritative gate is on the HA side: the HA config repo pins
+the same list at `test/fixtures/room_policy_refusal_reasons.txt` (byte-identical
+to this file), checked by `test/room-policy-refusal-reasons.test.js`, so a generator change there fails until
+both pinned lists are updated. `scripts/check-room-policy-refusals.py
+<ha-config-repo>` compares this file to the generator by hand (`--write`
+updates it); the unit test here then fails until the table matches.
 
 Athena never calls any other `room_policy_*` script.
 
@@ -179,3 +212,17 @@ prints `motion rooms`, `policy rooms`, `room_policy scripts` and
 `protected with area/device/label` counts (the last should be 0: an entity in
 an area can be reached by an area-wide call from the assistant), and with
 `--areas` one `policy <area key> -> <room>` line per mapped room.
+
+## When voice commands reach the motion handler
+
+A motion-flow command skips the exclusion deferral (and, when it names a
+duration, the sequence detector) only when the whole utterance is exactly
+
+    [please ]<motion phrase>[ in [the ]<room>][ for <duration>][ please]
+
+after lowercasing, collapsing whitespace and dropping one trailing period.
+`<motion phrase>` is one of `access_target.MOTION_CONTROL_PATTERNS`, `<room>` is
+one room the room parser resolves exactly, and `<duration>` is "20 minutes",
+"an hour", "half an hour" and the like. It is a full match, an allowlist: any
+other word or punctuation, a question, a negator, a conjunction, a second room
+or "only" takes the path it always took (`access_target.is_plain_motion_command`).

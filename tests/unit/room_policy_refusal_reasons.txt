@@ -1,0 +1,31 @@
+caller_role must be one of: owner, guest, button, dashboard, test
+area is required
+unknown area
+the test area needs caller_role test, and test is only for the test area
+a guest may only act on their own room (caller_area must equal area)
+kind must be one of: hold_on, hold_off, brightness, disable, max_brightness, capture
+this area does not support that kind
+a button may only set hold_on or hold_off
+a guest may not use disable, max_brightness or capture
+another person has set a hold in this room; a guest cannot override it
+set_by is required and at most 56 characters
+brightness must be 1-100 for this kind
+brightness must be 1-100
+a duration_minutes or until is required for a guest hold
+duration_minutes must be a whole number of minutes, 1 or more
+give duration_minutes or until, not both
+duration_minutes is out of range for this kind (a guest hold_off max 120, others max 480)
+this kind takes no duration or until
+until must be ISO-8601 with a UTC offset
+until is in the past
+until is beyond the cap for this kind
+motion lighting is disabled in this room; clear the disable first (DEC-12)
+caller_role must be one of: owner, guest, dashboard, test
+only the owner may change the lighting schedule
+window must be bedtime or dimming
+start and end must be valid HH:MM times
+start and end must differ (xander L3)
+caller_role must be one of: owner, guest
+this area has no hold-off to apply
+caller_role must be one of: owner, dashboard, test
+the test role may only revert the test area

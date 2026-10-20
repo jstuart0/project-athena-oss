@@ -87,8 +87,25 @@ def _is_agent_exempt(query: str, uk: UtteranceClassification) -> bool:
     automation and stays with the agent."""
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return True
+    return _is_motion_flow_command(query)
+
+
+def _is_motion_flow_command(query: str) -> bool:
     lower = query.lower()
     return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not is_motion_trigger_form(lower)
+
+
+def _is_timed_motion_hold(smart_controller: Any, query: str) -> bool:
+    """"leave the lights on in beta for 20 minutes": a motion-flow command in the
+    plain grammar (``access_target.is_plain_motion_command``), whose only timing
+    is its duration. The motion handler takes the duration (and clamps it); the
+    sequence detector would read it as a timed light sequence. Anything outside
+    the grammar stays on the sequence path."""
+    return _is_plain_motion(smart_controller, query)
+
+
+def _is_plain_motion(smart_controller: Any, query: str) -> bool:
+    return smart_controller.is_plain_motion_command(query) is True
 
 
 CONDITIONAL_COMMAND_TEXT = (
@@ -1249,7 +1266,11 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # as a sequence. With the kill switch on, uk is UNKNOWN and
                 # legacy routing applies; the sequence executor's gate then
                 # stops a real question's writes.
-                if uk.kind != UtteranceKind.STATE_QUESTION and smart_controller.detect_sequence_intent(state.query):
+                if (
+                    uk.kind != UtteranceKind.STATE_QUESTION
+                    and smart_controller.detect_sequence_intent(state.query)
+                    and not _is_timed_motion_hold(smart_controller, state.query)
+                ):
                     logger.info(f"Sequence intent detected (pattern matching mode): query_len={len(state.query)}")
 
                     # Extract sequence from the complex command
@@ -1475,7 +1496,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 else:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
-                    intent = await smart_controller.extract_intent(cmd, device_room=state.room, utterance=uk)
+                    plain_motion = {"plain_motion_command": True} if _is_plain_motion(smart_controller, extraction_query) else {}
+                    intent = await smart_controller.extract_intent(cmd, device_room=state.room, utterance=uk, **plain_motion)
                     if _answer_unprocessable(state, intent):
                         state.node_timings["route_control"] = time.time() - start
                         return state
