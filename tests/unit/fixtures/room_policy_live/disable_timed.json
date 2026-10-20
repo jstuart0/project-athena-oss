@@ -1,0 +1,24 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "disable",
+      "set_by": "contract",
+      "caller_role": "test",
+      "apply_now": false,
+      "duration_minutes": 10
+    }
+  },
+  "accepted": true,
+  "response": {
+    "area": "den",
+    "policy": "disabled",
+    "brightness_hold": null,
+    "until": "2026-10-19T17:29:30-04:00",
+    "until_spoken": "5:29 PM",
+    "set_by": "contract:disable",
+    "stale": false
+  },
+  "body": null
+}

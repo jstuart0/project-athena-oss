@@ -1,0 +1,24 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "hold_off",
+      "set_by": "voice",
+      "caller_role": "test",
+      "apply_now": false,
+      "duration_minutes": 300
+    }
+  },
+  "accepted": true,
+  "response": {
+    "area": "den",
+    "policy": "auto",
+    "brightness_hold": null,
+    "until": "",
+    "until_spoken": "",
+    "set_by": "",
+    "stale": true
+  },
+  "body": null
+}

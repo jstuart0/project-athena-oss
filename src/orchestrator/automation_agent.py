@@ -27,6 +27,7 @@ from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
 from orchestrator import access_target, light_effects
+from orchestrator.access_target import is_motion_trigger_form  # noqa: F401  (re-exported; defined with the motion phrases)
 from orchestrator.model_safe_errors import log_safe, make_user_safe, model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import default_city
 from orchestrator.utterance_kind import (
@@ -2150,18 +2151,6 @@ class AutomationAgent:
             if original_color:
                 restore_data["rgb_color"] = original_color
             await self.ha_client.call_service("light", "turn_on", restore_data)
-
-
-# A motion condition ("when there's motion in the hall, ...") sets up an
-# automation; "disable motion in the garage" is a motion-flow control and "is
-# there motion" a question. Only a condition word before the motion word counts.
-_MOTION_TRIGGER_RE = re.compile(
-    r"\b(?:when|whenever|if|once|as soon as|any ?time)\b[^.;!?]{0,40}?\b(?:motion|movement)\b"
-)
-
-
-def is_motion_trigger_form(query: str) -> bool:
-    return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
 
 
 _HOME_DEVICE_KEYWORDS = (

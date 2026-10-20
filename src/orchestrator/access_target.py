@@ -24,6 +24,7 @@ from orchestrator import light_effects, room_context
 from orchestrator.utterance_kind import (  # noqa: F401  (statement_clause is re-exported for the cue callers)
     UtteranceKind,
     analyze_clauses,
+    classify_utterance,
     cue_text,
     statement_clause,
 )
@@ -374,6 +375,54 @@ MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
     'stay this bright',
     "don't change brightness",
 )
+
+# Typo corrections that are about a stray letter inside a short word ("onn",
+# "oon", "oof", "offf") apply to the whole word only: as a substring "onn" turned
+# "gonna" into "gona" and so broke "gonna nap".
+WHOLE_WORD_TYPOS: FrozenSet[str] = frozenset({"onn", "oon", "oof", "offf"})
+
+
+def correct_typo(text: str, typo: str, correction: str) -> str:
+    """``text`` with ``typo`` replaced by ``correction``: everywhere, or as a
+    whole word for the typos in ``WHOLE_WORD_TYPOS``."""
+    if typo in WHOLE_WORD_TYPOS:
+        return re.sub(rf"\b{re.escape(typo)}\b", correction, text)
+    return text.replace(typo, correction)
+
+
+# A motion condition ("when there's motion in the hall, ...") sets up an
+# automation; "disable motion in the garage" is a motion-flow control and "is
+# there motion" a question. Only a condition word before the motion word counts.
+_MOTION_TRIGGER_RE = re.compile(
+    r"\b(?:when|whenever|if|once|as soon as|any ?time)\b[^.;!?]{0,40}?\b(?:motion|movement)\b"
+)
+
+
+def is_motion_trigger_form(query: str) -> bool:
+    return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
+
+
+_QUESTION_LEAD = re.compile(r"\s*(?:is|are|was|were|does|do|did|has|have|any|anyone|anybody|when|where|what|which|who|whose|how)\b")
+
+
+_QUESTION_FRAMING = re.compile(r"\bwhether\b|\btell me\b|\blet me know\b|\bi wonder\b|\bi want to know\b|\bfind out\b|\bcheck (?:if|whether)\b")
+
+
+def is_motion_flow_command(query: str) -> bool:
+    """A command that controls a room's motion flow ("resume motion in beta",
+    "leave the lights on"): it holds a motion phrase, is not a motion
+    condition ("when there's motion, ...") and is not a question about the
+    state ("is motion on in beta", "is there no motion in the hall")."""
+    lower = (query or "").lower()
+    return (
+        any(p in lower for p in MOTION_CONTROL_PATTERNS)
+        and not is_motion_trigger_form(lower)
+        and not _QUESTION_LEAD.match(lower)
+        and not _QUESTION_FRAMING.search(lower)
+        and not lower.rstrip().endswith("?")
+        and classify_utterance(query).kind != UtteranceKind.STATE_QUESTION
+    )
+
 
 # "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
 _NUMBER_OR_ARTICLE = (

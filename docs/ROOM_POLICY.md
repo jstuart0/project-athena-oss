@@ -44,8 +44,9 @@ Only these, only as `POST /api/services/script/<name>?return_response`:
 
 `room_policy_set` answers with
 `{area, policy, brightness_hold, until, until_spoken, set_by, stale}`, every key
-required (`area` must be the room asked about, `brightness_hold` and `stale`
-booleans, the rest strings):
+required (`area` must be the room asked about; `brightness_hold` is `null` when
+no brightness is held, else a whole number 1..100, and never a boolean;
+`stale` is a boolean; `policy` and `set_by` are strings):
 `until` is an ISO-8601 timestamp with an offset, or `''` (never null, never a
 bare date or a time without an offset) for no end;
 `until_spoken` is a clock time (`7:30 AM`) or empty; `stale` is true when the

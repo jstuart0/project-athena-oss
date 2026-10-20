@@ -12,6 +12,7 @@ import ast
 import asyncio
 import inspect
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -99,7 +100,8 @@ class FakePolicyHA:
             raise self.error
         if service == "room_policy_good_night":
             return {"area": data["area"], "until": self.until, "until_spoken": self.until_spoken}
-        return {"area": data["area"], "policy": data.get("kind", "clear"), "brightness_hold": False, "until": self.until,
+        held = data.get("brightness") if data.get("kind") == "capture" else None
+        return {"area": data["area"], "policy": data.get("kind", "clear"), "brightness_hold": held, "until": self.until,
                 "until_spoken": self.until_spoken, "set_by": data.get("set_by", ""), "stale": self.stale}
 
     @property
@@ -702,16 +704,16 @@ def test_before_the_engine_exists_a_room_is_written_directly_as_today(monkeypatc
 
 # F4: the answer is checked before anything is confirmed aloud
 
-GOOD = {"area": "study", "policy": "hold_on", "brightness_hold": False, "until": "", "until_spoken": "", "set_by": "voice",
+GOOD = {"area": "study", "policy": "hold_on", "brightness_hold": None, "until": "", "until_spoken": "", "set_by": "voice",
         "stale": False}
 
 
-def answer_with(response, req=None, script_kind="set"):
+def answer_with(response, req=None, script_kind="set", slug="study"):
     class Fixed(FakePolicyHA):
         async def call_service_response(self, domain, service, data=None):
             self.calls.append((domain, service, data))
             return response
-    return apply_through_guard(req or hold_on(), ha=Fixed())[0]
+    return apply_through_guard(req or hold_on(), ha=Fixed(), slugs=(slug,))[0]
 
 
 @pytest.mark.parametrize("name,response", [
@@ -879,7 +881,7 @@ def test_until_must_be_empty_or_a_timestamp_with_an_offset(until):
 @pytest.mark.parametrize("key", ["brightness_hold", "set_by"])
 def test_a_set_or_clear_answer_needs_brightness_hold_and_set_by(key):
     assert answer_with({k: v for k, v in GOOD.items() if k != key}).reason == "bad_response"
-    assert answer_with({**GOOD, key: 5}).reason == "bad_response"
+    assert answer_with({**GOOD, key: []}).reason == "bad_response"
     for kind in ("clear", "disable"):
         assert answer_with({k: v for k, v in GOOD.items() if k != key}, rp.PolicyRequest(kind, "study", "study")).reason == "bad_response"
 
@@ -1439,3 +1441,253 @@ def test_extract_intent_rechecks_the_clause_it_was_vouched_for(house):
     house.llm.consulted.clear()
     _asyncio.run(controller.extract_intent("leave the lights on in beta", plain_motion_command=False))
     assert "motion" not in house.llm.consulted, "an unvouched plain clause takes the old path"
+
+
+
+# RC1: the live scripts answer brightness_hold as null or a percentage, never a boolean
+
+@pytest.mark.parametrize("value", [None, 1, 37, 50, 100])
+def test_brightness_hold_may_be_null_or_a_percentage(value):
+    assert answer_with({**GOOD, "brightness_hold": value}).ok
+
+
+@pytest.mark.parametrize("value", [True, False, 0, 101, -1, 37.0, 37.5, "37", "", [], {}, float("nan")])
+def test_brightness_hold_may_not_be_a_boolean_a_float_a_string_or_out_of_range(value):
+    outcome = answer_with({**GOOD, "brightness_hold": value})
+    assert not outcome.ok and outcome.reason == "bad_response", repr(value)
+
+
+def test_a_capture_through_the_fake_reports_the_held_brightness():
+    outcome, ha, _ = apply_through_guard(rp.PolicyRequest("capture", "study", "study", brightness=37))
+    assert outcome.ok and outcome.response["brightness_hold"] == 37
+
+
+def test_the_selftest_response_is_the_live_shape():
+    assert rp._SELFTEST_RESPONSE["brightness_hold"] is None
+
+
+def _logged_problems(monkeypatch, response, error=None):
+    seen = []
+    monkeypatch.setattr(rp.logger, "warning", lambda event, **kw: seen.append((event, kw)))
+    if error is None:
+        answer_with(response)
+    else:
+        ha = FakePolicyHA()
+        ha.error = error
+        apply_through_guard(hold_on(), ha=ha)
+    return [kw for event, kw in seen if event == "room_policy_bad_response"]
+
+
+@pytest.mark.parametrize("response,problem", [
+    ({**GOOD, "brightness_hold": True}, "brightness_hold"),
+    ({**GOOD, "stale": "no"}, "stale"),
+    ({**GOOD, "policy": 3}, "policy"),
+    ({**GOOD, "set_by": None}, "set_by"),
+    ({k: v for k, v in GOOD.items() if k != "until"}, "missing until"),
+    ({**GOOD, "area": "elsewhere"}, "area"),
+    ({**GOOD, "ok": True}, "ok_key"),
+    ([], "not_an_object"),
+])
+def test_a_bad_answer_logs_which_field_and_never_a_value(monkeypatch, response, problem):
+    logged = _logged_problems(monkeypatch, response)
+    assert logged == [{"script": "room_policy_set", "problem": problem}], logged
+
+
+def test_a_reply_without_a_service_response_logs_its_own_problem(monkeypatch):
+    logged = _logged_problems(monkeypatch, None, error=HAResponseShapeError("no service_response"))
+    assert logged == [{"script": "room_policy_set", "problem": "no_service_response"}]
+
+
+# the answers the live scripts really gave (tests/unit/fixtures/room_policy_live/README.md)
+
+FIXTURES = sorted((Path(__file__).parent / "fixtures" / "room_policy_live").glob("*.json"))
+
+
+def _fixture_request(fixture):
+    fields = fixture["request"]["fields"]
+    script = fixture["request"]["script"]
+    kind = {"room_policy_clear": "clear", "room_policy_good_night": "good_night"}.get(script, fields.get("kind"))
+    return rp.PolicyRequest(kind, fields["area"], "den", brightness=fields.get("brightness"),
+                            duration_minutes=fields.get("duration_minutes"))
+
+
+def _apply_recorded(fixture):
+    req = _fixture_request(fixture)
+    return answer_with(fixture["response"], req=req, slug=req.slug)
+
+
+def test_the_live_fixtures_are_vendored_and_cover_accepted_and_refused_answers():
+    names = {path.name for path in FIXTURES}
+    assert len(FIXTURES) >= 15 and {"hold_on_open.json", "capture_37.json", "refused_capture_zero.json"} <= names
+    kinds = [json.loads(path.read_text())["accepted"] for path in FIXTURES]
+    assert kinds.count(True) >= 11 and kinds.count(False) >= 4
+
+
+@pytest.mark.parametrize("path", [p for p in FIXTURES if json.loads(p.read_text())["accepted"]], ids=lambda p: p.name)
+def test_every_accepted_live_answer_is_accepted(path):
+    fixture = json.loads(path.read_text())
+    outcome = _apply_recorded(fixture)
+    assert outcome.ok and outcome.reason is None, (path.name, outcome)
+
+
+@pytest.mark.parametrize("path", [p for p in FIXTURES if not json.loads(p.read_text())["accepted"]], ids=lambda p: p.name)
+def test_every_refused_live_answer_is_a_script_refusal_in_athenas_words(path):
+    fixture = json.loads(path.read_text())
+    outcome = _apply_recorded(fixture)
+    assert not outcome.ok and outcome.reason == "script_refused", (path.name, outcome)
+    assert fixture["response"]["reason"] in rp.REFUSAL_REASONS and fixture["response"]["reason"] not in outcome.speech
+
+
+def test_the_held_brightness_in_a_live_capture_is_kept():
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "room_policy_live" / "capture_37.json").read_text())
+    assert _apply_recorded(fixture).response["brightness_hold"] == 37
+
+
+# RC2: the real chain, classify_node and then route_control_node
+
+def _classify_only(query):
+    """``classify_node`` as the graph runs it, over the pattern classifier (no model)."""
+    import os
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
+
+    src = str(Path(__file__).resolve().parents[2] / "src")
+    if str(Path(src) / "orchestrator") not in sys.path:
+        sys.path.insert(0, str(Path(src) / "orchestrator"))  # classify_node imports semantic_cache bare
+    os.environ.setdefault("SERVICE_API_KEY", "test-key-room-policy-chain")
+    os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
+    loader = _MagicMock()
+    loader.get_config = shared.config.get_config
+    loader.ADMIN_API_URL = os.environ["ADMIN_API_URL"]
+    loader.get_feature_flag = _AsyncMock(return_value=False)
+    loader.get_feature_flags = _AsyncMock(return_value={})
+    loader.clear_cache = _AsyncMock()
+    sys.modules.setdefault("orchestrator.config_loader", loader)
+    import orchestrator.main as main_module
+    from orchestrator.search_providers.intent_classifier import IntentClassifier
+    from orchestrator.state import OrchestratorState
+
+    _runtime.set_cache_client(SimpleNamespace(get=_AsyncMock(return_value=None), set=_AsyncMock(), client=None))
+    _runtime.set_llm_router(_MagicMock())
+    _runtime.set_intent_classifier(IntentClassifier())
+    state = OrchestratorState(query=query)
+    state.session_id = "sess-room-policy-chain"
+    state.mode = "owner"
+    state.node_timings = {}
+    return asyncio.run(main_module.classify_node(state))
+
+
+def classify_then_route(house, query, motion_reply=None, **kw):
+    """The two nodes in the order the graph runs them: what classify decided is what route_control gets."""
+    from orchestrator.nodes.route_control import route_control_node
+
+    classified = _classify_only(query)
+    house.llm.motion_reply = motion_reply or intent("beta")
+    house.llm.consulted.clear()
+    house.ha.calls.clear()
+    state = house.chat.state(query, **kw)
+    for field in ("intent", "confidence", "complexity", "entities"):
+        setattr(state, field, getattr(classified, field))
+    with house.chat.patched():
+        routed = asyncio.run(route_control_node(state))
+    return classified, routed
+
+
+MOTION_PHRASES = sorted(access_target.MOTION_CONTROL_PATTERNS)
+MOTION_PHRASE_QUERIES = [(phrase, with_room) for phrase in MOTION_PHRASES for with_room in (False, True)]
+
+
+@pytest.mark.parametrize("phrase,with_room", MOTION_PHRASE_QUERIES, ids=[f"{p}|{'room' if r else 'bare'}" for p, r in MOTION_PHRASE_QUERIES])
+def test_every_motion_phrase_survives_classify_and_reaches_the_motion_handler(house, phrase, with_room):
+    query = f"{phrase} in beta" if with_room else phrase
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    classified, routed = classify_then_route(house, query, intent("beta" if with_room else "study"))
+    assert classified.intent.value == "control", (query, classified.intent)
+    assert (classified.entities or {}).get("device_type") != "sensor", (query, classified.entities)
+    sensor.assert_not_awaited()
+    assert routed.answer != "SENSOR-ANSWER", query
+    assert "motion" in house.llm.consulted, (query, house.llm.consulted, routed.answer)
+    assert house.ha.calls, (query, routed.answer)
+
+
+@pytest.mark.parametrize("query", ["resume motion in Beta", "disable motion", "turn motion back on", "pause motion in alpha"])
+def test_a_cached_sensor_classification_cannot_pre_empt_a_motion_command(house, query):
+    """The intent cache keeps a classification 300 s; route_control must not trust a sensor one for these words."""
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    from orchestrator.nodes.route_control import route_control_node
+    house.llm.motion_reply = intent("beta", "enable_motion")
+    house.llm.consulted.clear()
+    state = house.chat.state(query)
+    state.entities = {"device": "sensor", "device_type": "sensor"}
+    from orchestrator.state import IntentCategory
+    state.intent = IntentCategory.CONTROL
+    with house.chat.patched():
+        routed = asyncio.run(route_control_node(state))
+    sensor.assert_not_awaited()
+    assert routed.answer != "SENSOR-ANSWER" and "motion" in house.llm.consulted
+
+
+SENSOR_QUESTIONS = [
+    "is there motion in Beta", "any motion in the office", "when was the last motion", "is motion on in beta",
+    "is there no motion in the hall", "was there motion in alpha", "is there movement in the office",
+    "has there been motion in beta", "what was the last motion in alpha?", "is there anyone in the office",
+    "no motion in the hall?", "motion on in beta?", "let me know whether there is no motion in the hall",
+    "tell me if the motion off switch is on",
+]
+
+
+@pytest.mark.parametrize("query", SENSOR_QUESTIONS)
+def test_a_sensor_question_still_reaches_the_sensor_handler(house, query):
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    classified, routed = classify_then_route(house, query)
+    assert routed.answer == "SENSOR-ANSWER", (query, classified.entities, routed.answer)
+    assert house.ha.calls == [] and "motion" not in house.llm.consulted
+
+
+@pytest.mark.parametrize("query", SENSOR_QUESTIONS)
+def test_a_sensor_question_is_not_a_motion_flow_command(query):
+    assert not access_target.is_motion_flow_command(query), query
+
+
+def test_the_motion_flow_command_helper_lives_in_access_target_and_route_control_uses_it():
+    from orchestrator.nodes import route_control as rc
+    assert not hasattr(rc, "_is_motion_flow_command")
+    assert access_target.is_motion_flow_command("resume motion in beta")
+    assert not access_target.is_motion_flow_command("when there is motion in beta turn on the light")
+
+
+@pytest.mark.parametrize("text,typo,correction,expected", [
+    ("gonna nap", "onn", "on", "gonna nap"),
+    ("turn onn the light", "onn", "on", "turn on the light"),
+    ("the lights oon", "oon", "on", "the lights on"),
+    ("it is soon", "oon", "on", "it is soon"),
+    ("lights offf", "offf", "off", "lights off"),
+    ("lihgts on", "lihgts", "lights", "lights on"),
+    ("turn of the light", "turn of ", "turn off ", "turn off the light"),
+])
+def test_a_stray_letter_typo_applies_to_a_whole_word_only(text, typo, correction, expected):
+    assert access_target.correct_typo(text, typo, correction) == expected
+
+
+@pytest.mark.parametrize("query", [
+    "when the hall has no motion turn off the lights", "if there is no motion in beta for an hour turn off the lights",
+    "whenever there is motion in alpha leave the lights on",
+])
+def test_a_motion_condition_is_not_a_motion_flow_command(query):
+    assert not access_target.is_motion_flow_command(query), query
+
+
+def test_the_utterance_classifier_has_a_say_on_whether_it_is_a_question(monkeypatch):
+    from types import SimpleNamespace
+    assert access_target.is_motion_flow_command("resume motion in beta")
+    monkeypatch.setattr(access_target, "classify_utterance",
+                        lambda query, **kw: SimpleNamespace(kind=access_target.UtteranceKind.STATE_QUESTION))
+    assert not access_target.is_motion_flow_command("resume motion in beta")
+
+
+def test_a_misspelt_word_is_corrected_before_the_motion_route_decides():
+    classified = _classify_only("leave the lihgts on in beta")
+    assert classified.intent.value == "control" and (classified.entities or {}).get("device_type") != "sensor"
