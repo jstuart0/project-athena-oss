@@ -67,11 +67,13 @@ trimming, no case folding. A refusal carrying any other key, F4's included, gets
 the generic sentence and is never accepted. What is spoken is Athena's closed-set
 sentence or a validated time, so a turn is stored in history as spoken.
 
-Room names are a closed set too. Policy speech names a room from
-`room_policy.SPOKEN_ROOMS` (`mbr` and `master_bedroom` as "the master bedroom",
-`alpha`, `beta`, `office`, `master_bathroom`) and calls any other slug "that
-room". The label Home Assistant gives an area is never spoken by
-`room_policy` or by the motion handler's policy branch. Other
+Room names are a closed set too. Policy speech names a room from the
+deployment's `HA_POLICY_ROOM_NAMES` (`slug=spoken name` pairs, for example
+`den=the den,kids_room=the kids' room`) and calls any other slug "that room";
+nothing is built in. A name must be letters, digits, spaces, apostrophes and
+hyphens, 40 characters at most, so configuration cannot bring free text back;
+a pair outside that is ignored. The label Home Assistant gives an area is never
+spoken by `room_policy` or by the motion handler's policy branch. Other
 controller replies still speak that label through `_spoken_room`
 (smart_home_controller.py: the light, status and sequence replies); that is a
 separate follow-up.

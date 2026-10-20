@@ -42,6 +42,7 @@ import httpx
 import structlog
 
 from orchestrator import mode_permission as mp
+from shared.config import get_config
 from shared.ha_client import HAResponseShapeError, HomeAssistantNotConfiguredError
 
 logger = structlog.get_logger(__name__)
@@ -257,22 +258,30 @@ def _spoken_time(response: Mapping[str, Any]) -> str:
     return value if isinstance(value, str) and _SPOKEN_TIME.fullmatch(value) else ""
 
 
-# The policy rooms are a closed set and the speech names them in Athena's own
-# words. The label Home Assistant gives an area (PolicyRequest.spoken_room) is
-# never spoken: it is free text. A slug not listed here is "that room".
-SPOKEN_ROOMS: Mapping[str, str] = {
-    "mbr": "the master bedroom",
-    "master_bedroom": "the master bedroom",
-    "alpha": "Alpha",
-    "beta": "Beta",
-    "office": "the office",
-    "master_bathroom": "the master bathroom",
-}
+# The policy rooms are a closed set and the speech names them in the
+# deployment's own words (HA_POLICY_ROOM_NAMES, "slug=spoken name" pairs). The
+# label Home Assistant gives an area (PolicyRequest.spoken_room) is never
+# spoken: it is free text. A slug that is not configured is "that room", and a
+# configured pair outside the strict charset below is ignored, so configuration
+# cannot bring free text back.
 UNKNOWN_ROOM = "that room"
+_ROOM_SLUG = re.compile(r"[a-z0-9_]{1,40}", re.ASCII)
+_ROOM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 '\-]{0,39}", re.ASCII)
+
+
+def configured_room_names() -> Dict[str, str]:
+    """The valid ``slug=spoken name`` pairs of HA_POLICY_ROOM_NAMES."""
+    names: Dict[str, str] = {}
+    for pair in (get_config().ha_policy_room_names or "").split(","):
+        slug, _, name = pair.partition("=")
+        slug, name = slug.strip(), name.strip()
+        if _ROOM_SLUG.fullmatch(slug) and _ROOM_NAME.fullmatch(name):
+            names[slug] = name
+    return names
 
 
 def spoken_name(slug: str) -> str:
-    return SPOKEN_ROOMS.get(slug, UNKNOWN_ROOM)
+    return configured_room_names().get(slug, UNKNOWN_ROOM)
 
 
 def _hold_speech(req: PolicyRequest, response: Mapping[str, Any]) -> str:

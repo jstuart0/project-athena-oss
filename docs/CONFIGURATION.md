@@ -1191,6 +1191,12 @@ scheduled sequence step. The guard also protects, with no setting, every
 Home Assistant policy engine runs. Voice changes to those rooms go through
 the scripts instead; see [ROOM_POLICY.md](ROOM_POLICY.md).
 
+`HA_POLICY_ROOM_NAMES` (default empty) names those rooms in the replies, as
+comma-separated `slug=spoken name` pairs such as `den=the den,kids_room=the
+kids' room`. A room not listed is spoken as "that room". Names use letters,
+digits, spaces, apostrophes and hyphens, up to 40 characters; a pair outside
+that is ignored.
+
 **Owner PIN.** Set in the admin UI's Guest Mode page, which has a dedicated
 Owner PIN section (6-digit input, confirmation input, client-side format
 check). The server independently validates the format — exactly six ASCII

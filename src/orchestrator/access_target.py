@@ -375,6 +375,42 @@ MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
     "don't change brightness",
 )
 
+_NEGATOR_BEFORE_PHRASE = re.compile(r"(?:^|\s)(?:don't|dont|do not|never|not|stop)\b[,;:]?(?:\s+\S+){0,2}\s*$")
+# "should I leave the lights on": a question about doing it, not the command.
+_ASKING_BEFORE_PHRASE = re.compile(
+    r"\b(?:should|shall)\s+(?:i|we)\b|\b(?:do|does)\s+(?:i|we|it)\b|\bwhether\b|\bwhat\s+if\b|\bwhy\b|\bhow\s+(?:do|can|should)\b"
+)
+_SECOND_COMMAND_AFTER_PHRASE = re.compile(
+    r"(?:,|\band\b|\bthen\b|\balso\b|\bplus\b)\s*(?:please\s+)?"
+    r"(?:turn|switch|set|dim|brighten|lock|unlock|close|open|play|start|stop|shut|kill|make|raise|lower)\b",
+)
+
+
+def plain_motion_command_remainder(query: str) -> Optional[str]:
+    """For a motion-flow command ("leave the lights on in beta for 20 minutes")
+    said plainly, the query with the matched motion phrase taken out ("in beta
+    for 20 minutes"); else None.
+
+    Not plain: no motion phrase; the phrase negated within three words before
+    it ("don't leave the lights on"; a phrase's own "don't turn off the lights"
+    starts the phrase, so it is not before it); a question about it ("should I leave the lights on"); or a second command after a conjunction ("... and turn off the
+    hall") or an exclusion phrase ("... but turn off alpha"), which a
+    one-intent handler would drop."""
+    lower = query.lower()
+    hits = [(lower.find(p), -len(p), p) for p in MOTION_CONTROL_PATTERNS if p in lower]
+    if not hits:
+        return None
+    start, _, phrase = min(hits)
+    end = start + len(phrase)
+    if _NEGATOR_BEFORE_PHRASE.search(lower[:start]):
+        return None
+    if _ASKING_BEFORE_PHRASE.search(lower[:start]):
+        return None
+    if _SECOND_COMMAND_AFTER_PHRASE.search(lower[end:]) or room_context.has_exclusion(lower):
+        return None
+    return f"{lower[:start]} {lower[end:]}".strip()
+
+
 IMPLICIT_BRIGHTER: Tuple[str, ...] = (
     "can't see",
     'cant see',

@@ -108,8 +108,11 @@ def _is_timed_motion_hold(smart_controller: Any, query: str) -> bool:
     """"leave the lights on in beta for 20 minutes": a motion-flow command whose
     only timing is its duration. The motion handler takes the duration (and
     clamps it); the sequence detector would read it as a timed light sequence.
-    Any other timing (a clock time, "then", a repeat) keeps it a sequence."""
-    if not _is_motion_flow_command(query):
+    Only a plainly said command counts (the controller's own test: no motion
+    condition, no negation, no question, no second command, no exclusion
+    wording), so "... for 20 minutes but turn off alpha" stays a sequence. Any
+    other timing (a clock time, "then", a repeat) keeps it a sequence too."""
+    if not smart_controller.is_plain_motion_command(query.lower()):
         return False
     return not smart_controller.detect_sequence_intent(_HOLD_DURATION_RE.sub(" ", query.lower()))
 

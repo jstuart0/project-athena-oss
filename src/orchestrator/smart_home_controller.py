@@ -2017,7 +2017,7 @@ class SmartHomeController:
             is_turn_on = True
         has_color = any(c in query_lower for c in HAS_COLOR_WORDS)
 
-        if not self._defers_to_model(query_lower) or self._is_motion_control_request(query_lower):
+        if not self._defers_to_model(query_lower) or self.is_plain_motion_command(query_lower):
             fast_intent = await self._fast_path_intent(
                 query, query_lower, device_room, is_turn_on, is_turn_off, has_color, utterance)
             if fast_intent is not None:
@@ -2506,19 +2506,20 @@ Return ONLY valid JSON."""
 
     _EVERYTHING_BUT_RE = re.compile(r'(everything|all\s+(the\s+)?lights?)\s+but\s+')
 
-    def _is_motion_control_request(self, query: str) -> bool:
-        """A motion-flow command ("leave the lights on in beta") with no real
-        exclusion phrase. "leave" and "keep" are deferral words only because
-        they can carry an exclusion ("leave the porch on"); here the command is
-        the motion handler's, so the deferral does not apply. An exclusion
-        phrase ("except", "but", "not the"...) still defers, and so does a
-        motion condition ("when there's motion, leave the lights on")."""
+    def is_plain_motion_command(self, query: str) -> bool:
+        """A plainly said motion-flow command ("leave the lights on in beta")
+        that the deferral guard may let through. "leave" and "keep" are
+        deferral words only because they can carry an exclusion ("leave the
+        porch on"); here they are part of the command. So the motion phrase is
+        taken out and the full deferral check runs on what is left: "in beta"
+        passes, "in beta without the galley" still defers. A motion condition
+        ("when there's motion, ..."), a negated phrase and a second command
+        after a conjunction never pass."""
         from .automation_agent import is_motion_trigger_form
-        return (
-            any(p in query for p in access_target.MOTION_CONTROL_PATTERNS)
-            and not is_motion_trigger_form(query)
-            and not room_context.has_exclusion(query, self._directory())
-        )
+        if is_motion_trigger_form(query):
+            return False
+        remainder = access_target.plain_motion_command_remainder(query)
+        return remainder is not None and not self._defers_to_model(remainder)
 
     def _defers_to_model(self, query: str) -> bool:
         """True when no fast path may answer: the wording holds an exclusion
@@ -7707,7 +7708,7 @@ Return ONLY the JSON, no other text."""
             # doesn't know (or whose routing is briefly down): the guard would refuse
             # the direct writes, so say so.
             logger.info("motion_control_policy_room_unmapped")
-            return f"Voice control isn't set up for the {spoken_room} yet."
+            return f"Voice control isn't set up for {room_policy.spoken_name(normalized_room)} yet."
 
         entities = await self.entity_manager.get_entities()
         missing = [
@@ -7716,7 +7717,7 @@ Return ONLY the JSON, no other text."""
         ]
         if missing:
             logger.info("motion_control_helpers_missing action=%s missing=%d", action, len(missing))
-            return f"Motion control in the {spoken_room} isn't fully set up for that. Some of its Home Assistant helpers are missing."
+            return f"Motion control in {room_policy.spoken_name(normalized_room)} isn't fully set up for that. Some of its Home Assistant helpers are missing."
 
         leave_on_bool = f"input_boolean.{normalized_room}_leave_lights_on"
         leave_off_bool = f"input_boolean.{normalized_room}_leave_lights_off"
@@ -7750,9 +7751,10 @@ Return ONLY the JSON, no other text."""
         try:
             if action == "leave_lights_on":
                 # Set duration first, then enable the boolean
+                duration = min(480, max(5, duration))
                 await ha_client.call_service(
                     "input_number", "set_value",
-                    {"entity_id": leave_on_minutes, "value": min(480, max(5, duration))}
+                    {"entity_id": leave_on_minutes, "value": duration}
                 )
                 await ha_client.call_service(
                     "input_boolean", "turn_on",
@@ -7767,9 +7769,10 @@ Return ONLY the JSON, no other text."""
 
             elif action == "leave_lights_off":
                 # Set duration first, then enable the boolean
+                duration = min(480, max(5, duration))
                 await ha_client.call_service(
                     "input_number", "set_value",
-                    {"entity_id": leave_off_minutes, "value": min(480, max(5, duration))}
+                    {"entity_id": leave_off_minutes, "value": duration}
                 )
                 await ha_client.call_service(
                     "input_boolean", "turn_on",

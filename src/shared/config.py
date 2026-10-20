@@ -597,6 +597,12 @@ class AthenaConfig(BaseSettings):
     #   derives from Home Assistant itself. Empty (the default) adds none.
     #   Parsed by mode_permission.policy_extras(); see docs/ROOM_POLICY.md.
     ha_policy_protected_extra: str = Field(default="")
+    # ha_policy_room_names: how room-policy speech names a room, as comma-
+    #   separated "slug=spoken name" pairs, e.g.
+    #   "den=the den,mbr=the master bedroom". A slug not listed is spoken as
+    #   "that room"; a pair whose slug or name falls outside a strict charset
+    #   is ignored. Parsed by room_policy.spoken_name(); docs/ROOM_POLICY.md.
+    ha_policy_room_names: str = Field(default="")
     # guest_baseline_restricted_entities: the floor unioned into every
     #   guest's restricted_entities regardless of admin config (D8) --
     #   same domain set as the fallback list above, plus this is *always*
