@@ -2819,14 +2819,15 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.node_timings["classify"] = time.time() - start
         return state
 
-    # DETERMINISTIC ROUTE: a motion-flow command ("resume motion in beta",
-    # "leave the lights on") is a control command, and not a music pause or a
-    # sensor question because it holds "resume", "pause" or "motion". It sits
-    # ahead of the sensor and music fast paths below. Like the
-    # light effect above it sits before the intent-cache read, so a classification
-    # cached for the same words cannot send it elsewhere, and it does not touch
-    # that cache.
-    if access_target.is_motion_flow_command(state.query):
+    # DETERMINISTIC ROUTE: a plainly said motion-flow command ("resume motion in
+    # beta", "leave the lights on") is a control command, and not a music pause
+    # or a sensor question because it holds "resume", "pause" or "motion". Only
+    # the exact grammar of ``access_target.is_plain_motion_command`` counts; a
+    # question, a title, a complaint or a fragment takes the paths below, as it
+    # always did. Like the light effect above it sits before the intent-cache
+    # read, so a classification cached for the same words cannot send it
+    # elsewhere, and it does not touch that cache.
+    if access_target.is_plain_motion_command(state.query, current_directory()):
         logger.info("motion_flow_route", query_len=len(state.query))
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.9

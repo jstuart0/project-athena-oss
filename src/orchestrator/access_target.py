@@ -24,7 +24,6 @@ from orchestrator import light_effects, room_context
 from orchestrator.utterance_kind import (  # noqa: F401  (statement_clause is re-exported for the cue callers)
     UtteranceKind,
     analyze_clauses,
-    classify_utterance,
     cue_text,
     statement_clause,
 )
@@ -402,28 +401,6 @@ def is_motion_trigger_form(query: str) -> bool:
     return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
 
 
-_QUESTION_LEAD = re.compile(r"\s*(?:is|are|was|were|does|do|did|has|have|any|anyone|anybody|when|where|what|which|who|whose|how)\b")
-
-
-_QUESTION_FRAMING = re.compile(r"\bwhether\b|\btell me\b|\blet me know\b|\bi wonder\b|\bi want to know\b|\bfind out\b|\bcheck (?:if|whether)\b")
-
-
-def is_motion_flow_command(query: str) -> bool:
-    """A command that controls a room's motion flow ("resume motion in beta",
-    "leave the lights on"): it holds a motion phrase, is not a motion
-    condition ("when there's motion, ...") and is not a question about the
-    state ("is motion on in beta", "is there no motion in the hall")."""
-    lower = (query or "").lower()
-    return (
-        any(p in lower for p in MOTION_CONTROL_PATTERNS)
-        and not is_motion_trigger_form(lower)
-        and not _QUESTION_LEAD.match(lower)
-        and not _QUESTION_FRAMING.search(lower)
-        and not lower.rstrip().endswith("?")
-        and classify_utterance(query).kind != UtteranceKind.STATE_QUESTION
-    )
-
-
 # "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
 _NUMBER_OR_ARTICLE = (
     r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
@@ -432,8 +409,18 @@ _HOLD_DURATION = (
     rf"(?:about |around )?(?:half an? |(?:{_NUMBER_OR_ARTICLE}) )(?:seconds?|minutes?|mins?|hours?|hrs?)"
 )
 
+# Phrases that are as likely a statement of what is set ("motion on in beta",
+# "no motion in the hall") or a sensor question as a command. They stay motion
+# patterns for the handler, but they never get the pre-cache control route.
+AMBIGUOUS_MOTION_PHRASES: FrozenSet[str] = frozenset({
+    "no motion", "motion on", "motion off", "motion detection on", "normal motion",
+})
+PLAIN_MOTION_PHRASES: Tuple[str, ...] = tuple(sorted(
+    (p for p in MOTION_CONTROL_PATTERNS if p not in AMBIGUOUS_MOTION_PHRASES), key=len, reverse=True,
+))
+
 _PLAIN_MOTION_COMMAND = re.compile(
-    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in sorted(MOTION_CONTROL_PATTERNS, key=len, reverse=True)) + r")"
+    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in PLAIN_MOTION_PHRASES) + r")"
     r"(?: in (?:the )?(?P<room>(?!please\b|for\b)[a-z0-9]+(?: (?!please\b|for\b)[a-z0-9]+){0,3}))?"
     rf"(?: for (?P<duration>{_HOLD_DURATION}))?"
     r"(?: please)?",

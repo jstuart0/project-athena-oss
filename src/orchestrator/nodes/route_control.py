@@ -87,7 +87,8 @@ def _is_agent_exempt(query: str, uk: UtteranceClassification) -> bool:
     automation and stays with the agent."""
     if uk.kind == UtteranceKind.STATE_QUESTION:
         return True
-    return access_target.is_motion_flow_command(query)
+    lower = query.lower()
+    return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not access_target.is_motion_trigger_form(lower)
 
 
 def _is_timed_motion_hold(smart_controller: Any, query: str) -> bool:
@@ -934,11 +935,12 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
     try:
         # FAST PATH: Check if this is a sensor/occupancy query from fast-path classification
         # If entities already indicate sensor, go directly to sensor handler
-        # A motion-flow command (``resume motion in beta``) is never the sensor
-        # handler's, whatever a cached classification of the same words says.
+        # A plainly said motion-flow command (``resume motion in beta``) is never
+        # the sensor handler's, whatever a cached classification of the same
+        # words says. Anything else keeps the cached classification.
         if (
             state.entities and state.entities.get("device_type") == "sensor"
-            and not access_target.is_motion_flow_command(state.query)
+            and not _is_plain_motion(smart_controller, state.query)
         ):
             logger.info(f"Fast path sensor query detected, routing to sensor handler")
             if smart_controller:

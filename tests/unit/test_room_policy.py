@@ -1293,7 +1293,7 @@ def test_the_grammar_is_a_full_match_with_no_substring_search():
 
 
 def test_the_grammar_phrases_are_the_motion_patterns_whole():
-    for phrase in access_target.MOTION_CONTROL_PATTERNS:
+    for phrase in access_target.PLAIN_MOTION_PHRASES:
         assert access_target._PLAIN_MOTION_COMMAND.fullmatch(phrase), phrase
         assert not access_target._PLAIN_MOTION_COMMAND.fullmatch(phrase + "x"), phrase
         assert not access_target._PLAIN_MOTION_COMMAND.fullmatch("x" + phrase), phrase
@@ -1593,7 +1593,7 @@ def classify_then_route(house, query, motion_reply=None, **kw):
     return classified, routed
 
 
-MOTION_PHRASES = sorted(access_target.MOTION_CONTROL_PATTERNS)
+MOTION_PHRASES = sorted(access_target.PLAIN_MOTION_PHRASES)
 MOTION_PHRASE_QUERIES = [(phrase, with_room) for phrase in MOTION_PHRASES for with_room in (False, True)]
 
 
@@ -1647,18 +1647,6 @@ def test_a_sensor_question_still_reaches_the_sensor_handler(house, query):
     assert house.ha.calls == [] and "motion" not in house.llm.consulted
 
 
-@pytest.mark.parametrize("query", SENSOR_QUESTIONS)
-def test_a_sensor_question_is_not_a_motion_flow_command(query):
-    assert not access_target.is_motion_flow_command(query), query
-
-
-def test_the_motion_flow_command_helper_lives_in_access_target_and_route_control_uses_it():
-    from orchestrator.nodes import route_control as rc
-    assert not hasattr(rc, "_is_motion_flow_command")
-    assert access_target.is_motion_flow_command("resume motion in beta")
-    assert not access_target.is_motion_flow_command("when there is motion in beta turn on the light")
-
-
 @pytest.mark.parametrize("text,typo,correction,expected", [
     ("gonna nap", "onn", "on", "gonna nap"),
     ("turn onn the light", "onn", "on", "turn on the light"),
@@ -1672,22 +1660,107 @@ def test_a_stray_letter_typo_applies_to_a_whole_word_only(text, typo, correction
     assert access_target.correct_typo(text, typo, correction) == expected
 
 
-@pytest.mark.parametrize("query", [
-    "when the hall has no motion turn off the lights", "if there is no motion in beta for an hour turn off the lights",
-    "whenever there is motion in alpha leave the lights on",
-])
-def test_a_motion_condition_is_not_a_motion_flow_command(query):
-    assert not access_target.is_motion_flow_command(query), query
-
-
-def test_the_utterance_classifier_has_a_say_on_whether_it_is_a_question(monkeypatch):
-    from types import SimpleNamespace
-    assert access_target.is_motion_flow_command("resume motion in beta")
-    monkeypatch.setattr(access_target, "classify_utterance",
-                        lambda query, **kw: SimpleNamespace(kind=access_target.UtteranceKind.STATE_QUESTION))
-    assert not access_target.is_motion_flow_command("resume motion in beta")
-
-
-def test_a_misspelt_word_is_corrected_before_the_motion_route_decides():
+def test_a_misspelt_word_is_corrected_before_the_motion_route_decides(house):
     classified = _classify_only("leave the lihgts on in beta")
     assert classified.intent.value == "control" and (classified.entities or {}).get("device_type") != "sensor"
+
+
+# Only the exact grammar takes the pre-cache control route; everything else takes today's path
+
+OLD_PATH_PROBES = [
+    # codex r7
+    "motion on in beta", "no motion in the hall", "motion off in beta", "please, is motion on in beta",
+    "play Pause Motion", "resume motion picture soundtrack", "disable motion blur",
+    # xander
+    "why do the lights stay on in beta",
+    # more of the same kind
+    "pause motion picture", "resume motion in beta?", "can you resume motion in beta", "resume motion in beta and alpha",
+    "resume motion in beta, thanks", "no motion in the hall for an hour", "the motion off switch is broken in beta",
+    "uh resume motion in beta", "resume motion", "disable motion in the nowhere",
+]
+OLD_PATH_NOT_RESUME_BARE = [q for q in OLD_PATH_PROBES if q not in ("resume motion", "disable motion in the nowhere")]
+
+
+def _classify_the_old_way(query, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(access_target, "is_plain_motion_command", lambda *a, **k: False)
+        return _classify_only(query)
+
+
+def _everything_the_old_way(house, monkeypatch, query):
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    with monkeypatch.context() as m:
+        m.setattr(access_target, "is_plain_motion_command", lambda *a, **k: False)
+        classified, routed = classify_then_route(house, query)
+    return (classified.intent, classified.entities, routed.answer, list(house.llm.consulted), list(house.ha.calls), sensor.await_count)
+
+
+@pytest.mark.parametrize("query", OLD_PATH_NOT_RESUME_BARE)
+def test_a_question_title_complaint_or_fragment_takes_the_path_it_always_took(house, monkeypatch, query):
+    old = _everything_the_old_way(house, monkeypatch, query)
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    classified, routed = classify_then_route(house, query)
+    new = (classified.intent, classified.entities, routed.answer, list(house.llm.consulted), list(house.ha.calls), sensor.await_count)
+    assert new == old, query
+    assert not access_target.is_plain_motion_command(query, None), query
+
+
+@pytest.mark.parametrize("query", [q for q in OLD_PATH_NOT_RESUME_BARE if "motion" in q and q not in ("pause motion picture",)] + ["motion on in beta"])
+def test_a_motion_word_in_a_question_or_title_is_answered_by_the_sensor_handler_as_before(house, query):
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    classified, routed = classify_then_route(house, query)
+    assert routed.answer == "SENSOR-ANSWER" and "motion" not in house.llm.consulted and house.ha.calls == [], (query, routed.answer)
+
+
+def test_the_ambiguous_phrases_are_motion_patterns_but_never_the_grammar():
+    assert access_target.AMBIGUOUS_MOTION_PHRASES <= set(access_target.MOTION_CONTROL_PATTERNS)
+    for phrase in access_target.AMBIGUOUS_MOTION_PHRASES:
+        assert phrase not in access_target.PLAIN_MOTION_PHRASES
+        assert not access_target.is_plain_motion_command(phrase, None) and not access_target.is_plain_motion_command(f"{phrase} in beta", None)
+    assert set(access_target.PLAIN_MOTION_PHRASES) | access_target.AMBIGUOUS_MOTION_PHRASES == set(access_target.MOTION_CONTROL_PATTERNS)
+
+
+@pytest.mark.parametrize("query", ["resume motion", "disable motion in the nowhere"])
+def test_a_bare_or_unknown_room_form_that_is_not_a_grammar_match_is_not_special_cased(monkeypatch, query):
+    plain = access_target.is_plain_motion_command(query, None)
+    assert plain is (query == "resume motion")
+
+
+GRAMMAR_POSITIVES = [
+    "resume motion in beta", "please resume motion in beta", "resume motion in beta please", "pause motion in alpha",
+    "disable motion in the office", "turn motion back on in beta", "enable motion in alpha", "resume motion", "disable motion",
+    "pause motion", "turn motion back on", "leave the lights on in beta", "keep the lights off in the office for an hour",
+    "leave the lights on in beta for 20 minutes", "Resume motion in Beta.",
+    "turn off motion in alpha", "reset motion in beta",
+]
+
+
+@pytest.mark.parametrize("query", GRAMMAR_POSITIVES)
+def test_every_grammar_positive_reaches_the_policy_script_through_classify_then_route(house, query):
+    sensor = AsyncMock(return_value="SENSOR-ANSWER")
+    house.chat.rig.controller._handle_sensor_intent = sensor
+    assert house.chat.rig.controller.is_plain_motion_command(query), query
+    reply = intent("beta", "enable_motion") if ("resume" in query.lower() or "back on" in query.lower() or "enable" in query.lower() or "reset" in query.lower()) else intent("beta")
+    classified, routed = classify_then_route(house, query, reply)
+    assert classified.intent.value == "control" and (classified.entities or {}).get("device_type") != "sensor", (query, classified.entities)
+    sensor.assert_not_awaited()
+    assert "motion" in house.llm.consulted and house.ha.calls, (query, house.llm.consulted, routed.answer)
+
+
+def test_the_cached_sensor_override_is_the_grammar_too(house):
+    from orchestrator.nodes.route_control import route_control_node
+    from orchestrator.state import IntentCategory
+    for query, overridden in (("resume motion in beta", True), ("motion on in beta", False), ("please, is motion on in beta", False)):
+        sensor = AsyncMock(return_value="SENSOR-ANSWER")
+        house.chat.rig.controller._handle_sensor_intent = sensor
+        house.llm.motion_reply = intent("beta", "enable_motion")
+        house.llm.consulted.clear()
+        state = house.chat.state(query)
+        state.entities = {"device": "sensor", "device_type": "sensor"}
+        state.intent = IntentCategory.CONTROL
+        with house.chat.patched():
+            asyncio.run(route_control_node(state))
+        assert (not sensor.await_count) is overridden, query
