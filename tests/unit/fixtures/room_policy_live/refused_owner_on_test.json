@@ -1,0 +1,18 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "hold_on",
+      "set_by": "voice",
+      "caller_role": "owner",
+      "apply_now": false
+    }
+  },
+  "accepted": false,
+  "response": {
+    "ok": false,
+    "reason": "the test area needs caller_role test, and test is only for the test area"
+  },
+  "body": null
+}

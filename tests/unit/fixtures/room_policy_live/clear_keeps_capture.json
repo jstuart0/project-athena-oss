@@ -1,0 +1,20 @@
+{
+  "request": {
+    "script": "room_policy_clear",
+    "fields": {
+      "area": "den",
+      "caller_role": "test"
+    }
+  },
+  "accepted": true,
+  "response": {
+    "area": "den",
+    "policy": "brightness",
+    "brightness_hold": 37,
+    "until": "",
+    "until_spoken": "",
+    "set_by": "",
+    "stale": true
+  },
+  "body": null
+}

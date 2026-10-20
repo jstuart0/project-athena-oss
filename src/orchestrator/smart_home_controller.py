@@ -2008,8 +2008,10 @@ class SmartHomeController:
         }
         for typo, correction in typo_corrections.items():
             if typo in query_lower:
-                query_lower = query_lower.replace(typo, correction)
-                logger.info(f"Typo corrected: '{typo}' → '{correction}' in query")
+                fixed = access_target.correct_typo(query_lower, typo, correction)
+                if fixed != query_lower:
+                    query_lower = fixed
+                    logger.info(f"Typo corrected: '{typo}' → '{correction}' in query")
 
         # FAST PATH: Simple turn on/off commands without color
         # Skip LLM for basic commands like "turn on the lights" to reduce latency

@@ -375,6 +375,32 @@ MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
     "don't change brightness",
 )
 
+# Typo corrections that are about a stray letter inside a short word ("onn",
+# "oon", "oof", "offf") apply to the whole word only: as a substring "onn" turned
+# "gonna" into "gona" and so broke "gonna nap".
+WHOLE_WORD_TYPOS: FrozenSet[str] = frozenset({"onn", "oon", "oof", "offf"})
+
+
+def correct_typo(text: str, typo: str, correction: str) -> str:
+    """``text`` with ``typo`` replaced by ``correction``: everywhere, or as a
+    whole word for the typos in ``WHOLE_WORD_TYPOS``."""
+    if typo in WHOLE_WORD_TYPOS:
+        return re.sub(rf"\b{re.escape(typo)}\b", correction, text)
+    return text.replace(typo, correction)
+
+
+# A motion condition ("when there's motion in the hall, ...") sets up an
+# automation; "disable motion in the garage" is a motion-flow control and "is
+# there motion" a question. Only a condition word before the motion word counts.
+_MOTION_TRIGGER_RE = re.compile(
+    r"\b(?:when|whenever|if|once|as soon as|any ?time)\b[^.;!?]{0,40}?\b(?:motion|movement)\b"
+)
+
+
+def is_motion_trigger_form(query: str) -> bool:
+    return bool(_MOTION_TRIGGER_RE.search((query or "").lower()))
+
+
 # "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
 _NUMBER_OR_ARTICLE = (
     r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
@@ -383,8 +409,18 @@ _HOLD_DURATION = (
     rf"(?:about |around )?(?:half an? |(?:{_NUMBER_OR_ARTICLE}) )(?:seconds?|minutes?|mins?|hours?|hrs?)"
 )
 
+# Phrases that are as likely a statement of what is set ("motion on in beta",
+# "no motion in the hall") or a sensor question as a command. They stay motion
+# patterns for the handler, but they never get the pre-cache control route.
+AMBIGUOUS_MOTION_PHRASES: FrozenSet[str] = frozenset({
+    "no motion", "motion on", "motion off", "motion detection on", "normal motion",
+})
+PLAIN_MOTION_PHRASES: Tuple[str, ...] = tuple(sorted(
+    (p for p in MOTION_CONTROL_PATTERNS if p not in AMBIGUOUS_MOTION_PHRASES), key=len, reverse=True,
+))
+
 _PLAIN_MOTION_COMMAND = re.compile(
-    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in sorted(MOTION_CONTROL_PATTERNS, key=len, reverse=True)) + r")"
+    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in PLAIN_MOTION_PHRASES) + r")"
     r"(?: in (?:the )?(?P<room>(?!please\b|for\b)[a-z0-9]+(?: (?!please\b|for\b)[a-z0-9]+){0,3}))?"
     rf"(?: for (?P<duration>{_HOLD_DURATION}))?"
     r"(?: please)?",

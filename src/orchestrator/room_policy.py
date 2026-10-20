@@ -430,12 +430,22 @@ def _response_problem(req: PolicyRequest, response: Mapping[str, Any]) -> Option
         return "until"
     if not isinstance(response["until_spoken"], str):
         return "until_spoken"
-    if req.kind != "good_night" and not (
-        isinstance(response["policy"], str) and isinstance(response["set_by"], str)
-        and isinstance(response["brightness_hold"], bool) and isinstance(response["stale"], bool)
-    ):
-        return "policy, set_by, brightness_hold or stale"
+    if req.kind != "good_night":
+        if not isinstance(response["policy"], str):
+            return "policy"
+        if not isinstance(response["set_by"], str):
+            return "set_by"
+        if not _valid_brightness_hold(response["brightness_hold"]):
+            return "brightness_hold"
+        if not isinstance(response["stale"], bool):
+            return "stale"
     return None
+
+
+def _valid_brightness_hold(value: Any) -> bool:
+    """The held brightness the engine reports: null when there is none, else a
+    whole percentage. A bool is an int in Python and is not a brightness."""
+    return value is None or (type(value) is int and 1 <= value <= 100)
 
 
 def _refused(reason: Reason, speech: str) -> PolicyOutcome:
@@ -486,7 +496,7 @@ async def apply(
     except httpx.HTTPStatusError as exc:
         failure = _script_refused(script, exc)
     except HAResponseShapeError:
-        logger.warning("room_policy_bad_response", script=script)
+        logger.warning("room_policy_bad_response", script=script, problem="no_service_response")
         failure = _refused("bad_response", _UNCONFIRMED)
     except (httpx.HTTPError, HomeAssistantNotConfiguredError) as exc:
         logger.warning("room_policy_ha_unavailable", script=script, error_class=type(exc).__name__)
@@ -497,8 +507,13 @@ async def apply(
     if declined is not None:
         logger.warning("room_policy_script_refused", script=script, status=200)
         return _refused("script_refused", declined)
-    if not isinstance(response, Mapping) or "ok" in response or _response_problem(req, response):
-        logger.warning("room_policy_bad_response", script=script)
+    problem = (
+        "not_an_object" if not isinstance(response, Mapping)
+        else "ok_key" if "ok" in response
+        else _response_problem(req, response)
+    )
+    if problem:
+        logger.warning("room_policy_bad_response", script=script, problem=problem)
         return _refused("bad_response", _UNCONFIRMED)
     logger.info("room_policy_applied", script=script, kind=req.kind)
     return PolicyOutcome(ok=True, speech=_speech(req, response), response=response)
@@ -513,7 +528,7 @@ SELFTEST_LINE = "room_policy selftest boundary={boundary} router={router} extras
 _SELFTEST_ROOM = "selftest_den"
 _SELFTEST_OTHER = "selftest_attic"
 _SELFTEST_RESPONSE = {
-    "area": _SELFTEST_ROOM, "policy": "hold_on", "brightness_hold": False, "until": "", "until_spoken": "",
+    "area": _SELFTEST_ROOM, "policy": "hold_on", "brightness_hold": None, "until": "", "until_spoken": "",
     "set_by": SET_BY, "stale": False,
 }
 _PROTECTED_HELPER = f"input_boolean.{_SELFTEST_ROOM}_leave_lights_on"

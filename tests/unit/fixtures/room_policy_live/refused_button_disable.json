@@ -1,0 +1,18 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "disable",
+      "set_by": "button",
+      "caller_role": "button",
+      "apply_now": false
+    }
+  },
+  "accepted": false,
+  "response": {
+    "ok": false,
+    "reason": "the test area needs caller_role test, and test is only for the test area"
+  },
+  "body": null
+}

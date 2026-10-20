@@ -35,7 +35,7 @@ GUEST = {"mode": "guest"}
 RESTRICTED = {"mode": "owner_restricted", "restricted_entities": [r".*_leave_lights_on$"], "allowed_domains": []}
 WRITES = [f"input_boolean.{DEN}_leave_lights_on", f"input_boolean.{DEN}_motion_disable"]
 FIELDS = {"area": DEN, "caller_role": "owner", "kind": "hold_on", "set_by": "voice", "apply_now": False}
-RESPONSE = {"area": DEN, "policy": "hold_on", "brightness_hold": False, "until": "", "until_spoken": "",
+RESPONSE = {"area": DEN, "policy": "hold_on", "brightness_hold": None, "until": "", "until_spoken": "",
             "set_by": "voice", "stale": False}
 
 

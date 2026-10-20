@@ -1,0 +1,19 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "hold_off",
+      "set_by": "voice",
+      "caller_role": "test",
+      "apply_now": false,
+      "duration_minutes": 481
+    }
+  },
+  "accepted": false,
+  "response": {
+    "ok": false,
+    "reason": "duration_minutes is out of range for this kind (a guest hold_off max 120, others max 480)"
+  },
+  "body": null
+}

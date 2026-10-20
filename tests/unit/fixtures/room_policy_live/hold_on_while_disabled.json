@@ -1,0 +1,23 @@
+{
+  "request": {
+    "script": "room_policy_set",
+    "fields": {
+      "area": "den",
+      "kind": "hold_on",
+      "set_by": "voice",
+      "caller_role": "test",
+      "apply_now": false
+    }
+  },
+  "accepted": true,
+  "response": {
+    "area": "den",
+    "policy": "disabled",
+    "brightness_hold": null,
+    "until": "2026-10-19T18:05:35-04:00",
+    "until_spoken": "6:05 PM",
+    "set_by": "janitor",
+    "stale": true
+  },
+  "body": null
+}

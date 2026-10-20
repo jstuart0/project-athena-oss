@@ -46,7 +46,7 @@ from shared import ha_auth, ha_link, household
 from shared.ha_credentials import HACredentialResolver, admin_http_source
 from shared.ha_http import HAChannel
 from shared.ha_registry import create_registry
-from orchestrator import identity_answer, light_effects, room_choice, room_context, room_policy
+from orchestrator import access_target, identity_answer, light_effects, room_choice, room_context, room_policy
 from orchestrator.entity_repair import repair_for_routing
 from orchestrator.intent_arbitration import arbitrate_intent, is_team_contest_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -2414,8 +2414,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     corrected = False
     for typo, correction in typo_corrections.items():
         if typo in query_lower:
-            query_lower = query_lower.replace(typo, correction)
-            corrected = True
+            fixed = access_target.correct_typo(query_lower, typo, correction)
+            corrected = corrected or fixed != query_lower
+            query_lower = fixed
     if corrected:
         original_for_log = state.query
         state.query = query_lower
@@ -2812,6 +2813,22 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     effect_request = _light_effect_request(state.query)
     if effect_request is not None:
         logger.info("light_effect_route", query_len=len(state.query), clear=effect_request.clear)
+        state.intent = IntentCategory.CONTROL
+        state.confidence = 0.9
+        state.complexity = determine_complexity(state.query, "control", log_features=False)
+        state.node_timings["classify"] = time.time() - start
+        return state
+
+    # DETERMINISTIC ROUTE: a plainly said motion-flow command ("resume motion in
+    # beta", "leave the lights on") is a control command, and not a music pause
+    # or a sensor question because it holds "resume", "pause" or "motion". Only
+    # the exact grammar of ``access_target.is_plain_motion_command`` counts; a
+    # question, a title, a complaint or a fragment takes the paths below, as it
+    # always did. Like the light effect above it sits before the intent-cache
+    # read, so a classification cached for the same words cannot send it
+    # elsewhere, and it does not touch that cache.
+    if access_target.is_plain_motion_command(state.query, current_directory()):
+        logger.info("motion_flow_route", query_len=len(state.query))
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.9
         state.complexity = determine_complexity(state.query, "control", log_features=False)
