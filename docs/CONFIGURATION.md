@@ -1195,7 +1195,7 @@ the scripts instead; see [ROOM_POLICY.md](ROOM_POLICY.md).
 comma-separated `slug=spoken name` pairs such as `den=the den,kids_room=the
 kids' room`. A room not listed is spoken as "that room". Names use letters,
 digits, spaces, apostrophes and hyphens, up to 40 characters; a pair outside
-that is ignored.
+that is ignored, and so is a slug that is set twice (a warning names the slug).
 
 **Owner PIN.** Set in the admin UI's Guest Mode page, which has a dedicated
 Owner PIN section (6-digit input, confirmation input, client-side format

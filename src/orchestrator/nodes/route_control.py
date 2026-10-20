@@ -95,26 +95,17 @@ def _is_motion_flow_command(query: str) -> bool:
     return any(p in lower for p in access_target.MOTION_CONTROL_PATTERNS) and not is_motion_trigger_form(lower)
 
 
-# "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
-_NUMBER_OR_ARTICLE = (
-    r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
-)
-_HOLD_DURATION_RE = re.compile(
-    rf"\bfor\s+(?:about\s+|around\s+)?(?:half\s+an?\s+|(?:{_NUMBER_OR_ARTICLE})\s+)(?:seconds?|minutes?|mins?|hours?|hrs?)\b"
-)
-
-
 def _is_timed_motion_hold(smart_controller: Any, query: str) -> bool:
-    """"leave the lights on in beta for 20 minutes": a motion-flow command whose
-    only timing is its duration. The motion handler takes the duration (and
-    clamps it); the sequence detector would read it as a timed light sequence.
-    Only a plainly said command counts (the controller's own test: no motion
-    condition, no negation, no question, no second command, no exclusion
-    wording), so "... for 20 minutes but turn off alpha" stays a sequence. Any
-    other timing (a clock time, "then", a repeat) keeps it a sequence too."""
-    if not smart_controller.is_plain_motion_command(query.lower()):
-        return False
-    return not smart_controller.detect_sequence_intent(_HOLD_DURATION_RE.sub(" ", query.lower()))
+    """"leave the lights on in beta for 20 minutes": a motion-flow command in the
+    plain grammar (``access_target.is_plain_motion_command``), whose only timing
+    is its duration. The motion handler takes the duration (and clamps it); the
+    sequence detector would read it as a timed light sequence. Anything outside
+    the grammar stays on the sequence path."""
+    return _is_plain_motion(smart_controller, query)
+
+
+def _is_plain_motion(smart_controller: Any, query: str) -> bool:
+    return smart_controller.is_plain_motion_command(query) is True
 
 
 CONDITIONAL_COMMAND_TEXT = (
@@ -1505,7 +1496,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 else:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
-                    intent = await smart_controller.extract_intent(cmd, device_room=state.room, utterance=uk)
+                    plain_motion = {"plain_motion_command": True} if _is_plain_motion(smart_controller, extraction_query) else {}
+                    intent = await smart_controller.extract_intent(cmd, device_room=state.room, utterance=uk, **plain_motion)
                     if _answer_unprocessable(state, intent):
                         state.node_timings["route_control"] = time.time() - start
                         return state

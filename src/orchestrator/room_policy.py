@@ -31,9 +31,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import logging
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AbstractSet, Any, Awaitable, Callable, Dict, FrozenSet, List, Literal, Mapping, Optional, Sequence, Tuple
@@ -270,14 +272,23 @@ _ROOM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 '\-]{0,39}", re.ASCII)
 
 
 def configured_room_names() -> Dict[str, str]:
-    """The valid ``slug=spoken name`` pairs of HA_POLICY_ROOM_NAMES."""
-    names: Dict[str, str] = {}
-    for pair in (get_config().ha_policy_room_names or "").split(","):
+    """The valid ``slug=spoken name`` pairs of HA_POLICY_ROOM_NAMES. A slug set
+    twice is ignored altogether: which name was meant is not known."""
+    return dict(_parse_room_names(get_config().ha_policy_room_names or ""))
+
+
+@functools.lru_cache(maxsize=8)
+def _parse_room_names(raw: str) -> Tuple[Tuple[str, str], ...]:
+    pairs = []
+    for pair in raw.split(","):
         slug, _, name = pair.partition("=")
         slug, name = slug.strip(), name.strip()
-        if _ROOM_SLUG.fullmatch(slug) and _ROOM_NAME.fullmatch(name):
-            names[slug] = name
-    return names
+        if _ROOM_SLUG.fullmatch(slug):
+            pairs.append((slug, name))
+    counts = Counter(slug for slug, _ in pairs)
+    for slug in sorted(s for s, n in counts.items() if n > 1):
+        logger.warning("room_policy_room_names_duplicate_slug", slug=slug)
+    return tuple((slug, name) for slug, name in pairs if counts[slug] == 1 and _ROOM_NAME.fullmatch(name))
 
 
 def spoken_name(slug: str) -> str:

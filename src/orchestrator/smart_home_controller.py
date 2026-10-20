@@ -1948,7 +1948,8 @@ class SmartHomeController:
     async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
                               prev_query: str = None, prev_response: str = None,
                               prev_intent_entities: Dict = None,
-                              utterance: Optional[UtteranceClassification] = None) -> Dict:
+                              utterance: Optional[UtteranceClassification] = None,
+                              plain_motion_command: bool = False) -> Dict:
         """Use LLM to extract structured intent from natural language query
 
         Args:
@@ -1962,6 +1963,12 @@ class SmartHomeController:
                 route_control_node always passes this. When None (no
                 non-route_control caller exists today), classified locally
                 so the 3.3(b)/(c) guarantees still hold standalone.
+            plain_motion_command: the caller found the user's whole utterance
+                to be a plainly said motion-flow command
+                (``is_plain_motion_command``). ``query`` can be only the
+                command clause of it, so the grammar is applied to the
+                utterance by the caller and not here; the clause must be
+                plain too. Only then does the exclusion deferral not apply.
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -2017,7 +2024,7 @@ class SmartHomeController:
             is_turn_on = True
         has_color = any(c in query_lower for c in HAS_COLOR_WORDS)
 
-        if not self._defers_to_model(query_lower) or self.is_plain_motion_command(query_lower):
+        if not self._defers_to_model(query_lower) or (plain_motion_command and self.is_plain_motion_command(query)):
             fast_intent = await self._fast_path_intent(
                 query, query_lower, device_room, is_turn_on, is_turn_off, has_color, utterance)
             if fast_intent is not None:
@@ -2507,19 +2514,12 @@ Return ONLY valid JSON."""
     _EVERYTHING_BUT_RE = re.compile(r'(everything|all\s+(the\s+)?lights?)\s+but\s+')
 
     def is_plain_motion_command(self, query: str) -> bool:
-        """A plainly said motion-flow command ("leave the lights on in beta")
-        that the deferral guard may let through. "leave" and "keep" are
+        """The whole utterance is a plainly said motion-flow command
+        (``access_target.is_plain_motion_command``). "leave" and "keep" are
         deferral words only because they can carry an exclusion ("leave the
-        porch on"); here they are part of the command. So the motion phrase is
-        taken out and the full deferral check runs on what is left: "in beta"
-        passes, "in beta without the galley" still defers. A motion condition
-        ("when there's motion, ..."), a negated phrase and a second command
-        after a conjunction never pass."""
-        from .automation_agent import is_motion_trigger_form
-        if is_motion_trigger_form(query):
-            return False
-        remainder = access_target.plain_motion_command_remainder(query)
-        return remainder is not None and not self._defers_to_model(remainder)
+        porch on"); in this exact grammar they are part of the command, so the
+        deferral guard does not apply. Anything else takes the old path."""
+        return access_target.is_plain_motion_command(query, self._directory())
 
     def _defers_to_model(self, query: str) -> bool:
         """True when no fast path may answer: the wording holds an exclusion

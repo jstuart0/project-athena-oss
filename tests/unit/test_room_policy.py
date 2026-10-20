@@ -1107,13 +1107,14 @@ class RoutedHouse(PolicyChat):
         super().__init__(monkeypatch)
         raw = self.chat.raw_registry
         cache = self.chat.rig.manager._entities_cache
-        for slug, name in (("beta", "Beta"), ("alpha", "Alpha"), ("office", "Office")):
+        for slug, name in (("beta", "Beta"), ("alpha", "Alpha"), ("office", "Office"), ("nursery", "Nursery")):
             raw["areas"].append({"area_id": f"area_{slug}", "name": name, "aliases": []})
             for i in range(2):
                 eid = f"light.{slug}_lamp_{i}"
                 raw["entities"].append(rch._reg(eid, area=f"area_{slug}"))
                 cache[eid] = rch._state(eid)
-            cache.update(policy_states(slug, f"area_{slug}"))
+            if slug != "nursery":
+                cache.update(policy_states(slug, f"area_{slug}"))
         self.chat.rig.registry._snapshot = hr.RegistrySnapshot.from_raw(raw, fetched_at=2.0)
         self.chat.rig.manager._build_indexes()
         self.llm = RoutingLLM()
@@ -1230,24 +1231,76 @@ def test_each_deferral_word_still_defers_after_a_motion_phrase(house, word):
     assert house.ha.calls == [], query
 
 
-def test_the_remainder_is_what_the_deferral_check_sees():
-    assert access_target.plain_motion_command_remainder("Leave the lights on in Beta for 20 minutes") == "in beta for 20 minutes"
-    assert access_target.plain_motion_command_remainder("what time is it") is None
+PLAIN = [
+    "leave the lights on in beta", "Leave the lights on in Beta.", "please leave the lights on in beta",
+    "leave the lights on in beta please", "please leave the lights on in beta for 20 minutes please",
+    "leave the lights on in beta for 20 minutes", "leave the lights on in the beta for an hour", "keep the lights on in alpha",
+    "keep the lights off in alpha for 3 hours", "resume motion in beta", "leave the lights off in the office for an hour",
+    "leave the lights on for half an hour", "leave the lights on", "don't turn off the lights in beta", "  leave   the lights\ton in   beta  ",
+    "leave the lights on in beta for about 20 minutes", "disable motion in the nursery",
+]
+NOT_PLAIN = [
+    # codex r5
+    "don't. leave the lights on in beta", "leave the lights on in beta; turn off alpha", "leave the lights on in beta for 20 minutes; turn off alpha",
+    "can you leave the lights on in beta", "leave the lights on in beta?", "leave the lights on in beta please and also the office",
+    "leave the lights only in beta",
+    # punctuation and fragments
+    "leave the lights on in beta, please", "leave the lights on in beta!", "leave the lights on: in beta", "leave the lights on in beta..",
+    "leave the lights on in beta. turn off alpha", "leave the lights on, in beta", "-leave the lights on in beta", "leave the lights on in beta -",
+    "uh leave the lights on in beta", "leave the lights on in beta uh", "the leave the lights on in beta", "leave the lights on in",
+    "leave the lights on in beta for", "leave the lights on in beta for 20", "leave the lights on in beta for twenty-five minutes",
+    # questions
+    "should I leave the lights on in beta", "why leave the lights on in beta", "could you leave the lights on in beta",
+    "do you leave the lights on in beta", "will you leave the lights on in beta",
+    # rooms
+    "leave the lights on in beta and alpha", "leave the lights on in beta or alpha", "leave the lights on in beta alpha", "leave the lights on in nowhere",
+    "leave the lights on in all the rooms", "leave the lights on in beta office", "leave the lights on in the", "leave the lights on in everywhere",
+    # negation anywhere
+    "don't leave the lights on in beta", "do not leave the lights on in beta", "never leave the lights on in beta", "leave the lights on in beta not",
+    "not leave the lights on in beta", "leave the lights on in beta, don't", "stop leave the lights on in beta",
+    # trailing and leading clauses
+    "leave the lights on in beta except alpha", "leave the lights on in beta but not alpha", "leave the lights on in beta without alpha",
+    "leave the lights on in beta and turn off alpha", "leave the lights on in beta then turn off alpha", "leave the lights on in beta also",
+    "leave the lights on in beta only", "leave the lights on in beta until 9 pm", "leave the lights on in beta at 9 pm",
+    "when there is motion leave the lights on in beta", "if there is motion leave the lights on in beta", "turn on the lights and leave the lights on in beta",
+    "leave the lights on in beta for 20 minutes then turn them off", "leave the lights on in beta for 20 minutes and",
+    "leave the lights on in beta for 20 minutes in alpha", "leave the lights on for 20 minutes in beta", "leave the lights on in beta in alpha",
+    # tokens and spelling
+    "leave the lights onn in beta", "xleave the lights on in beta", "leave the lights on in betax", "leave the lightson in beta",
+    "leave the lights on in beta for 20 minutes\nturn off alpha", "leave the lights on in beta\u200b", "leave the lights on in beta \u2014 turn off alpha",
+    "please please leave the lights on in beta", "leave the lights on in beta please please", "please leave the lights on in beta for 20 minutes please please",
+    "leave the lights on in beta for 20 minutes for 20 minutes", "leave the lights on in beta 20 minutes", "leave the lights on in and beta",
+    "leave the lights on in or the beta", "leave the lights on in the the beta", "leave the lights on in beta for 20 minutes please for 5 minutes",
+    "", "   ", ".",
+]
 
 
-@pytest.mark.parametrize("query,plain", [
-    ("leave the lights on in beta", True),
-    ("don't turn off the lights in beta", True),
-    ("don't leave the lights on in beta", False),
-    ("don't ever really leave the lights on in beta", False),
-    ("leave the lights on in beta but turn off alpha", False),
-    ("leave the lights on in beta, then turn off alpha", False),
-    ("leave the lights on in beta and also dim the hall", False),
-    ("should I leave the lights on in beta", False),
-    ("why do you leave the lights on in beta", False),
-])
-def test_the_plain_motion_command_helper(query, plain):
-    assert (access_target.plain_motion_command_remainder(query) is not None) == plain, query
+@pytest.mark.parametrize("query", PLAIN)
+def test_the_plain_grammar_accepts_a_plainly_said_motion_command(house, query):
+    assert house.chat.rig.controller.is_plain_motion_command(query), query
+
+
+@pytest.mark.parametrize("query", NOT_PLAIN)
+def test_the_plain_grammar_rejects_everything_else(house, query):
+    assert not house.chat.rig.controller.is_plain_motion_command(query), query
+
+
+def test_the_grammar_is_a_full_match_with_no_substring_search():
+    source = inspect.getsource(access_target.is_plain_motion_command)
+    assert ".fullmatch(" in source and ".search(" not in source and ".match(" not in source
+
+
+def test_the_grammar_phrases_are_the_motion_patterns_whole():
+    for phrase in access_target.MOTION_CONTROL_PATTERNS:
+        assert access_target._PLAIN_MOTION_COMMAND.fullmatch(phrase), phrase
+        assert not access_target._PLAIN_MOTION_COMMAND.fullmatch(phrase + "x"), phrase
+        assert not access_target._PLAIN_MOTION_COMMAND.fullmatch("x" + phrase), phrase
+
+
+def test_the_grammar_carries_no_exclusion_vocabulary_of_its_own():
+    source = inspect.getsource(access_target.is_plain_motion_command) + inspect.getsource(access_target._normalized_utterance)
+    for word in ("except", "unless", "without", "but not", "besides"):
+        assert word not in source
 
 
 @pytest.mark.parametrize("query", [
@@ -1314,3 +1367,75 @@ def test_a_legacy_room_missing_a_helper_is_named_from_the_closed_set_not_the_are
     out = house.route("leave the lights on in the nursery for 2 hours", intent("nursery", duration_minutes=120))
     assert out.answer == "Motion control in that room isn't fully set up for that. Some of its Home Assistant helpers are missing.", out.answer
     assert house.legacy == [] and house.ha.calls == []
+
+
+CODEX_R5_PROBES = [
+    "don't. leave the lights on in beta", "leave the lights on in beta; turn off alpha",
+    "leave the lights on in beta for 20 minutes; turn off alpha", "can you leave the lights on in beta",
+    "leave the lights on in beta?", "leave the lights on in beta please and also the office", "leave the lights only in beta",
+]
+
+
+@pytest.mark.parametrize("query", CODEX_R5_PROBES)
+def test_every_codex_r5_probe_takes_the_old_path(house, query):
+    out = house.route(query, intent("beta", duration_minutes=20))
+    assert "motion" not in house.llm.consulted, (query, house.llm.consulted, out.answer)
+    assert house.ha.calls == [], query
+
+
+@pytest.mark.parametrize("query", [q for q in NOT_PLAIN if " for " in q and "minutes" in q or q.endswith("?")])
+def test_the_sequence_detector_is_only_stopped_for_the_grammar(house, query):
+    house.route(query, intent("beta", duration_minutes=20))
+    assert "motion" not in house.llm.consulted and house.ha.calls == [], (query, house.llm.consulted)
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_route_control_stops_the_sequence_detector_exactly_when_the_controller_says_plain(plain):
+    from orchestrator.nodes import route_control as rc
+
+    class Controller:
+        def is_plain_motion_command(self, query):
+            return plain
+
+    assert rc._is_timed_motion_hold(Controller(), "anything") is plain
+
+
+def test_only_a_true_answer_from_the_controller_counts_as_plain():
+    from unittest.mock import MagicMock
+    from orchestrator.nodes import route_control as rc
+    assert rc._is_timed_motion_hold(MagicMock(), "anything") is False
+
+
+def test_a_slug_set_twice_is_ignored_and_warned_without_its_value(monkeypatch):
+    seen = []
+    monkeypatch.setattr(rp.logger, "warning", lambda event, **kw: seen.append((event, kw)))
+    rp._parse_room_names.cache_clear()
+    monkeypatch.setenv("HA_POLICY_ROOM_NAMES", "den=the den,beta=Beta,den=a different den,office=the office,office=<bad>")
+    shared.config._clear_cache_for_tests()
+    assert rp.configured_room_names() == {"beta": "Beta"}
+    assert rp.spoken_name("den") == "that room" and rp.spoken_name("office") == "that room"
+    assert seen == [("room_policy_room_names_duplicate_slug", {"slug": "den"}), ("room_policy_room_names_duplicate_slug", {"slug": "office"})]
+    assert all("different den" not in str(entry) and "the den" not in str(entry) for entry in seen)
+    rp.configured_room_names()
+    assert len(seen) == 2, "one warning per configuration, not one per spoken reply"
+    rp._parse_room_names.cache_clear()
+
+
+def test_a_slug_set_twice_in_different_case_or_spacing_is_still_a_duplicate(monkeypatch):
+    rp._parse_room_names.cache_clear()
+    monkeypatch.setenv("HA_POLICY_ROOM_NAMES", "den=the den, den =the den")
+    shared.config._clear_cache_for_tests()
+    assert rp.configured_room_names() == {}
+    rp._parse_room_names.cache_clear()
+
+
+def test_extract_intent_rechecks_the_clause_it_was_vouched_for(house):
+    """The caller vouches for the utterance; the clause it extracts from must match too."""
+    import asyncio as _asyncio
+    controller = house.chat.rig.controller
+    house.llm.consulted.clear()
+    _asyncio.run(controller.extract_intent("leave the lights on in beta; turn off alpha", plain_motion_command=True))
+    assert "motion" not in house.llm.consulted, house.llm.consulted
+    house.llm.consulted.clear()
+    _asyncio.run(controller.extract_intent("leave the lights on in beta", plain_motion_command=False))
+    assert "motion" not in house.llm.consulted, "an unvouched plain clause takes the old path"

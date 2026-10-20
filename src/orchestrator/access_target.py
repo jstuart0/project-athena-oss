@@ -375,40 +375,48 @@ MOTION_CONTROL_PATTERNS: Tuple[str, ...] = (
     "don't change brightness",
 )
 
-_NEGATOR_BEFORE_PHRASE = re.compile(r"(?:^|\s)(?:don't|dont|do not|never|not|stop)\b[,;:]?(?:\s+\S+){0,2}\s*$")
-# "should I leave the lights on": a question about doing it, not the command.
-_ASKING_BEFORE_PHRASE = re.compile(
-    r"\b(?:should|shall)\s+(?:i|we)\b|\b(?:do|does)\s+(?:i|we|it)\b|\bwhether\b|\bwhat\s+if\b|\bwhy\b|\bhow\s+(?:do|can|should)\b"
+# "for 20 minutes", "for an hour", "for half an hour": the duration of a hold.
+_NUMBER_OR_ARTICLE = (
+    r"\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[- ]five|sixty|few|couple of"
 )
-_SECOND_COMMAND_AFTER_PHRASE = re.compile(
-    r"(?:,|\band\b|\bthen\b|\balso\b|\bplus\b)\s*(?:please\s+)?"
-    r"(?:turn|switch|set|dim|brighten|lock|unlock|close|open|play|start|stop|shut|kill|make|raise|lower)\b",
+_HOLD_DURATION = (
+    rf"(?:about |around )?(?:half an? |(?:{_NUMBER_OR_ARTICLE}) )(?:seconds?|minutes?|mins?|hours?|hrs?)"
 )
 
+_PLAIN_MOTION_COMMAND = re.compile(
+    r"(?:please )?(?P<phrase>" + "|".join(re.escape(p) for p in sorted(MOTION_CONTROL_PATTERNS, key=len, reverse=True)) + r")"
+    r"(?: in (?:the )?(?P<room>(?!please\b|for\b)[a-z0-9]+(?: (?!please\b|for\b)[a-z0-9]+){0,3}))?"
+    rf"(?: for (?P<duration>{_HOLD_DURATION}))?"
+    r"(?: please)?",
+)
 
-def plain_motion_command_remainder(query: str) -> Optional[str]:
-    """For a motion-flow command ("leave the lights on in beta for 20 minutes")
-    said plainly, the query with the matched motion phrase taken out ("in beta
-    for 20 minutes"); else None.
 
-    Not plain: no motion phrase; the phrase negated within three words before
-    it ("don't leave the lights on"; a phrase's own "don't turn off the lights"
-    starts the phrase, so it is not before it); a question about it ("should I leave the lights on"); or a second command after a conjunction ("... and turn off the
-    hall") or an exclusion phrase ("... but turn off alpha"), which a
-    one-intent handler would drop."""
-    lower = query.lower()
-    hits = [(lower.find(p), -len(p), p) for p in MOTION_CONTROL_PATTERNS if p in lower]
-    if not hits:
-        return None
-    start, _, phrase = min(hits)
-    end = start + len(phrase)
-    if _NEGATOR_BEFORE_PHRASE.search(lower[:start]):
-        return None
-    if _ASKING_BEFORE_PHRASE.search(lower[:start]):
-        return None
-    if _SECOND_COMMAND_AFTER_PHRASE.search(lower[end:]) or room_context.has_exclusion(lower):
-        return None
-    return f"{lower[:start]} {lower[end:]}".strip()
+def _normalized_utterance(query: str) -> str:
+    text = " ".join((query or "").lower().split())
+    return text[:-1] if text.endswith(".") else text
+
+
+def is_plain_motion_command(query: str, directory: Optional[room_context.RoomDirectory]) -> bool:
+    """True only when the whole utterance is exactly
+
+        [please ]<motion phrase>[ in [the ]<room>][ for <duration>][ please]
+
+    (lowercased, whitespace collapsed, one trailing period dropped). It is an
+    allowlist: any other word, any punctuation, a second room, a question, a
+    negator, a conjunction or a stray "only" fails the full match, and the
+    query takes the path it always took. The room, when named, must be one
+    room the room parser resolves exactly."""
+    match = _PLAIN_MOTION_COMMAND.fullmatch(_normalized_utterance(query))
+    if match is None:
+        return False
+    room = match.group("room")
+    if room is None:
+        return True
+    mentions = room_context.find_room_mentions(room, directory)
+    return (
+        len(mentions) == 1 and mentions[0].kind == "exact" and len(mentions[0].candidates) == 1
+        and mentions[0].start == 0 and mentions[0].end == len(room_context.tokens(room))
+    )
 
 
 IMPLICIT_BRIGHTER: Tuple[str, ...] = (

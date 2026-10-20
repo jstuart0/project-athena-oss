@@ -72,7 +72,8 @@ deployment's `HA_POLICY_ROOM_NAMES` (`slug=spoken name` pairs, for example
 `den=the den,kids_room=the kids' room`) and calls any other slug "that room";
 nothing is built in. A name must be letters, digits, spaces, apostrophes and
 hyphens, 40 characters at most, so configuration cannot bring free text back;
-a pair outside that is ignored. The label Home Assistant gives an area is never
+a pair outside that is ignored, and a slug that is set twice is ignored
+altogether (with a warning that names the slug, not the values). The label Home Assistant gives an area is never
 spoken by `room_policy` or by the motion handler's policy branch. Other
 controller replies still speak that label through `_spoken_room`
 (smart_home_controller.py: the light, status and sequence replies); that is a
@@ -211,3 +212,17 @@ prints `motion rooms`, `policy rooms`, `room_policy scripts` and
 `protected with area/device/label` counts (the last should be 0: an entity in
 an area can be reached by an area-wide call from the assistant), and with
 `--areas` one `policy <area key> -> <room>` line per mapped room.
+
+## When voice commands reach the motion handler
+
+A motion-flow command skips the exclusion deferral (and, when it names a
+duration, the sequence detector) only when the whole utterance is exactly
+
+    [please ]<motion phrase>[ in [the ]<room>][ for <duration>][ please]
+
+after lowercasing, collapsing whitespace and dropping one trailing period.
+`<motion phrase>` is one of `access_target.MOTION_CONTROL_PATTERNS`, `<room>` is
+one room the room parser resolves exactly, and `<duration>` is "20 minutes",
+"an hour", "half an hour" and the like. It is a full match, an allowlist: any
+other word or punctuation, a question, a negator, a conjunction, a second room
+or "only" takes the path it always took (`access_target.is_plain_motion_command`).
